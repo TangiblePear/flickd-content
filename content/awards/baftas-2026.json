@@ -9,7 +9,14 @@
     {
       "name": "Best Film",
       "kind": "MEDIA",
-      "nominees": []
+      "nominees": [
+        {
+          "tmdbId": 861,
+          "title": "Total Recall",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wVbeL6fkbTKSmNfalj4VoAUUqJv.jpg"
+        }
+      ]
     },
     {
       "name": "Outstanding British Film",
