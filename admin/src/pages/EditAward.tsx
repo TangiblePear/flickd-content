@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import TmdbSearch from "../components/TmdbSearch";
 import type { AwardSeason, Nominee } from "../types";
 
 export default function EditAward() {
   const { slug = "" } = useParams();
+  const navigate = useNavigate();
   const [season, setSeason] = useState<AwardSeason | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [banner, setBanner] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
   const [personDraft, setPersonDraft] = useState<Record<number, string>>({});
 
@@ -45,23 +47,72 @@ export default function EditAward() {
     }
   };
 
+  const remove = async () => {
+    if (!confirm(`Delete ${season.eventName} ${season.year}? This cannot be undone.`)) return;
+    setDeleting(true);
+    setBanner(null);
+    try {
+      await api.deleteSeason(slug);
+      navigate("/awards");
+    } catch (e) {
+      setBanner({ text: String(e), kind: "err" });
+      setDeleting(false);
+    }
+  };
+
+  const updateDate = (field: "startDate" | "endDate" | "ceremonyDate", value: string) => {
+    setSeason({ ...season, [field]: field === "ceremonyDate" ? (value || null) : value });
+  };
+
   return (
     <div>
       <div className="row between">
         <div>
           <h2 style={{ marginBottom: 4 }}>{season.eventName} {season.year}</h2>
-          <div className="banner" style={{ display: "inline-block", marginBottom: 16 }}>
-            {season.startDate} → {season.endDate} · ceremony {season.ceremonyDate ?? "—"}
-          </div>
         </div>
         <div className="row">
           <Link to={`/awards/${slug}/winners`}>
             <button className="ghost">Mark winners →</button>
           </Link>
-          <button onClick={save} disabled={saving}>{saving ? "saving…" : "Save & push"}</button>
+          <button onClick={save} disabled={saving || deleting}>{saving ? "saving…" : "Save & push"}</button>
+          <button className="danger" onClick={remove} disabled={saving || deleting}>
+            {deleting ? "deleting…" : "Delete"}
+          </button>
         </div>
       </div>
       {banner && <div className={`banner ${banner.kind}`}>{banner.text}</div>}
+
+      <div className="card">
+        <div className="row" style={{ gap: 24 }}>
+          <div style={{ flex: 1 }}>
+            <label>Nominations announced (startDate)</label>
+            <input
+              type="date"
+              value={season.startDate}
+              onChange={(e) => updateDate("startDate", e.target.value)}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label>Ceremony date</label>
+            <input
+              type="date"
+              value={season.ceremonyDate ?? ""}
+              onChange={(e) => updateDate("ceremonyDate", e.target.value)}
+            />
+          </div>
+          <div style={{ flex: 1 }}>
+            <label>Archive cutoff (endDate)</label>
+            <input
+              type="date"
+              value={season.endDate}
+              onChange={(e) => updateDate("endDate", e.target.value)}
+            />
+          </div>
+        </div>
+        <p className="banner" style={{ marginTop: 12, marginBottom: 0 }}>
+          Active window: <code>startDate</code> ≤ today ≤ <code>endDate</code>. After <code>endDate</code> the season moves to Past Seasons.
+        </p>
+      </div>
 
       {season.categories.map((cat, ci) => (
         <div key={cat.name} className="category">

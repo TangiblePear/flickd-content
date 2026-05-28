@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -51,6 +51,13 @@ export function writeSeason(slug, payload) {
   if (!/^[a-z0-9-]+$/.test(slug)) throw new Error("invalid slug");
   if (payload.id !== slug) throw new Error("slug/id mismatch");
   writeJson(join(CONTENT, "awards", `${slug}.json`), payload);
+}
+
+export function deleteSeason(slug) {
+  if (!/^[a-z0-9-]+$/.test(slug)) throw new Error("invalid slug");
+  const path = join(CONTENT, "awards", `${slug}.json`);
+  if (!existsSync(path)) throw new Error("season not found");
+  unlinkSync(path);
 }
 
 export function rebuildManifest() {
