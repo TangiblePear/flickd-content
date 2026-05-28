@@ -2,9 +2,9 @@
   "id": "oscars-2026",
   "eventName": "Academy Awards",
   "year": 2026,
-  "startDate": "2026-01-01",
+  "startDate": "2026-01-22",
   "endDate": "2026-12-31",
-  "ceremonyDate": null,
+  "ceremonyDate": "2026-03-15",
   "categories": [
     {
       "name": "Best Picture",
