@@ -9,7 +9,20 @@
     {
       "name": "Best Picture",
       "kind": "MEDIA",
-      "nominees": []
+      "nominees": [
+        {
+          "tmdbId": 51248,
+          "title": "11-11-11",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/t6Wd9gY6e1yJVVXRtgICFqwieyu.jpg"
+        },
+        {
+          "tmdbId": 2072,
+          "title": "The Bill",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bMd4T647b9YdkbQvULyndBNV8uL.jpg"
+        }
+      ]
     },
     {
       "name": "Best Director",
