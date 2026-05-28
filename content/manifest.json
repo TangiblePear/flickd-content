@@ -1,7 +1,14 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T21:23:02.847Z",
+  "generatedAt": "2026-05-28T21:45:10.563Z",
   "awards": [
+    {
+      "slug": "83rd-golden-globes-2026",
+      "eventName": "83rd Golden Globes",
+      "year": 2026,
+      "ceremonyDate": "2026-01-11",
+      "lastUpdated": "2026-05-28T21:45:10.411Z"
+    },
     {
       "slug": "baftas-2026",
       "eventName": "BAFTA Film Awards",
