@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T17:35:25.205Z",
+  "generatedAt": "2026-05-28T17:35:49.587Z",
   "awards": [
     {
       "slug": "baftas-2027",
@@ -15,6 +15,13 @@
       "year": 2027,
       "ceremonyDate": "2202-02-02",
       "lastUpdated": "2026-05-28T17:32:01.655Z"
+    },
+    {
+      "slug": "baftas-2026",
+      "eventName": "BAFTA Film Awards",
+      "year": 2026,
+      "ceremonyDate": "2026-02-01",
+      "lastUpdated": "2026-05-28T17:35:49.442Z"
     },
     {
       "slug": "oscars-2026",
