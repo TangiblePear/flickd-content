@@ -1,0 +1,20 @@
+name = "flickd-share-api"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Bind to flickd.tangible.cloud/api/share*
+routes = [
+  { pattern = "flickd.tangible.cloud/api/share", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/share/*", zone_name = "tangible.cloud" }
+]
+
+# Create with: wrangler kv namespace create FLICKD_SHARE
+# then paste the id below.
+[[kv_namespaces]]
+binding = "FLICKD_SHARE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+SHARE_TTL_SECONDS = "2592000"
+RATE_LIMIT_PER_HOUR = "10"
+MAX_ITEMS = "100"

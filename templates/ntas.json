@@ -1,0 +1,25 @@
+{
+  "templateId": "ntas",
+  "displayName": "National Television Awards (UK)",
+  "slugPrefix": "ntas",
+  "eventName": "National Television Awards",
+  "categories": [
+    { "name": "Drama", "kind": "MEDIA" },
+    { "name": "Returning Drama", "kind": "MEDIA" },
+    { "name": "New Drama", "kind": "MEDIA" },
+    { "name": "Serial Drama", "kind": "MEDIA" },
+    { "name": "Comedy", "kind": "MEDIA" },
+    { "name": "Reality Competition", "kind": "MEDIA" },
+    { "name": "Talent Show", "kind": "MEDIA" },
+    { "name": "Entertainment Programme", "kind": "MEDIA" },
+    { "name": "Daytime", "kind": "MEDIA" },
+    { "name": "Quiz Game Show", "kind": "MEDIA" },
+    { "name": "Documentary", "kind": "MEDIA" },
+    { "name": "Bruce Forsyth Entertainment Award", "kind": "MEDIA" },
+    { "name": "TV Presenter", "kind": "PEOPLE" },
+    { "name": "Drama Performance", "kind": "PEOPLE" },
+    { "name": "Serial Drama Performance", "kind": "PEOPLE" },
+    { "name": "Comedy Performance", "kind": "PEOPLE" },
+    { "name": "Rising Star Award", "kind": "PEOPLE" }
+  ]
+}

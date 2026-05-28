@@ -1,0 +1,12 @@
+{
+  "templateId": "bet-awards",
+  "displayName": "BET Awards (film & TV categories only)",
+  "slugPrefix": "bet-awards",
+  "eventName": "BET Awards",
+  "categories": [
+    { "name": "Best Movie", "kind": "MEDIA" },
+    { "name": "Best Actor", "kind": "PEOPLE" },
+    { "name": "Best Actress", "kind": "PEOPLE" },
+    { "name": "YoungStars Award", "kind": "PEOPLE" }
+  ]
+}

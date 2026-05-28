@@ -1,0 +1,31 @@
+{
+  "templateId": "baftas",
+  "displayName": "BAFTA Film Awards",
+  "slugPrefix": "baftas",
+  "eventName": "BAFTA Film Awards",
+  "categories": [
+    { "name": "Best Film", "kind": "MEDIA" },
+    { "name": "Outstanding British Film", "kind": "MEDIA" },
+    { "name": "Film Not in the English Language", "kind": "MEDIA" },
+    { "name": "Best Documentary", "kind": "MEDIA" },
+    { "name": "Best Animated Film", "kind": "MEDIA" },
+    { "name": "Outstanding Debut by a British Writer, Director, or Producer", "kind": "PEOPLE" },
+    { "name": "Best Director", "kind": "PEOPLE" },
+    { "name": "Best Original Screenplay", "kind": "PEOPLE" },
+    { "name": "Best Adapted Screenplay", "kind": "PEOPLE" },
+    { "name": "Best Leading Actor", "kind": "PEOPLE" },
+    { "name": "Best Leading Actress", "kind": "PEOPLE" },
+    { "name": "Best Supporting Actor", "kind": "PEOPLE" },
+    { "name": "Best Supporting Actress", "kind": "PEOPLE" },
+    { "name": "Best Original Music", "kind": "PEOPLE" },
+    { "name": "Best Casting", "kind": "PEOPLE" },
+    { "name": "Best Cinematography", "kind": "PEOPLE" },
+    { "name": "Best Editing", "kind": "PEOPLE" },
+    { "name": "Best Production Design", "kind": "PEOPLE" },
+    { "name": "Best Costume Design", "kind": "PEOPLE" },
+    { "name": "Best Makeup and Hair", "kind": "PEOPLE" },
+    { "name": "Best Sound", "kind": "PEOPLE" },
+    { "name": "Best Special Visual Effects", "kind": "PEOPLE" },
+    { "name": "EE Rising Star Award", "kind": "PEOPLE" }
+  ]
+}

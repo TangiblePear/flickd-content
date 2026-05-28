@@ -1,0 +1,12 @@
+{
+  "name": "flickd-content",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "admin": "pnpm --filter admin dev",
+    "worker:share": "pnpm --filter share-api dev",
+    "worker:daily": "pnpm --filter daily-ai dev",
+    "manifest": "node scripts/build-manifest.mjs"
+  }
+}

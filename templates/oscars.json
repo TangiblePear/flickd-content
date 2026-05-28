@@ -1,0 +1,31 @@
+{
+  "templateId": "oscars",
+  "displayName": "Academy Awards (Oscars)",
+  "slugPrefix": "oscars",
+  "eventName": "Academy Awards",
+  "categories": [
+    { "name": "Best Picture", "kind": "MEDIA" },
+    { "name": "Best Director", "kind": "PEOPLE" },
+    { "name": "Best Actor", "kind": "PEOPLE" },
+    { "name": "Best Actress", "kind": "PEOPLE" },
+    { "name": "Best Supporting Actor", "kind": "PEOPLE" },
+    { "name": "Best Supporting Actress", "kind": "PEOPLE" },
+    { "name": "Best Original Screenplay", "kind": "PEOPLE" },
+    { "name": "Best Adapted Screenplay", "kind": "PEOPLE" },
+    { "name": "Best Animated Feature", "kind": "MEDIA" },
+    { "name": "Best International Feature", "kind": "MEDIA" },
+    { "name": "Best Documentary Feature", "kind": "MEDIA" },
+    { "name": "Best Documentary Short", "kind": "MEDIA" },
+    { "name": "Best Live Action Short", "kind": "MEDIA" },
+    { "name": "Best Animated Short", "kind": "MEDIA" },
+    { "name": "Best Original Score", "kind": "PEOPLE" },
+    { "name": "Best Original Song", "kind": "PEOPLE" },
+    { "name": "Best Sound", "kind": "PEOPLE" },
+    { "name": "Best Production Design", "kind": "PEOPLE" },
+    { "name": "Best Cinematography", "kind": "PEOPLE" },
+    { "name": "Best Makeup and Hairstyling", "kind": "PEOPLE" },
+    { "name": "Best Costume Design", "kind": "PEOPLE" },
+    { "name": "Best Film Editing", "kind": "PEOPLE" },
+    { "name": "Best Visual Effects", "kind": "PEOPLE" }
+  ]
+}

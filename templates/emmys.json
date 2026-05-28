@@ -1,0 +1,31 @@
+{
+  "templateId": "emmys",
+  "displayName": "Primetime Emmy Awards",
+  "slugPrefix": "emmys",
+  "eventName": "Primetime Emmy Awards",
+  "categories": [
+    { "name": "Outstanding Drama Series", "kind": "MEDIA" },
+    { "name": "Outstanding Comedy Series", "kind": "MEDIA" },
+    { "name": "Outstanding Limited or Anthology Series", "kind": "MEDIA" },
+    { "name": "Outstanding Television Movie", "kind": "MEDIA" },
+    { "name": "Outstanding Variety Talk Series", "kind": "MEDIA" },
+    { "name": "Outstanding Variety Sketch Series", "kind": "MEDIA" },
+    { "name": "Outstanding Reality Competition Program", "kind": "MEDIA" },
+    { "name": "Outstanding Lead Actor in a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Lead Actress in a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Lead Actor in a Comedy Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Lead Actress in a Comedy Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actor in a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actress in a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actor in a Comedy Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actress in a Comedy Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Lead Actor in a Limited or Anthology Series or Movie", "kind": "PEOPLE" },
+    { "name": "Outstanding Lead Actress in a Limited or Anthology Series or Movie", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actor in a Limited or Anthology Series or Movie", "kind": "PEOPLE" },
+    { "name": "Outstanding Supporting Actress in a Limited or Anthology Series or Movie", "kind": "PEOPLE" },
+    { "name": "Outstanding Writing for a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Writing for a Comedy Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Directing for a Drama Series", "kind": "PEOPLE" },
+    { "name": "Outstanding Directing for a Comedy Series", "kind": "PEOPLE" }
+  ]
+}
