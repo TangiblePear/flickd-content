@@ -64,6 +64,8 @@ You're not building anything — you're just serving the `content/` folder as st
 - **Build command:** leave blank
 - **Build output directory:** `content`
 
+> Pages' static-file detector requires at least one HTML/CSS/JS file in the output directory. The repo includes a tiny `content/index.html` for this reason — leave it there.
+
 Click **Save and Deploy**. The first build takes ~30 seconds.
 
 Once it goes green, you'll get a URL like `https://flickd-content.pages.dev`. Visit:
