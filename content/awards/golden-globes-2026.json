@@ -1,0 +1,1269 @@
+{
+  "id": "golden-globes-2026",
+  "eventName": "Golden Globe Awards",
+  "year": 2026,
+  "startDate": "2025-12-08",
+  "endDate": "2026-02-10",
+  "ceremonyDate": "2026-01-11",
+  "categories": [
+    {
+      "name": "Best Motion Picture – Drama",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg"
+        },
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Motion Picture – Musical or Comedy",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 1299655,
+          "title": "Blue Moon",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dVU7SNc6dgStTVdtbPLQncWxsyZ.jpg"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 639988,
+          "title": "No Other Choice",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sBpxTGLzKnvPSVtL5yQYpSxvKEb.jpg"
+        },
+        {
+          "tmdbId": 1254808,
+          "title": "Nouvelle Vague",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/AfE7DZ0DPgme6I58dlYp1Bo9xeN.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Motion Picture – Animated",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 803796,
+          "title": "KPop Demon Hunters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zT7Lhw3BhJbMkRqm9Zlx2YGMsY0.jpg"
+        },
+        {
+          "tmdbId": 804370,
+          "title": "Arco",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/mWlvHFxTDhq9O5WSOHywa32QIez.jpg"
+        },
+        {
+          "tmdbId": 1311031,
+          "title": "Demon Slayer: Kimetsu no Yaiba Infinity Castle",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/fWVSwgjpT2D78VUh6X8UBd2rorW.jpg"
+        },
+        {
+          "tmdbId": 1022787,
+          "title": "Elio",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7z8jDiTZZco9moIKpTUImFtTy7o.jpg"
+        },
+        {
+          "tmdbId": 682012,
+          "title": "Little Amélie or the Character of Rain",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/qoqDvTUVPoZJWw24AjGDt3J4tZN.jpg"
+        },
+        {
+          "tmdbId": 1084242,
+          "title": "Zootopia 2",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oJ7g2CifqpStmoYQyaLQgEU32qO.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Motion Picture – Non-English Language",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg"
+        },
+        {
+          "tmdbId": 639988,
+          "title": "No Other Choice",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sBpxTGLzKnvPSVtL5yQYpSxvKEb.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 1151272,
+          "title": "Sirāt",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bzBtsLi17rK4G6kDvOXfUZfAhca.jpg"
+        },
+        {
+          "tmdbId": 1480382,
+          "title": "The Voice of Hind Rajab",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/q7M8kQB46T11vmDMD6E239jsqTz.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Male Actor in a Motion Picture – Drama",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg",
+          "personName": "Wagner Moura",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg",
+          "personName": "Joel Edgerton"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg",
+          "personName": "Oscar Isaac"
+        },
+        {
+          "tmdbId": 760329,
+          "title": "The Smashing Machine",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cwwvrdYeIrARXdiv09GIO6XWK5l.jpg",
+          "personName": "Dwayne Johnson"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Michael B. Jordan"
+        },
+        {
+          "tmdbId": 1230368,
+          "title": "Springsteen: Deliver Me from Nowhere",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/csBV3eq4RDjNg1acNQ8kwOZyPlZ.jpg",
+          "personName": "Jeremy Allen White"
+        }
+      ]
+    },
+    {
+      "name": "Best Female Actor in a Motion Picture – Drama",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg",
+          "personName": "Jessie Buckley",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1033148,
+          "title": "Die My Love",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kajpShbFhOdpl6yCrLezMrr9tB4.jpg",
+          "personName": "Jennifer Lawrence"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Renate Reinsve"
+        },
+        {
+          "tmdbId": 1265063,
+          "title": "After the Hunt",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ryF8QPGUGlo8gRB4OYKb4J0r3aJ.jpg",
+          "personName": "Julia Roberts"
+        },
+        {
+          "tmdbId": 997113,
+          "title": "Hedda",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ecflk7AZf0ij205yDswjlvdxlCO.jpg",
+          "personName": "Tessa Thompson"
+        },
+        {
+          "tmdbId": 1205515,
+          "title": "Sorry, Baby",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/n8wZEQen5hDNRGzm4fY4sxWe5xe.jpg",
+          "personName": "Eva Victor"
+        }
+      ]
+    },
+    {
+      "name": "Best Male Actor in a Motion Picture – Musical or Comedy",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg",
+          "personName": "Timothée Chalamet",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1069905,
+          "title": "Jay Kelly",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lEXYpY9X17pGC7xYYy17Guv0L3J.jpg",
+          "personName": "George Clooney"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Leonardo DiCaprio"
+        },
+        {
+          "tmdbId": 1299655,
+          "title": "Blue Moon",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dVU7SNc6dgStTVdtbPLQncWxsyZ.jpg",
+          "personName": "Ethan Hawke"
+        },
+        {
+          "tmdbId": 639988,
+          "title": "No Other Choice",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sBpxTGLzKnvPSVtL5yQYpSxvKEb.jpg",
+          "personName": "Lee Byung-hun"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg",
+          "personName": "Jesse Plemons"
+        }
+      ]
+    },
+    {
+      "name": "Best Female Actor in a Motion Picture – Musical or Comedy",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1160360,
+          "title": "If I Had Legs I'd Kick You",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/va0TQ9WprMXRqQAzY56vyqY0Yd5.jpg",
+          "personName": "Rose Byrne",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 967941,
+          "title": "Wicked: For Good",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/si9tolnefLSUKaqQEGz1bWArOaL.jpg",
+          "personName": "Cynthia Erivo"
+        },
+        {
+          "tmdbId": 1371185,
+          "title": "Song Sung Blue",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xStmzLprgzqjzfvpBI7uTbcRpwQ.jpg",
+          "personName": "Kate Hudson"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Chase Infiniti"
+        },
+        {
+          "tmdbId": 1401281,
+          "title": "The Testament of Ann Lee",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/hBGg3IGRM7LM6ydMmDrl8mEx33Y.jpg",
+          "personName": "Amanda Seyfried"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg",
+          "personName": "Emma Stone"
+        }
+      ]
+    },
+    {
+      "name": "Best Supporting Male Actor in a Motion Picture",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Stellan Skarsgård",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Benicio del Toro"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg",
+          "personName": "Jacob Elordi"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg",
+          "personName": "Paul Mescal"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Sean Penn"
+        },
+        {
+          "tmdbId": 1069905,
+          "title": "Jay Kelly",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lEXYpY9X17pGC7xYYy17Guv0L3J.jpg",
+          "personName": "Adam Sandler"
+        }
+      ]
+    },
+    {
+      "name": "Best Supporting Female Actor in a Motion Picture",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Teyana Taylor",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 760329,
+          "title": "The Smashing Machine",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cwwvrdYeIrARXdiv09GIO6XWK5l.jpg",
+          "personName": "Emily Blunt"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Elle Fanning"
+        },
+        {
+          "tmdbId": 967941,
+          "title": "Wicked: For Good",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/si9tolnefLSUKaqQEGz1bWArOaL.jpg",
+          "personName": "Ariana Grande"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Inga Ibsdotter Lilleaas"
+        },
+        {
+          "tmdbId": 1078605,
+          "title": "Weapons",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cpf7vsRZ0MYRQcnLWteD5jK9ymT.jpg",
+          "personName": "Amy Madigan"
+        }
+      ]
+    },
+    {
+      "name": "Best Director",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Paul Thomas Anderson",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Ryan Coogler"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg",
+          "personName": "Guillermo del Toro"
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg",
+          "personName": "Jafar Panahi"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Joachim Trier"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg",
+          "personName": "Chloé Zhao"
+        }
+      ]
+    },
+    {
+      "name": "Best Screenplay",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Original Score",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 1151272,
+          "title": "Sirāt",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bzBtsLi17rK4G6kDvOXfUZfAhca.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Cinematic and Box Office Achievement",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 83533,
+          "title": "Avatar: Fire and Ash",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aabwWZWx6z1aYP4PX2ADvbDKktd.jpg"
+        },
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        },
+        {
+          "tmdbId": 803796,
+          "title": "KPop Demon Hunters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zT7Lhw3BhJbMkRqm9Zlx2YGMsY0.jpg"
+        },
+        {
+          "tmdbId": 575265,
+          "title": "Mission: Impossible - The Final Reckoning",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/z53D72EAOxGRqdr7KXXWp9dJiDe.jpg"
+        },
+        {
+          "tmdbId": 1078605,
+          "title": "Weapons",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cpf7vsRZ0MYRQcnLWteD5jK9ymT.jpg"
+        },
+        {
+          "tmdbId": 967941,
+          "title": "Wicked: For Good",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/si9tolnefLSUKaqQEGz1bWArOaL.jpg"
+        },
+        {
+          "tmdbId": 1084242,
+          "title": "Zootopia 2",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oJ7g2CifqpStmoYQyaLQgEU32qO.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Original Song",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 803796,
+          "title": "KPop Demon Hunters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zT7Lhw3BhJbMkRqm9Zlx2YGMsY0.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 83533,
+          "title": "Avatar: Fire and Ash",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aabwWZWx6z1aYP4PX2ADvbDKktd.jpg"
+        },
+        {
+          "tmdbId": 967941,
+          "title": "Wicked: For Good",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/si9tolnefLSUKaqQEGz1bWArOaL.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Television Series – Drama",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1147546,
+          "title": "The Diplomat",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/uwl9Y4px8TTIQK4N19k6gnW1RnX.jpg"
+        },
+        {
+          "tmdbId": 225171,
+          "title": "Pluribus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/z7Nga7Q9IGFWs5OEduY2gGFxnX3.jpg"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg"
+        },
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Television Series – Musical or Comedy",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg"
+        },
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg"
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Limited Series, Anthology Series, or Motion Picture Made for Television",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 246386,
+          "title": "All Her Fault",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/o8vZKZlc8H4OcgpbJuqP0iK4B2.jpg"
+        },
+        {
+          "tmdbId": 250504,
+          "title": "The Beast in Me",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/jxf7JCfIMvGONWTNUIJ068sFixK.jpg"
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg"
+        },
+        {
+          "tmdbId": 253376,
+          "title": "The Girlfriend",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ktrp3tdZ5IQpFux4nLy8z70bt3n.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Performance in Stand-Up Comedy on Television",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1312150,
+          "title": "Ricky Gervais: Mortality",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/u54OhdSaaLBh02Y4Nf5cETkh8Ku.jpg",
+          "personName": "Ricky Gervais",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1451815,
+          "title": "Brett Goldstein: The Second Best Night of Your Life",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aWVT2RDf0DNorRq0felYfsUbL3t.jpg",
+          "personName": "Brett Goldstein"
+        },
+        {
+          "tmdbId": 1581099,
+          "title": "Kevin Hart: Acting My Age",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/89HPieER8jX9sGKKzhagGIGkMxi.jpg",
+          "personName": "Kevin Hart"
+        },
+        {
+          "tmdbId": 1386514,
+          "title": "Bill Maher: Is Anyone Else Seeing This?",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wa7MdHEzHxwMqXy2bPA5pD5VDVY.jpg",
+          "personName": "Bill Maher"
+        },
+        {
+          "tmdbId": 1529419,
+          "title": "Kumail Nanjiani: Night Thoughts",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/qOvbKZHzBFQrmjmK9D0Lg7sz8co.jpg",
+          "personName": "Kumail Nanjiani"
+        },
+        {
+          "tmdbId": 1462313,
+          "title": "Sarah Silverman: PostMortem",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/hPBERJFecTqReSO0jqcfL6branG.jpg",
+          "personName": "Sarah Silverman"
+        }
+      ]
+    },
+    {
+      "name": "Best Male Actor in a Television Series – Drama",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "personName": "Noah Wyle",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 245927,
+          "title": "Paradise",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l8RqfhqEk04W5sSOjQ9zeWU1DyM.jpg",
+          "personName": "Sterling K. Brown"
+        },
+        {
+          "tmdbId": 83867,
+          "title": "Andor",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/khZqmwHQicTYoS7Flreb9EddFZC.jpg",
+          "personName": "Diego Luna"
+        },
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg",
+          "personName": "Gary Oldman"
+        },
+        {
+          "tmdbId": 228305,
+          "title": "Task",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/9JdL1aQdAQiyYYQ2xCqbHaEcZt8.jpg",
+          "personName": "Mark Ruffalo"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Adam Scott"
+        }
+      ]
+    },
+    {
+      "name": "Best Female Actor in a Television Series – Drama",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 225171,
+          "title": "Pluribus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/z7Nga7Q9IGFWs5OEduY2gGFxnX3.jpg",
+          "personName": "Rhea Seehorn",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 226174,
+          "title": "Matlock",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/6kEAVyhalzv4HCAfnLfXUcF3nQZ.jpg",
+          "personName": "Kathy Bates"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Britt Lower"
+        },
+        {
+          "tmdbId": 247718,
+          "title": "MobLand",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/abeH7n5pcuQcwYcTxG6DTZvXLP1.jpg",
+          "personName": "Helen Mirren"
+        },
+        {
+          "tmdbId": 100088,
+          "title": "The Last of Us",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dmo6TYuuJgaYinXBPjrgG9mB5od.jpg",
+          "personName": "Bella Ramsey"
+        },
+        {
+          "tmdbId": 1147546,
+          "title": "The Diplomat",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/uwl9Y4px8TTIQK4N19k6gnW1RnX.jpg",
+          "personName": "Keri Russell"
+        }
+      ]
+    },
+    {
+      "name": "Best Male Actor in a Television Series – Musical or Comedy",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Seth Rogen",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg",
+          "personName": "Adam Brody"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg",
+          "personName": "Steve Martin"
+        },
+        {
+          "tmdbId": 247168,
+          "title": "Chad Powers",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wgMS8irQKfMrR6mJhKtK6vbxDTC.jpg",
+          "personName": "Glen Powell"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg",
+          "personName": "Martin Short"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Jeremy Allen White"
+        }
+      ]
+    },
+    {
+      "name": "Best Female Actor in a Television Series – Musical or Comedy",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg",
+          "personName": "Jean Smart",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg",
+          "personName": "Kristen Bell"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Ayo Edebiri"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg",
+          "personName": "Selena Gomez"
+        },
+        {
+          "tmdbId": 120998,
+          "title": "Poker Face",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/8Xm5dyMQC9whMJKnGdFugUAW73C.jpg",
+          "personName": "Natasha Lyonne"
+        },
+        {
+          "tmdbId": 119051,
+          "title": "Wednesday",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/36xXlhEpQqVVPuiZhfoQuaY4OlA.jpg",
+          "personName": "Jenna Ortega"
+        }
+      ]
+    },
+    {
+      "name": "Best Male Actor in a Limited Series, Anthology Series, or Motion Picture Made for Television",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Stephen Graham",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 238339,
+          "title": "The Narrow Road to the Deep North",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g0QMGxXtoNnMXz4QN2U05ijvqBe.jpg",
+          "personName": "Jacob Elordi"
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg",
+          "personName": "Paul Giamatti"
+        },
+        {
+          "tmdbId": 286801,
+          "title": "Monster: The Ed Gein Story",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iDHzRALtZCzHVmx7uyjTTKvMAPB.jpg",
+          "personName": "Charlie Hunnam"
+        },
+        {
+          "tmdbId": 249039,
+          "title": "Black Rabbit",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4e9CraVtGY00jLP2YGwsuEtaIjR.jpg",
+          "personName": "Jude Law"
+        },
+        {
+          "tmdbId": 250504,
+          "title": "The Beast in Me",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/jxf7JCfIMvGONWTNUIJ068sFixK.jpg",
+          "personName": "Matthew Rhys"
+        }
+      ]
+    },
+    {
+      "name": "Best Female Actor in a Limited Series, Anthology Series, or Motion Picture Made for Television",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg",
+          "personName": "Michelle Williams",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 250504,
+          "title": "The Beast in Me",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/jxf7JCfIMvGONWTNUIJ068sFixK.jpg",
+          "personName": "Claire Danes"
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg",
+          "personName": "Rashida Jones"
+        },
+        {
+          "tmdbId": 244628,
+          "title": "Long Bright River",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/tQHOmmDXtDSsmXn55GcdtSOLMAc.jpg",
+          "personName": "Amanda Seyfried"
+        },
+        {
+          "tmdbId": 246386,
+          "title": "All Her Fault",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/o8vZKZlc8H4OcgpbJuqP0iK4B2.jpg",
+          "personName": "Sarah Snook"
+        },
+        {
+          "tmdbId": 253376,
+          "title": "The Girlfriend",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ktrp3tdZ5IQpFux4nLy8z70bt3n.jpg",
+          "personName": "Robin Wright"
+        }
+      ]
+    },
+    {
+      "name": "Best Supporting Male Actor on Television",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Owen Cooper",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 90282,
+          "title": "The Morning Show",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/y9x2R87yt2U616736NJrP0d56dt.jpg",
+          "personName": "Billy Crudup"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Walton Goggins"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Jason Isaacs"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Tramell Tillman"
+        },
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Ashley Walters"
+        }
+      ]
+    },
+    {
+      "name": "Best Supporting Female Actor on Television",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Erin Doherty",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Carrie Coon"
+        },
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg",
+          "personName": "Hannah Einbinder"
+        },
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Catherine O'Hara"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Parker Posey"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Aimee Lou Wood"
+        }
+      ]
+    }
+  ]
+}
