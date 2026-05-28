@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T17:23:56.767Z",
+  "generatedAt": "2026-05-28T17:24:40.269Z",
   "awards": [
     {
       "slug": "baftas-2027",
@@ -8,6 +8,13 @@
       "year": 2027,
       "ceremonyDate": "2027-02-02",
       "lastUpdated": "2026-05-28T17:23:49.865Z"
+    },
+    {
+      "slug": "oscars-2027",
+      "eventName": "Academy Awards",
+      "year": 2027,
+      "ceremonyDate": "2202-02-02",
+      "lastUpdated": "2026-05-28T17:24:40.115Z"
     },
     {
       "slug": "oscars-2026",
