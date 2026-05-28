@@ -2,17 +2,19 @@ name = "flickd-share-api"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 
-# Bind to flickd.tangible.cloud/api/share*
+# Bind to flickd.tangible.cloud/api/share* (JSON API) and /share/* (human
+# landing page). Both preempt the content Pages catch-all on the same host.
 routes = [
   { pattern = "flickd.tangible.cloud/api/share", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/share/*", zone_name = "tangible.cloud" }
+  { pattern = "flickd.tangible.cloud/api/share/*", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/share/*", zone_name = "tangible.cloud" }
 ]
 
 # Create with: wrangler kv namespace create FLICKD_SHARE
 # then paste the id below.
 [[kv_namespaces]]
 binding = "FLICKD_SHARE"
-id = "56252c82d64e4c04afa701609b664cbe""
+id = "56252c82d64e4c04afa701609b664cbe"
 
 [vars]
 SHARE_TTL_SECONDS = "2592000"
