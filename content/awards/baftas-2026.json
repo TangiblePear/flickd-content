@@ -14,7 +14,8 @@
           "tmdbId": 861,
           "title": "Total Recall",
           "type": "MOVIE",
-          "posterUrl": "https://image.tmdb.org/t/p/w500/wVbeL6fkbTKSmNfalj4VoAUUqJv.jpg"
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wVbeL6fkbTKSmNfalj4VoAUUqJv.jpg",
+          "isWinner": true
         }
       ]
     },
