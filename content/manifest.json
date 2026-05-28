@@ -1,7 +1,15 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T18:38:25.395Z",
-  "awards": [],
+  "generatedAt": "2026-05-28T19:46:24.410Z",
+  "awards": [
+    {
+      "slug": "oscars-2026",
+      "eventName": "Academy Awards",
+      "year": 2026,
+      "ceremonyDate": null,
+      "lastUpdated": "2026-05-28T19:46:24.272Z"
+    }
+  ],
   "featureFlags": {
     "enableDailyRail": true,
     "enableSharedLists": true,

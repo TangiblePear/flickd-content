@@ -1,0 +1,929 @@
+{
+  "id": "oscars-2026",
+  "eventName": "Academy Awards",
+  "year": 2026,
+  "startDate": "2026-01-01",
+  "endDate": "2026-12-31",
+  "ceremonyDate": null,
+  "categories": [
+    {
+      "name": "Best Picture",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg"
+        },
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Directing",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Paul Thomas Anderson"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg",
+          "personName": "Chloé Zhao"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg",
+          "personName": "Josh Safdie"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Joachim Trier"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Ryan Coogler"
+        }
+      ]
+    },
+    {
+      "name": "Best Actor in a Leading Role",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Michael B. Jordan"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg",
+          "personName": "Timothée Chalamet"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Leonardo DiCaprio"
+        },
+        {
+          "tmdbId": 1299655,
+          "title": "Blue Moon",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dVU7SNc6dgStTVdtbPLQncWxsyZ.jpg",
+          "personName": "Ethan Hawke"
+        },
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg",
+          "personName": "Wagner Moura"
+        }
+      ]
+    },
+    {
+      "name": "Best Actress in a Leading Role",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg",
+          "personName": "Jessie Buckley"
+        },
+        {
+          "tmdbId": 1160360,
+          "title": "If I Had Legs I'd Kick You",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/va0TQ9WprMXRqQAzY56vyqY0Yd5.jpg",
+          "personName": "Rose Byrne"
+        },
+        {
+          "tmdbId": 1371185,
+          "title": "Song Sung Blue",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xStmzLprgzqjzfvpBI7uTbcRpwQ.jpg",
+          "personName": "Kate Hudson"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Renate Reinsve"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg",
+          "personName": "Emma Stone"
+        }
+      ]
+    },
+    {
+      "name": "Best Actor in a Supporting Role",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Sean Penn"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Benicio del Toro"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg",
+          "personName": "Jacob Elordi"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Delroy Lindo"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Stellan Skarsgård"
+        }
+      ]
+    },
+    {
+      "name": "Best Actress in a Supporting Role",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1078605,
+          "title": "Weapons",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cpf7vsRZ0MYRQcnLWteD5jK9ymT.jpg",
+          "personName": "Amy Madigan"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Elle Fanning"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg",
+          "personName": "Inga Ibsdotter Lilleaas"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg",
+          "personName": "Wunmi Mosaku"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg",
+          "personName": "Teyana Taylor"
+        }
+      ]
+    },
+    {
+      "name": "Best Writing (Original Screenplay)",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1299655,
+          "title": "Blue Moon",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dVU7SNc6dgStTVdtbPLQncWxsyZ.jpg"
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Writing (Adapted Screenplay)",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Animated Feature Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 803796,
+          "title": "KPop Demon Hunters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zT7Lhw3BhJbMkRqm9Zlx2YGMsY0.jpg"
+        },
+        {
+          "tmdbId": 804370,
+          "title": "Arco",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/mWlvHFxTDhq9O5WSOHywa32QIez.jpg"
+        },
+        {
+          "tmdbId": 1022787,
+          "title": "Elio",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7z8jDiTZZco9moIKpTUImFtTy7o.jpg"
+        },
+        {
+          "tmdbId": 682012,
+          "title": "Little Amélie or the Character of Rain",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/qoqDvTUVPoZJWw24AjGDt3J4tZN.jpg"
+        },
+        {
+          "tmdbId": 1084242,
+          "title": "Zootopia 2",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oJ7g2CifqpStmoYQyaLQgEU32qO.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best International Feature Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 1456349,
+          "title": "It Was Just an Accident",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/eNYGj2DG3n8OrVPTfYunpPW9uas.jpg"
+        },
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg"
+        },
+        {
+          "tmdbId": 1151272,
+          "title": "Sirāt",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bzBtsLi17rK4G6kDvOXfUZfAhca.jpg"
+        },
+        {
+          "tmdbId": 1480382,
+          "title": "The Voice of Hind Rajab",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/q7M8kQB46T11vmDMD6E239jsqTz.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Documentary Feature Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1393151,
+          "title": "Mr. Nobody Against Putin",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aXCEnrqecvPXohuptN0JRgIvkDj.jpg"
+        },
+        {
+          "tmdbId": 1413805,
+          "title": "The Alabama Solution",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gultnK0rYs4xLLYhxQ9ZnvPfVAn.jpg"
+        },
+        {
+          "tmdbId": 1400780,
+          "title": "Come See Me in the Good Light",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/5AFbcDGT78cLZTyHTSDBohczjuO.jpg"
+        },
+        {
+          "tmdbId": 1400793,
+          "title": "Cutting Through Rocks",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/qefjf5TeM0uRzrFU2c4xYt6ew9z.jpg"
+        },
+        {
+          "tmdbId": 1400782,
+          "title": "The Perfect Neighbor",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2NE7yN45zo19o4LJr6JFxDWmh2b.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Documentary Short Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1525091,
+          "title": "All the Empty Rooms",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ajOXPpgh96rxxaHqqQCoxPP6dH5.jpg"
+        },
+        {
+          "tmdbId": 1422051,
+          "title": "Armed Only with a Camera: The Life and Death of Brent Renaud",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1vG68YrQGAEnCQooXrEvJ2eparK.jpg"
+        },
+        {
+          "tmdbId": 1560400,
+          "title": "Children No More: Were and Are Gone",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/Ao7wQN6H3pQlxQFL9bd8oNaMyXO.jpg"
+        },
+        {
+          "tmdbId": 1373150,
+          "title": "The Devil Is Busy",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/75GH49xL5kEzyYeXGiOPy2FIZGe.jpg"
+        },
+        {
+          "tmdbId": 1278954,
+          "title": "perfectly a strangeness",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/biPnnMyECGRhtUj5zGg7T7XSCk7.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Live Action Short Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1442908,
+          "title": "The Singers",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/a6wheh1243vceZ7Dqb0knYmKqaj.jpg"
+        },
+        {
+          "tmdbId": 1340625,
+          "title": "Two People Exchanging Saliva",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1LKpAyHWixkYXtjxSE0RpWljIh4.jpg"
+        },
+        {
+          "tmdbId": 1560394,
+          "title": "Butcher's Stain",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lAcOUxQUFP6lruP8e8nZSFBFjZ1.jpg"
+        },
+        {
+          "tmdbId": 1470465,
+          "title": "A Friend of Dorothy",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/5YjFZoCfBJ2G40SHPa5CFy60jdC.jpg"
+        },
+        {
+          "tmdbId": 1272266,
+          "title": "Jane Austen's Period Drama",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/tlQfsrxKLdrpQBlWUrUlpTamOBy.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Animated Short Film",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1142149,
+          "title": "The Girl Who Cried Pearls",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sqdqvstmM2vOBnb5beVT8lOQ4Oi.jpg"
+        },
+        {
+          "tmdbId": 227114,
+          "title": "Butterfly",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/8x1W0TR2VIe7ORaRI9zwDqeJn9q.jpg"
+        },
+        {
+          "tmdbId": 1477914,
+          "title": "Forevergreen",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bYmb2SzWZjQvyuBItB3wcO8RAWy.jpg"
+        },
+        {
+          "tmdbId": 1316745,
+          "title": "Retirement Plan",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lRkotrMJJNyOXBZE4i4s8vfXPTh.jpg"
+        },
+        {
+          "tmdbId": 1302562,
+          "title": "The Three Sisters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/jdzJgi9k1hAYx6DxhWlNWxslI57.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Music (Original Score)",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 701387,
+          "title": "Bugonia",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oxgsAQDAAxA92mFGYCZllgWkH9J.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Music (Original Song)",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 803796,
+          "title": "KPop Demon Hunters",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zT7Lhw3BhJbMkRqm9Zlx2YGMsY0.jpg"
+        },
+        {
+          "tmdbId": 826338,
+          "title": "Diane Warren: Relentless",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/uhfvnmtq6cgpI038YrRsgmThb2D.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1358554,
+          "title": "Viva Verdi!",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l2IIanbP4HVxL9yginZzT73kE9j.jpg"
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Sound",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1151272,
+          "title": "Sirāt",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bzBtsLi17rK4G6kDvOXfUZfAhca.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Casting",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1220564,
+          "title": "The Secret Agent",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/iLE2YOmeboeTDC7GlOp1dzh1VFo.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Production Design",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Cinematography",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 1241983,
+          "title": "Train Dreams",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l3zS4YnpOi4usyEXGJMtxSqDDyb.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Makeup and Hairstyling",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 1379266,
+          "title": "Kokuho",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/a15F5KJ4mleusJR1YKP4zUyZaxG.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        },
+        {
+          "tmdbId": 760329,
+          "title": "The Smashing Machine",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cwwvrdYeIrARXdiv09GIO6XWK5l.jpg"
+        },
+        {
+          "tmdbId": 1284120,
+          "title": "The Ugly Stepsister",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/rayAREIKtSinuov10GvrZHyXfXH.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Costume Design",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1062722,
+          "title": "Frankenstein",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/g4JtvGlQO7DByTI6frUobqvSL3R.jpg"
+        },
+        {
+          "tmdbId": 83533,
+          "title": "Avatar: Fire and Ash",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aabwWZWx6z1aYP4PX2ADvbDKktd.jpg"
+        },
+        {
+          "tmdbId": 858024,
+          "title": "Hamnet",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zIcd6yuBucRNof5t9KVuGBHIhXU.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Film Editing",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1054867,
+          "title": "One Battle After Another",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lbBWwxBht4JFP5PsuJ5onpMqugW.jpg"
+        },
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        },
+        {
+          "tmdbId": 1317288,
+          "title": "Marty Supreme",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/lYWEXbQgRTR4ZQleSXAgRbxAjvq.jpg"
+        },
+        {
+          "tmdbId": 1124566,
+          "title": "Sentimental Value",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pz9NCWxxOk3o0W3v1Zkhawrwb4i.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Best Visual Effects",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 83533,
+          "title": "Avatar: Fire and Ash",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aabwWZWx6z1aYP4PX2ADvbDKktd.jpg"
+        },
+        {
+          "tmdbId": 911430,
+          "title": "F1",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/vqBmyAj0Xm9LnS1xe1MSlMAJyHq.jpg"
+        },
+        {
+          "tmdbId": 1234821,
+          "title": "Jurassic World Rebirth",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1RICxzeoNCAO5NpcRMIgg1XT6fm.jpg"
+        },
+        {
+          "tmdbId": 1236470,
+          "title": "The Lost Bus",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4IPxzGlE17fJAwUTMul4opMeutA.jpg"
+        },
+        {
+          "tmdbId": 1233413,
+          "title": "Sinners",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/oucvKATkCI77ngtPjxAI9SAZW42.jpg"
+        }
+      ]
+    }
+  ]
+}
