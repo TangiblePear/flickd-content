@@ -12,7 +12,7 @@ routes = [
 # then paste the id below.
 [[kv_namespaces]]
 binding = "FLICKD_SHARE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "56252c82d64e4c04afa701609b664cbe""
 
 [vars]
 SHARE_TTL_SECONDS = "2592000"
