@@ -245,10 +245,13 @@ function landingPage(code: string, stored: StoredShare): string {
       <a class="btn secondary" href="${PLAY_STORE_URL}">Get it on Google Play</a>
       <a class="btn secondary" href="${APP_STORE_URL}">Download on the App Store</a>
     </div>
-    <script>
-      // Auto-attempt the deep link once on load; the buttons stay as fallback.
-      try { window.location.href = ${JSON.stringify(intentUrl)}; } catch (e) {}
-    </script>
+    <!--
+      No auto-redirect: Chrome blocks gesture-less navigation to an intent://
+      URL and falls through to browser_fallback_url (the store). The user taps
+      "Open in Flickd" instead — that gesture is honored and opens the app.
+      Links clicked from App-Link-aware apps open the app directly and never
+      reach this page.
+    -->
   </body>
 </html>`;
 }
