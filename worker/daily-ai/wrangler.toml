@@ -5,7 +5,7 @@ compatibility_date = "2025-01-01"
 # Reads serve from R2 at flickd.tangible.cloud/content/daily/*
 # (Pages handles the rest of /content/*; this route preempts daily-only paths.)
 routes = [
-  { pattern = "flickd.tangible.cloud/content/daily/*", zone_name = "tangible.cloud" }
+  { pattern = "flickd.tangible.cloud/daily/*", zone_name = "tangible.cloud" }
 ]
 
 # Cron: 06:00 UTC every day.

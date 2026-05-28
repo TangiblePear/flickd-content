@@ -7,6 +7,7 @@ interface Env {
   GEMINI_API_KEY: string;
   TMDB_API_KEY: string;
   TARGET_COUNT: string;
+  ADMIN_TRIGGER_SECRET?: string;
 }
 
 interface DailyItem {
@@ -29,7 +30,21 @@ const CACHE_CONTROL = "public, max-age=300, s-maxage=300";
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    const m = url.pathname.match(/^\/content\/daily\/(latest|\d{4}-\d{2}-\d{2})\.json$/);
+
+    // Admin-only manual trigger. Bypasses the cron schedule so the operator
+    // can refresh the daily list on demand (e.g. after editing prompts).
+    // Path is under /content/daily/ because that's the route this Worker owns.
+    // Gated on a shared secret so it isn't a public abuse vector.
+    if (url.pathname === "/daily/admin-run") {
+      const provided = req.headers.get("X-Admin-Key") ?? url.searchParams.get("key");
+      if (!env.ADMIN_TRIGGER_SECRET || provided !== env.ADMIN_TRIGGER_SECRET) {
+        return new Response("forbidden", { status: 403 });
+      }
+      await generateForDate(new Date(), env);
+      return new Response("ok", { status: 200 });
+    }
+
+    const m = url.pathname.match(/^\/daily\/(latest|\d{4}-\d{2}-\d{2})\.json$/);
     if (!m || req.method !== "GET") {
       return new Response("not found", { status: 404 });
     }
