@@ -4,10 +4,12 @@
 app. Without it, `autoVerify` in the app's manifest fails and `https://flickd.tangible.cloud/share/<code>`
 links open in the browser instead of the app.
 
-## Before deploying: replace the placeholder fingerprint
+## Current state & before publishing
 
-`sha256_cert_fingerprints` currently holds `REPLACE_WITH_RELEASE_SHA256_FINGERPRINT`.
-Swap it for the SHA-256 fingerprint of the cert that signs the **installed** APK:
+`sha256_cert_fingerprints` currently holds the **debug keystore** SHA-256
+(`25:3E:FF:…:71:83`), so links open a **sideloaded debug build** during testing.
+Before shipping to production, add the fingerprint of the cert that signs the
+**installed** release APK (keep the debug one or drop it — your call):
 
 - **Google Play App Signing** (the usual case): Play Console → your app →
   *Test and release* → *App integrity* → *App signing* → copy the
