@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T21:22:04.553Z",
+  "generatedAt": "2026-05-28T21:23:02.847Z",
   "awards": [
     {
       "slug": "baftas-2026",
@@ -8,13 +8,6 @@
       "year": 2026,
       "ceremonyDate": "2026-02-22",
       "lastUpdated": "2026-05-28T20:09:37.745Z"
-    },
-    {
-      "slug": "golden-globes-2026",
-      "eventName": "Golden Globe Awards",
-      "year": 2026,
-      "ceremonyDate": "2026-01-11",
-      "lastUpdated": "2026-05-28T21:22:04.368Z"
     },
     {
       "slug": "oscars-2026",
