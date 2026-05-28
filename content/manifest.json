@@ -1,7 +1,14 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-05-28T21:45:10.563Z",
+  "generatedAt": "2026-05-28T22:13:26.516Z",
   "awards": [
+    {
+      "slug": "77th-primetime-emmy-awards-2026",
+      "eventName": "77th Primetime Emmy Awards",
+      "year": 2026,
+      "ceremonyDate": "2025-09-14",
+      "lastUpdated": "2026-05-28T22:13:26.349Z"
+    },
     {
       "slug": "83rd-golden-globes-2026",
       "eventName": "83rd Golden Globes",
