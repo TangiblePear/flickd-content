@@ -9,7 +9,14 @@
     {
       "name": "Best Film",
       "kind": "MEDIA",
-      "nominees": []
+      "nominees": [
+        {
+          "tmdbId": 20174,
+          "title": "The Fast and the Furious",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/731NMB4a85McIYcftPtbH4D3l5x.jpg"
+        }
+      ]
     },
     {
       "name": "Outstanding British Film",
