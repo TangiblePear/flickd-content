@@ -20,6 +20,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }).then(json<{ ok: boolean; git: unknown }>),
+  deleteSeason: (slug: string) =>
+    fetch(`/api/awards/${slug}`, { method: "DELETE" }).then(
+      json<{ ok: boolean; git: unknown }>,
+    ),
   tmdbSearch: (q: string) =>
     fetch(`/api/tmdb/search?q=${encodeURIComponent(q)}`).then(
       json<{ results: TmdbResult[] }>,

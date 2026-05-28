@@ -8,6 +8,7 @@ import {
   listSeasons,
   readSeason,
   writeSeason,
+  deleteSeason,
   rebuildManifest,
 } from "./content.mjs";
 import { commitAndMaybePush } from "./git.mjs";
@@ -36,6 +37,17 @@ app.put("/api/awards/:slug", async (req, res) => {
     writeSeason(req.params.slug, req.body);
     rebuildManifest();
     const result = await commitAndMaybePush(`admin: update ${req.params.slug}`);
+    res.json({ ok: true, git: result });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message ?? err) });
+  }
+});
+
+app.delete("/api/awards/:slug", async (req, res) => {
+  try {
+    deleteSeason(req.params.slug);
+    rebuildManifest();
+    const result = await commitAndMaybePush(`admin: delete ${req.params.slug}`);
     res.json({ ok: true, git: result });
   } catch (err) {
     res.status(500).json({ error: String(err.message ?? err) });
