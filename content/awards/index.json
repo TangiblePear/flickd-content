@@ -1,6 +1,15 @@
 {
   "seasons": [
     {
+      "slug": "baftas-2026",
+      "eventName": "BAFTA Film Awards",
+      "year": 2026,
+      "startDate": "2026-01-27",
+      "endDate": "2026-03-24",
+      "ceremonyDate": "2026-02-22",
+      "lastUpdated": "2026-05-28T20:09:37.745Z"
+    },
+    {
       "slug": "oscars-2026",
       "eventName": "Academy Awards",
       "year": 2026,
