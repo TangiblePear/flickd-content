@@ -4,6 +4,7 @@ node_modules/
 .env
 .env.local
 .env.*.local
+.dev.vars
 .DS_Store
 dist/
 *.log

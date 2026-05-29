@@ -3,11 +3,17 @@ main = "src/index.ts"
 compatibility_date = "2025-01-01"
 
 # Bind to flickd.tangible.cloud/api/share* (JSON API) and /share/* (human
-# landing page). Both preempt the content Pages catch-all on the same host.
+# landing page), plus the E2EE social channel (feed/opinions/inbox). All
+# preempt the content Pages catch-all on the same host.
 routes = [
   { pattern = "flickd.tangible.cloud/api/share", zone_name = "tangible.cloud" },
   { pattern = "flickd.tangible.cloud/api/share/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/share/*", zone_name = "tangible.cloud" }
+  { pattern = "flickd.tangible.cloud/share/*", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/feed/*", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/opinions/*", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/inbox/*", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/friendcode", zone_name = "tangible.cloud" },
+  { pattern = "flickd.tangible.cloud/api/friendcode/*", zone_name = "tangible.cloud" }
 ]
 
 # Create with: wrangler kv namespace create FLICKD_SHARE

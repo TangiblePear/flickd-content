@@ -15,14 +15,19 @@ export default function Home() {
     <div>
       <div className="row between">
         <h2>Awards</h2>
-        <Link to="/awards/new">
-          <button>+ New ceremony</button>
-        </Link>
+        <div className="row">
+          <Link to="/awards/import">
+            <button className="ghost">Bulk import</button>
+          </Link>
+          <Link to="/awards/new">
+            <button>+ New ceremony</button>
+          </Link>
+        </div>
       </div>
       {err && <div className="banner err">{err}</div>}
       <div className="grid-seasons">
         {seasons.map((s) => {
-          const pct = s.nomineeCount === 0 ? 0 : Math.round((s.winnerCount / s.nomineeCount) * 100);
+          const pct = s.categoryCount === 0 ? 0 : Math.round((s.winnerCount / s.categoryCount) * 100);
           return (
             <Link key={s.slug} to={`/awards/${s.slug}`} style={{ textDecoration: "none", color: "inherit" }}>
               <div className="season-card">

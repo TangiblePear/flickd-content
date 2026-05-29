@@ -37,6 +37,7 @@ export function listSeasons() {
         endDate: s.endDate,
         nomineeCount: total,
         winnerCount: winners,
+        categoryCount: s.categories.length,
       };
     })
     .sort((a, b) => b.year - a.year || a.slug.localeCompare(b.slug));

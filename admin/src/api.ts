@@ -1,9 +1,23 @@
 import type {
   AwardSeason,
+  DraftSeason,
+  ResolveResult,
   SeasonSummary,
   Template,
   TmdbResult,
 } from "./types";
+
+export type ImportSource = "text" | "url" | "prompt";
+
+export interface ExtractRequest {
+  source: ImportSource;
+  text?: string;
+  url?: string;
+  prompt?: string;
+  templateId?: string;
+  year?: number;
+  eventName?: string;
+}
 
 const json = async <T,>(r: Response): Promise<T> => {
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
@@ -28,4 +42,24 @@ export const api = {
     fetch(`/api/tmdb/search?q=${encodeURIComponent(q)}`).then(
       json<{ results: TmdbResult[] }>,
     ),
+  importStatus: () =>
+    fetch("/api/import/status").then(json<{ llmAvailable: boolean }>),
+  importJson: (raw: string) =>
+    fetch("/api/import/json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ json: raw }),
+    }).then(json<{ draft: DraftSeason }>),
+  importExtract: (body: ExtractRequest) =>
+    fetch("/api/import/extract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(json<{ draft: DraftSeason; extractor: string }>),
+  importResolve: (draft: DraftSeason) =>
+    fetch("/api/import/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ draft }),
+    }).then(json<ResolveResult>),
 };
