@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 import Home from "./pages/Home";
 import NewAward from "./pages/NewAward";
 import EditAward from "./pages/EditAward";
+import ImportAward from "./pages/ImportAward";
 import Winners from "./pages/Winners";
 
 export default function App() {
@@ -12,6 +13,7 @@ export default function App() {
         <nav>
           <NavLink to="/awards" end>Awards</NavLink>
           <NavLink to="/awards/new">New ceremony</NavLink>
+          <NavLink to="/awards/import">Bulk import</NavLink>
         </nav>
         <footer>
           <small>local-only · 127.0.0.1</small>
@@ -22,6 +24,7 @@ export default function App() {
           <Route path="/" element={<Navigate to="/awards" replace />} />
           <Route path="/awards" element={<Home />} />
           <Route path="/awards/new" element={<NewAward />} />
+          <Route path="/awards/import" element={<ImportAward />} />
           <Route path="/awards/:slug" element={<EditAward />} />
           <Route path="/awards/:slug/winners" element={<Winners />} />
         </Routes>

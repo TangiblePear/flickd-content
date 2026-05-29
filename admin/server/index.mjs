@@ -12,6 +12,7 @@ import {
   rebuildManifest,
 } from "./content.mjs";
 import { commitAndMaybePush } from "./git.mjs";
+import { mountImportRoutes } from "./import/index.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ADMIN_ROOT = join(__dirname, "..");
@@ -19,6 +20,8 @@ loadEnv(join(ADMIN_ROOT, ".env.local"));
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+mountImportRoutes(app);
 
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
