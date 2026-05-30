@@ -361,6 +361,7 @@ function inferSeasonMeta(html) {
   let eventName = title;
   eventName = eventName
     .replace(/^list of nominees for the\s*/i, "")
+    .replace(/^(the\s+)?\d+(st|nd|rd|th)\s+/i, "")
     .replace(/\s*\(\d{4}\)\s*$/, "")
     .replace(/\s*\d{4}\s*$/, "")
     .trim();
