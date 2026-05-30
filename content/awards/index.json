@@ -2,21 +2,21 @@
   "seasons": [
     {
       "slug": "77th-primetime-emmy-awards-2026",
-      "eventName": "77th Primetime Emmy Awards",
+      "eventName": "Primetime Emmy Awards",
       "year": 2026,
       "startDate": "2025-07-15",
       "endDate": "2025-10-14",
       "ceremonyDate": "2025-09-14",
-      "lastUpdated": "2026-05-28T22:13:26.349Z"
+      "lastUpdated": "2026-05-30T20:59:22.116Z"
     },
     {
       "slug": "83rd-golden-globes-2026",
-      "eventName": "83rd Golden Globes",
+      "eventName": "Golden Globe Awards",
       "year": 2026,
       "startDate": "2025-12-08",
       "endDate": "2026-02-10",
       "ceremonyDate": "2026-01-11",
-      "lastUpdated": "2026-05-28T21:45:10.411Z"
+      "lastUpdated": "2026-05-30T20:59:24.002Z"
     },
     {
       "slug": "baftas-2026",
@@ -25,7 +25,7 @@
       "startDate": "2026-01-27",
       "endDate": "2026-03-24",
       "ceremonyDate": "2026-02-22",
-      "lastUpdated": "2026-05-28T20:09:37.745Z"
+      "lastUpdated": "2026-05-30T21:21:34.322Z"
     },
     {
       "slug": "oscars-2026",
