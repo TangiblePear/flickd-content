@@ -3,7 +3,7 @@
     "relation": ["delegate_permission/common.handle_all_urls"],
     "target": {
       "namespace": "android_app",
-      "package_name": "com.flickd.app",
+      "package_name": "com.flickto.app",
       "sha256_cert_fingerprints": [
         "25:3E:FF:60:98:32:61:DF:8A:23:09:C5:FA:CA:06:85:24:C3:FA:DA:BE:96:B3:CD:FE:9C:FE:8B:CF:3C:71:83"
       ]

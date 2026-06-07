@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "flags": {
+    "enableDailyRail": true,
+    "enableSharedLists": true,
+    "enableRemoteAwards": true
+  },
+  "manifestCacheSeconds": 300
+}

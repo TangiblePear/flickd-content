@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy · FlickTo</title>
+    <style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: #0e1014; color: #e8eaf0; margin: 0; padding: 2.5rem 1.25rem 4rem;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 28px; margin: 0 0 0.25rem; }
+  h2 { font-size: 19px; margin: 2rem 0 0.5rem; color: #ffb547; }
+  p, li { color: #c7ccd8; }
+  ul { padding-left: 1.25rem; }
+  .muted { color: #8a93a6; font-size: 14px; margin: 0 0 2rem; }
+  a { color: #ffb547; }
+  table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 14px; }
+  th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid #1b2030; vertical-align: top; }
+  th { color: #e8eaf0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>FlickTo Privacy Policy</h1>
+      <p class="muted">Effective 3 June 2026</p>
+
+      <p>FlickTo ("the app", "we") is a media-discovery app that helps you find films and
+        shows, optionally connecting to services you already use (Plex, Trakt, Sonarr, Radarr,
+        Tautulli, Jellyfin) and to friends. This policy explains what data the app handles,
+        why, and the choices you have.</p>
+
+      <h2>Data we handle</h2>
+      <table>
+        <tr><th>Data</th><th>Why</th><th>Notes</th></tr>
+        <tr><td>Advertising ID</td><td>To show ads in the Discover screen</td>
+          <td>Provided by Google AdMob. In the EEA/UK we ask for consent before any ad loads.</td></tr>
+        <tr><td>Crash logs &amp; diagnostics</td><td>To find and fix bugs</td>
+          <td>Firebase Crashlytics and Performance Monitoring. Can be turned off in Settings.</td></tr>
+        <tr><td>App-interaction analytics</td><td>To understand which features are used</td>
+          <td>Firebase Analytics. Can be turned off in Settings.</td></tr>
+        <tr><td>Device &amp; installation identifiers</td><td>Push notifications and analytics</td>
+          <td>Firebase Cloud Messaging token and installation ID.</td></tr>
+        <tr><td>Social content (display name, avatar choice, opinions/comments, shared lists)</td>
+          <td>The optional friends feature</td>
+          <td>End-to-end encrypted. Our relay stores only ciphertext and opaque tokens — it
+            cannot read your content or see who your friends are.</td></tr>
+        <tr><td>Service credentials (Plex/Trakt tokens, Sonarr/Radarr/Tautulli URLs &amp; keys, AI keys)</td>
+          <td>To connect to the services you choose</td>
+          <td>Encrypted at rest on your device using the Android Keystore. Plex, Sonarr, Radarr,
+            Tautulli and Jellyfin are self-hosted: the app connects <strong>directly</strong> to the
+            address you enter (often on your local network), so those credentials are never sent to
+            us or through our proxy. We never receive your service credentials.</td></tr>
+        <tr><td>IP address</td><td>Inherent to any network request</td>
+          <td>Seen by us and by the third parties below when the app makes a request.</td></tr>
+        <tr><td>Camera</td><td>Scanning a friend QR code</td>
+          <td>Processed on-device only. Images are never stored or transmitted.</td></tr>
+        <tr><td>Location</td><td>—</td><td>Not collected. The app holds no location permission.</td></tr>
+      </table>
+
+      <h2>Third parties</h2>
+      <ul>
+        <li><strong>Google</strong> — AdMob (ads), Firebase Analytics, Crashlytics, Performance,
+          and Cloud Messaging.</li>
+        <li><strong>The services you connect</strong> — Plex, Trakt, Sonarr, Radarr, Tautulli,
+          Jellyfin, TMDB. The app talks to these on your behalf using the credentials you enter.</li>
+        <li><strong>Our content backend (Cloudflare)</strong> — serves catalog/daily content, the
+          recommendation scoring service, and the zero-knowledge social relay. It also proxies
+          third-party content APIs (Trakt catalog, TMDB, OMDb, JustWatch, Fanart) using FlickTo's
+          own app-level API keys; your personal service credentials do <strong>not</strong> pass
+          through it.</li>
+      </ul>
+
+      <h2>Encryption</h2>
+      <p>Service credentials and your social identity keys are encrypted on your device with a key
+        held in the hardware-backed Android Keystore. Social content shared with friends is
+        end-to-end encrypted before it leaves your device; the relay only ever stores ciphertext.</p>
+
+      <h2>Your choices</h2>
+      <ul>
+        <li><strong>Analytics &amp; diagnostics:</strong> toggle off in Settings → Privacy.</li>
+        <li><strong>Ads consent (EEA/UK):</strong> shown on first launch and changeable later.</li>
+        <li><strong>Delete your data:</strong> see below.</li>
+      </ul>
+
+      <h2>Deleting your data</h2>
+      <p>In the app: <strong>Settings → Social Profile → Delete my social data</strong> removes your
+        social identity, friend card, feed, inbox, encrypted backup, and synced friends list from
+        the relay, and clears it locally. If you no longer have the app installed, use the web form
+        at <a href="/delete">flickto.app/delete</a>. Analytics and crash data are deleted by Google
+        on the retention schedule of their respective Firebase products.</p>
+
+      <h2>Children</h2>
+      <p>FlickTo is not directed at children and we do not knowingly collect data from children.</p>
+
+      <h2>Changes</h2>
+      <p>We may update this policy; the effective date above reflects the latest version.</p>
+
+      <h2>Contact</h2>
+      <p>Questions or requests: <a href="mailto:privacy@flickto.app">privacy@flickto.app</a>.</p>
+    </main>
+  </body>
+</html>

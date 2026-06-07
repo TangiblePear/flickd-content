@@ -1,28 +1,36 @@
-name = "flickd-share-api"
+name = "flickto-share-api"
 main = "src/index.ts"
 compatibility_date = "2025-01-01"
 
-# Bind to flickd.tangible.cloud/api/share* (JSON API) and /share/* (human
-# landing page), plus the E2EE social channel (feed/opinions/inbox). All
-# preempt the content Pages catch-all on the same host.
+# Bind to flickto.app/api/share* (JSON API) and /share/* (human
+# landing page), plus the E2EE social channel (user profiles/opinions/access,
+# inbox, friendcode), the portable-identity backup + live friends record, and
+# the data-deletion endpoints. Legal pages (/privacy, /delete) are now served
+# as static HTML by the flickto-content worker.
 routes = [
-  { pattern = "flickd.tangible.cloud/api/share", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/share/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/share/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/feed/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/opinions/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/inbox/*", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/friendcode", zone_name = "tangible.cloud" },
-  { pattern = "flickd.tangible.cloud/api/friendcode/*", zone_name = "tangible.cloud" }
+  { pattern = "flickto.app/api/share", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/share/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/share/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/user/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/opinions/batch", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/inbox/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/friendcode", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/friendcode/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" }
 ]
 
-# Create with: wrangler kv namespace create FLICKD_SHARE
-# then paste the id below.
-[[kv_namespaces]]
-binding = "FLICKD_SHARE"
-id = "56252c82d64e4c04afa701609b664cbe"
+
+# Zero-knowledge object storage for the social channel. The relay only ever
+# stores ciphertext + opaque tokens/hashes.
+# Create with: wrangler r2 bucket create flickto-social
+# Recommended lifecycle rules (dashboard): expire `share/` after 30 days and
+# `rl/` after 1 day so abandoned share links and rate-limit counters self-clean.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "flickto-social"
 
 [vars]
 SHARE_TTL_SECONDS = "2592000"
-RATE_LIMIT_PER_HOUR = "10"
 MAX_ITEMS = "100"
+# Per-IP hourly cap for share-create; inbox-post allows 6x this.
+RATE_LIMIT_PER_HOUR = "10"

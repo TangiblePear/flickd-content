@@ -1,0 +1,1138 @@
+{
+  "id": "emmys-2026",
+  "eventName": "Primetime Emmy Awards",
+  "year": 2026,
+  "startDate": "2025-07-15",
+  "endDate": "2025-10-14",
+  "ceremonyDate": "2025-09-14",
+  "categories": [
+    {
+      "name": "Outstanding Comedy Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg"
+        },
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg"
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg"
+        },
+        {
+          "tmdbId": 136311,
+          "title": "Shrinking",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zEFKMNPBKq6JG7uuDkzTQ9WwErn.jpg"
+        },
+        {
+          "tmdbId": 83631,
+          "title": "What We Do in the Shadows",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wa3ZQE9kLnqwN3vQ0NNjg1NPsCa.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Drama Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 83867,
+          "title": "Andor",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/khZqmwHQicTYoS7Flreb9EddFZC.jpg"
+        },
+        {
+          "tmdbId": 1147546,
+          "title": "The Diplomat",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/uwl9Y4px8TTIQK4N19k6gnW1RnX.jpg"
+        },
+        {
+          "tmdbId": 100088,
+          "title": "The Last of Us",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dmo6TYuuJgaYinXBPjrgG9mB5od.jpg"
+        },
+        {
+          "tmdbId": 245927,
+          "title": "Paradise",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l8RqfhqEk04W5sSOjQ9zeWU1DyM.jpg"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg"
+        },
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Limited or Anthology Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg"
+        },
+        {
+          "tmdbId": 225634,
+          "title": "Monsters: The Lyle and Erik Menendez Story",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/x9YC2rpXHUFMqI1hCekKDm9UE4w.jpg"
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Reality Competition Program",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 215943,
+          "title": "The Traitors",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xWK9tLH2UGgzuAI6P3cHeTKopfj.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 21124,
+          "title": "The Amazing Race",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/x1H88C6mHdlkkK3XhpclxDZ6QJa.jpg"
+        },
+        {
+          "tmdbId": 8514,
+          "title": "RuPaul's Drag Race",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ySs9xkTfPgQCUNB2ctOzcMWP14n.jpg"
+        },
+        {
+          "tmdbId": 133828,
+          "title": "Survivor",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gvGFSwK6IXAvXK1kJNf1gkEZGvM.jpg"
+        },
+        {
+          "tmdbId": 54493,
+          "title": "Top Chef",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/aff9pmv8d3rItSlBv5yvfmVcVSy.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Talk Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 63770,
+          "title": "The Late Show with Stephen Colbert",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/9jkThAGYj2yp8jsS6Nriy5mzKFT.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 2224,
+          "title": "The Daily Show",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ixcfyK7it6FjRM36Te4OdblAq4X.jpg"
+        },
+        {
+          "tmdbId": 1489,
+          "title": "Jimmy Kimmel Live!",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bGB6bEbG4qL22C1SFupkdAxYC9i.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Scripted Variety Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 60694,
+          "title": "Last Week Tonight with John Oliver",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/fuuEjEr69uvRtGaQw70JfvdrUwb.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 156102,
+          "title": "Saturday Night Live",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/32SHJqkK7wQjEHaOIPk4p24VtO7.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Variety Special (Live)",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 1667,
+          "title": "Saturday Night Live",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/s1cZBqbMwAF3w8S3Yo0j5nr2Yuo.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1661819,
+          "title": "Kendrick Lamar's Super Bowl LIX Halftime Show",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/hy7abI3UaI9k0eCjAwzFzQm4Yvr.jpg"
+        },
+        {
+          "tmdbId": 1408126,
+          "title": "Beyoncé Bowl",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/tTnzg2uEmOpFgU0xtg8z8jhpjxg.jpg"
+        },
+        {
+          "tmdbId": 27023,
+          "title": "The Oscars",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wyMHJMQp8WpmBg9CxefvbQnFhrm.jpg"
+        },
+        {
+          "tmdbId": 1433330,
+          "title": "SNL50: The Homecoming Concert",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xpl8VM3bLmPWXPpaW9Vhsn3olto.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actor in a Comedy Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Seth Rogen",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg",
+          "personName": "Adam Brody"
+        },
+        {
+          "tmdbId": 136311,
+          "title": "Shrinking",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zEFKMNPBKq6JG7uuDkzTQ9WwErn.jpg",
+          "personName": "Jason Segel"
+        },
+        {
+          "tmdbId": 107113,
+          "title": "Only Murders in the Building",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1yjFVQZuW8aofZ5Cgol8iImsVFp.jpg",
+          "personName": "Martin Short"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Jeremy Allen White"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actress in a Comedy Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg",
+          "personName": "Jean Smart",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 242054,
+          "title": "The Residence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cJZbg425I9LF3SlJVQDOg4nJEvq.jpg",
+          "personName": "Uzo Aduba"
+        },
+        {
+          "tmdbId": 250923,
+          "title": "Nobody Wants This",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/cUpIceeJJoRqUHSCzh6jRSmlpkA.jpg",
+          "personName": "Kristen Bell"
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg",
+          "personName": "Quinta Brunson"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Ayo Edebiri"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actor in a Drama Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "personName": "Noah Wyle",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 245927,
+          "title": "Paradise",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l8RqfhqEk04W5sSOjQ9zeWU1DyM.jpg",
+          "personName": "Sterling K. Brown"
+        },
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg",
+          "personName": "Gary Oldman"
+        },
+        {
+          "tmdbId": 100088,
+          "title": "The Last of Us",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dmo6TYuuJgaYinXBPjrgG9mB5od.jpg",
+          "personName": "Pedro Pascal"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Adam Scott"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actress in a Drama Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Britt Lower",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 226174,
+          "title": "Matlock",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/6kEAVyhalzv4HCAfnLfXUcF3nQZ.jpg",
+          "personName": "Kathy Bates"
+        },
+        {
+          "tmdbId": 199318,
+          "title": "Bad Sisters",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/z63D1Y8udrrFOhLFCT9YElcTr0w.jpg",
+          "personName": "Sharon Horgan"
+        },
+        {
+          "tmdbId": 100088,
+          "title": "The Last of Us",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dmo6TYuuJgaYinXBPjrgG9mB5od.jpg",
+          "personName": "Bella Ramsey"
+        },
+        {
+          "tmdbId": 1147546,
+          "title": "The Diplomat",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/uwl9Y4px8TTIQK4N19k6gnW1RnX.jpg",
+          "personName": "Keri Russell"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actor in a Limited or Anthology Series or Movie",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Stephen Graham",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "Colin Farrell"
+        },
+        {
+          "tmdbId": 156933,
+          "title": "Presumed Innocent",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7MXg0BxuSRWz2yKc03M40du2mrc.jpg",
+          "personName": "Jake Gyllenhaal"
+        },
+        {
+          "tmdbId": 209876,
+          "title": "Dope Thief",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sIed5PCiMNHd7G55DR9ObSRV9v2.jpg",
+          "personName": "Brian Tyree Henry"
+        },
+        {
+          "tmdbId": 225634,
+          "title": "Monsters: The Lyle and Erik Menendez Story",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/x9YC2rpXHUFMqI1hCekKDm9UE4w.jpg",
+          "personName": "Cooper Koch"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Lead Actress in a Limited or Anthology Series or Movie",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "Cristin Milioti",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 1648323,
+          "title": "Disclaimer",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "Cate Blanchett"
+        },
+        {
+          "tmdbId": 246992,
+          "title": "Sirens",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/mezbwX9gFWTXl0XiicS5ZMcdXVx.jpg",
+          "personName": "Meghann Fahy"
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg",
+          "personName": "Rashida Jones"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg",
+          "personName": "Michelle Williams"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actor in a Comedy Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 106308,
+          "title": "Somebody Somewhere",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1GkoExnlnyTcyGWIoHA4YG8mysc.jpg",
+          "personName": "Jeff Hiller",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Ike Barinholtz"
+        },
+        {
+          "tmdbId": 243316,
+          "title": "The Four Seasons",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/w09XeYl096pwES8riRMZwEA9rnh.jpg",
+          "personName": "Colman Domingo"
+        },
+        {
+          "tmdbId": 136311,
+          "title": "Shrinking",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zEFKMNPBKq6JG7uuDkzTQ9WwErn.jpg",
+          "personName": "Harrison Ford"
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Ebon Moss-Bachrach"
+        },
+        {
+          "tmdbId": 136311,
+          "title": "Shrinking",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zEFKMNPBKq6JG7uuDkzTQ9WwErn.jpg",
+          "personName": "Michael Urie"
+        },
+        {
+          "tmdbId": 156102,
+          "title": "Saturday Night Live",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/32SHJqkK7wQjEHaOIPk4p24VtO7.jpg",
+          "personName": "Bowen Yang"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actress in a Comedy Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg",
+          "personName": "Hannah Einbinder",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "Liza Colón-Zayas"
+        },
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Kathryn Hahn"
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg",
+          "personName": "Janelle James"
+        },
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "Catherine O'Hara"
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg",
+          "personName": "Sheryl Lee Ralph"
+        },
+        {
+          "tmdbId": 136311,
+          "title": "Shrinking",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/zEFKMNPBKq6JG7uuDkzTQ9WwErn.jpg",
+          "personName": "Jessica Williams"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actor in a Drama Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Tramell Tillman",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Zach Cherry"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Walton Goggins"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Jason Isaacs"
+        },
+        {
+          "tmdbId": 245927,
+          "title": "Paradise",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l8RqfhqEk04W5sSOjQ9zeWU1DyM.jpg",
+          "personName": "James Marsden"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Sam Rockwell"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "John Turturro"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actress in a Drama Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "personName": "Katherine LaNasa",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Patricia Arquette"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Carrie Coon"
+        },
+        {
+          "tmdbId": 245927,
+          "title": "Paradise",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/l8RqfhqEk04W5sSOjQ9zeWU1DyM.jpg",
+          "personName": "Julianne Nicholson"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Parker Posey"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Natasha Rothwell"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "Aimee Lou Wood"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actor in a Limited or Anthology Series or Movie",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Owen Cooper",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 225634,
+          "title": "Monsters: The Lyle and Erik Menendez Story",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/x9YC2rpXHUFMqI1hCekKDm9UE4w.jpg",
+          "personName": "Javier Bardem"
+        },
+        {
+          "tmdbId": 156933,
+          "title": "Presumed Innocent",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7MXg0BxuSRWz2yKc03M40du2mrc.jpg",
+          "personName": "Bill Camp"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg",
+          "personName": "Rob Delaney"
+        },
+        {
+          "tmdbId": 156933,
+          "title": "Presumed Innocent",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7MXg0BxuSRWz2yKc03M40du2mrc.jpg",
+          "personName": "Peter Sarsgaard"
+        },
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Ashley Walters"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Supporting Actress in a Limited or Anthology Series or Movie",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Erin Doherty",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 156933,
+          "title": "Presumed Innocent",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/7MXg0BxuSRWz2yKc03M40du2mrc.jpg",
+          "personName": "Ruth Negga"
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "Deirdre O'Connell"
+        },
+        {
+          "tmdbId": 225634,
+          "title": "Monsters: The Lyle and Erik Menendez Story",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/x9YC2rpXHUFMqI1hCekKDm9UE4w.jpg",
+          "personName": "Chloë Sevigny"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg",
+          "personName": "Jenny Slate"
+        },
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Christine Tremarco"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Directing for a Comedy Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "personName": "The Studio: \"The Oner\"",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 136315,
+          "title": "The Bear",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/4fVddnbhcmzRZE14NJY03GKS6Fn.jpg",
+          "personName": "The Bear: \"Napkins\""
+        },
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg",
+          "personName": "Hacks: \"A Slippery Slope\""
+        },
+        {
+          "tmdbId": 261363,
+          "title": "Mid-Century Modern",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/tiOqjhKjaxXlkKs5IPlmvR02ELv.jpg",
+          "personName": "Mid-Century Modern: \"Here's to You, Mrs. Schneiderman\""
+        },
+        {
+          "tmdbId": 1139465,
+          "title": "The Rehearsal",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/p8dhREZiWk54iSqVuj4VD7vyepZ.jpg",
+          "personName": "The Rehearsal: \"Pilot's Code\""
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Directing for a Drama Series",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg",
+          "personName": "Slow Horses: \"Hello Goodbye\"",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 83867,
+          "title": "Andor",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/khZqmwHQicTYoS7Flreb9EddFZC.jpg",
+          "personName": "Andor: \"Who Are You?\""
+        },
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "personName": "The Pitt: \"6:00 P.M.\""
+        },
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg",
+          "personName": "The Pitt: \"7:00 A.M.\""
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Severance: \"Chikhai Bardo\""
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg",
+          "personName": "Severance: \"Cold Harbor\""
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg",
+          "personName": "The White Lotus: \"Amor Fati\""
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Directing for a Limited or Anthology Series or Movie",
+      "kind": "PEOPLE",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "personName": "Adolescence",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg",
+          "personName": "Dying for Sex: \"It's Not That Serious\""
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "The Penguin: \"Cent'Anni\""
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null,
+          "personName": "The Penguin: \"A Great or Little Thing\""
+        },
+        {
+          "tmdbId": 246992,
+          "title": "Sirens",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/mezbwX9gFWTXl0XiicS5ZMcdXVx.jpg",
+          "personName": "Sirens: \"Exile\""
+        },
+        {
+          "tmdbId": 216082,
+          "title": "Zero Day",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/odIyR46aAX59dvQ1ON4P53ow1aE.jpg",
+          "personName": "Zero Day"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Writing for a Comedy Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 247767,
+          "title": "The Studio",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/2c6ofLTa5CRfeQjVA1bWiYBdxQN.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 125935,
+          "title": "Abbott Elementary",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/nBe1e3JJEZ6veGrVXNF0fRoLu56.jpg"
+        },
+        {
+          "tmdbId": 124101,
+          "title": "Hacks",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ca5XiEFgyGsI38QT3wEKa1QVGX.jpg"
+        },
+        {
+          "tmdbId": 1139465,
+          "title": "The Rehearsal",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/p8dhREZiWk54iSqVuj4VD7vyepZ.jpg"
+        },
+        {
+          "tmdbId": 106308,
+          "title": "Somebody Somewhere",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/1GkoExnlnyTcyGWIoHA4YG8mysc.jpg"
+        },
+        {
+          "tmdbId": 83631,
+          "title": "What We Do in the Shadows",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/wa3ZQE9kLnqwN3vQ0NNjg1NPsCa.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Writing for a Drama Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 83867,
+          "title": "Andor",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/khZqmwHQicTYoS7Flreb9EddFZC.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 250307,
+          "title": "The Pitt",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/kvFSpESyBZMjaeOJDx7RS3P1jey.jpg"
+        },
+        {
+          "tmdbId": 95396,
+          "title": "Severance",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/pPHpeI2X1qEd1CS1SeyrdhZ4qnT.jpg"
+        },
+        {
+          "tmdbId": 95480,
+          "title": "Slow Horses",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/dnpatlJrEPiDSn5fzgzvxtiSnMo.jpg"
+        },
+        {
+          "tmdbId": 111803,
+          "title": "The White Lotus",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/gbSaK9v1CbcYH1ISgbM7XObD2dW.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Writing for a Limited or Anthology Series or Movie",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 249042,
+          "title": "Adolescence",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/20i4nShZZg1g1VFHSB8xpaYM4r7.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 919188,
+          "title": "Black Mirror",
+          "type": "MOVIE",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/sFVK60kpqZLpOuKFNMu6E4hTmcD.jpg"
+        },
+        {
+          "tmdbId": 241405,
+          "title": "Dying for Sex",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/xaKb3cTh8mT6fgLSXuqo4JoS0dU.jpg"
+        },
+        {
+          "tmdbId": 1628532,
+          "title": "The Penguin",
+          "type": "MOVIE",
+          "posterUrl": null
+        },
+        {
+          "tmdbId": 245256,
+          "title": "Say Nothing",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/bAF3gTGuFNDdzGUIAnDqi5nbFf3.jpg"
+        }
+      ]
+    },
+    {
+      "name": "Outstanding Writing for a Variety Series",
+      "kind": "MEDIA",
+      "nominees": [
+        {
+          "tmdbId": 60694,
+          "title": "Last Week Tonight with John Oliver",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/fuuEjEr69uvRtGaQw70JfvdrUwb.jpg",
+          "isWinner": true
+        },
+        {
+          "tmdbId": 2224,
+          "title": "The Daily Show",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/ixcfyK7it6FjRM36Te4OdblAq4X.jpg"
+        },
+        {
+          "tmdbId": 156102,
+          "title": "Saturday Night Live",
+          "type": "TV",
+          "posterUrl": "https://image.tmdb.org/t/p/w500/32SHJqkK7wQjEHaOIPk4p24VtO7.jpg"
+        }
+      ]
+    }
+  ]
+}

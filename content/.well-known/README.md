@@ -1,7 +1,7 @@
 # Android App Links — assetlinks.json
 
-`assetlinks.json` proves `flickd.tangible.cloud` is allowed to open the Android
-app. Without it, `autoVerify` in the app's manifest fails and `https://flickd.tangible.cloud/share/<code>`
+`assetlinks.json` proves `flickto.app` is allowed to open the Android
+app. Without it, `autoVerify` in the app's manifest fails and `https://flickto.app/share/<code>`
 links open in the browser instead of the app.
 
 ## Current state & before publishing
@@ -35,9 +35,9 @@ installs **and** sideloaded/debug builds, add both:
 
 ## Verifying after deploy
 
-- File must be reachable at `https://flickd.tangible.cloud/.well-known/assetlinks.json`
+- File must be reachable at `https://flickto.app/.well-known/assetlinks.json`
   over HTTPS, `Content-Type: application/json`, no redirects.
 - Check with Google's tester:
-  `https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://flickd.tangible.cloud&relation=delegate_permission/common.handle_all_urls`
-- On a device: `adb shell pm get-app-links com.flickd.app` should show the
+  `https://digitalassetlinks.googleapis.com/v1/statements:list?source.web.site=https://flickto.app&relation=delegate_permission/common.handle_all_urls`
+- On a device: `adb shell pm get-app-links com.flickto.app` should show the
   domain as `verified`.
