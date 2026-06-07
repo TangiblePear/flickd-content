@@ -39,5 +39,5 @@ RATE_LIMIT_PER_HOUR = "10"
 enabled = true
 
 [observability.logs]
-enabled = false
+enabled = true
 invocation_logs = true
