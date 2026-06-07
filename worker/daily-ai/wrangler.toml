@@ -19,3 +19,10 @@ TARGET_COUNT = "10"
 # Secrets (set via `wrangler secret put`):
 #   GEMINI_API_KEY
 #   TMDB_API_KEY
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = false
+invocation_logs = true

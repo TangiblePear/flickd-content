@@ -34,3 +34,10 @@ SHARE_TTL_SECONDS = "2592000"
 MAX_ITEMS = "100"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = false
+invocation_logs = true

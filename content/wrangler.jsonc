@@ -3,7 +3,11 @@
   "name": "flickto-content",
   "compatibility_date": "2026-05-28",
   "observability": {
-    "enabled": true
+    "enabled": true,
+    "logs": {
+      "enabled": false,
+      "invocation_logs": true
+    }
   },
   "compatibility_flags": [
     "nodejs_compat"
