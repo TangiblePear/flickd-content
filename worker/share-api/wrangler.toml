@@ -29,11 +29,25 @@ routes = [
 binding = "BUCKET"
 bucket_name = "flickto-social"
 
+# Server-visible profile pictures + moderation reports/tombstones. Kept off the
+# ciphertext bucket so it can carry different caching/lifecycle and so the
+# flickto-web admin panel can bind THIS bucket alone for review/takedown.
+# Create with: wrangler r2 bucket create flickto-profile-pics
+# Recommended lifecycle rule (dashboard): expire `_reports/` after 90 days.
+[[r2_buckets]]
+binding = "PICS"
+bucket_name = "flickto-profile-pics"
+
 [vars]
 SHARE_TTL_SECONDS = "2592000"
 MAX_ITEMS = "100"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
+# Image moderation. Set to "true" and add the VISION_API_KEY secret to enable the
+# paid Cloud Vision SafeSearch scan (wrangler secret put VISION_API_KEY).
+MODERATION_ENABLED = "true"
+# Distinct reporters that auto-hide a picture pending admin review.
+REPORT_AUTOHIDE = "3"
 
 [observability]
 enabled = true

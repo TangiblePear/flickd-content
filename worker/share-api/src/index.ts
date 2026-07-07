@@ -1,14 +1,24 @@
 interface Env {
   BUCKET: R2Bucket;
+  // Profile-picture bytes + moderation reports/tombstones (server-visible, not
+  // E2EE) so the flickto-web admin panel can bind the same bucket for review.
+  PICS: R2Bucket;
   SHARE_TTL_SECONDS: string;
   MAX_ITEMS: string;
   RATE_LIMIT_PER_HOUR: string;
   FCM_PROJECT_ID: string;
   FCM_SERVICE_ACCOUNT_EMAIL: string;
   FCM_PRIVATE_KEY: string;
+  // Image moderation. When MODERATION_ENABLED !== "true" or the key is absent,
+  // uploads skip the paid scan (dev mode) and are accepted.
+  MODERATION_ENABLED?: string;
+  VISION_API_KEY?: string;
+  // Distinct-reporter threshold that auto-hides a picture pending admin review.
+  REPORT_AUTOHIDE?: string;
 }
 
 import { sendFcmMessage, FcmConfig } from "./fcm";
+import { moderateImage } from "./moderation";
 
 interface ShareItem {
   tmdbId: number;
@@ -118,6 +128,19 @@ export default {
       if (req.method === "PUT") return handlePutOpinion(friendId, hash, req, env);
       if (req.method === "DELETE") return handleDeleteOpinion(friendId, hash, req, env);
     }
+
+    // ── Profile picture (server-visible, moderated) ──
+    const userPicture = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/picture$`));
+    if (userPicture) {
+      const [, friendId] = userPicture;
+      if (req.method === "PUT") return handlePutPicture(friendId, req, env, ctx);
+      if (req.method === "GET") return handleGetPicture(friendId, env);
+      if (req.method === "DELETE") return handleDeletePicture(friendId, req, env);
+    }
+
+    // ── Report ingestion (user / feed-comment / picture) → admin inbox ──
+    const userReport = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/report$`));
+    if (userReport && req.method === "POST") return handleReport(userReport[1], req, env);
 
     // ── Inbox (sealed handshake / share messages) ──
     const inbox = p.match(new RegExp(`^/api/inbox/(${FRIEND_ID})$`));
@@ -347,6 +370,178 @@ async function handleDeleteOpinion(friendId: string, hash: string, req: Request,
   if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
   await env.BUCKET.delete(`${friendId}/opinions/${hash}.json`);
   return json({ ok: true });
+}
+
+// ── Profile pictures + reports ──────────────────────────────────────────────
+// All picture-domain objects live in the PICS bucket (server-visible, not E2EE)
+// so the flickto-web admin panel can bind the same bucket for review/takedown:
+//   pics/{friendId}/picture.jpg           — the image bytes
+//   pics/{friendId}/meta.json             — { version, contentType, sha256, verdict }
+//   _moderation/{friendId}.json           — takedown tombstone (auto or admin)
+//   _reports/{targetId}/{ts}-{reporter}.json — one report record
+const MAX_PICTURE_BYTES = 512 * 1024;
+const picKey = (friendId: string) => `pics/${friendId}/picture.jpg`;
+const picMetaKey = (friendId: string) => `pics/${friendId}/meta.json`;
+const tombstoneKey = (friendId: string) => `_moderation/${friendId}.json`;
+const REPORT_KINDS = new Set(["user", "feed_comment", "picture"]);
+
+interface PictureMeta {
+  version: number;
+  contentType: string;
+  sha256: string;
+  verdict: string;
+  updatedAt: number;
+}
+
+/** Sniff the leading bytes for a supported raster type. Returns a MIME or null. */
+function sniffImageType(bytes: Uint8Array): string | null {
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+    bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+  ) return "image/png";
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && // "RIFF"
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50 // "WEBP"
+  ) return "image/webp";
+  return null;
+}
+
+// PUT the owner's profile picture. Owner-auth (same secret + read token that
+// gates profile.json). Scans the bytes before storing; a flagged image is never
+// persisted or shared. A fresh upload clears any prior takedown tombstone.
+async function handlePutPicture(
+  friendId: string,
+  req: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  if (!(await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token")))) {
+    return forbidden();
+  }
+  const buf = new Uint8Array(await req.arrayBuffer());
+  if (buf.byteLength === 0) return invalidJson();
+  if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();
+
+  const contentType = sniffImageType(buf);
+  if (!contentType) return json({ error: "unsupported_type" }, { status: 400 });
+
+  const result = await moderateImage(buf, env);
+  if (!result.allowed) {
+    return json({ error: "rejected", categories: result.categories }, { status: 422 });
+  }
+
+  const version = Date.now();
+  await env.PICS.put(picKey(friendId), buf, { httpMetadata: { contentType } });
+  const meta: PictureMeta = {
+    version,
+    contentType,
+    sha256: await sha256hexBytes(buf),
+    verdict: result.verdict,
+    updatedAt: version,
+  };
+  await env.PICS.put(picMetaKey(friendId), JSON.stringify(meta), {
+    httpMetadata: { contentType: "application/json" },
+  });
+  // A new image supersedes any earlier auto/admin takedown.
+  await env.PICS.delete(tombstoneKey(friendId));
+
+  // Reuse the profile fan-out so friends refresh and pull the new pictureUrl.
+  ctx.waitUntil(fanOutProfileUpdate(friendId, env));
+
+  const url = `https://flickto.app/api/user/${friendId}/picture?v=${version}`;
+  return json({ ok: true, url, version });
+}
+
+// GET a profile picture. Public — the opaque friendId is the capability, so Coil
+// loads it with no custom headers. A takedown tombstone yields 410.
+async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
+  const tomb = await env.PICS.get(tombstoneKey(friendId));
+  if (tomb) return new Response("gone", { status: 410, headers: { ...CORS } });
+  const obj = await env.PICS.get(picKey(friendId));
+  if (!obj) return new Response("not found", { status: 404, headers: { ...CORS } });
+  const contentType = obj.httpMetadata?.contentType ?? "image/jpeg";
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      ...CORS,
+    },
+  });
+}
+
+// DELETE the owner's own picture. Owner-auth.
+async function handleDeletePicture(friendId: string, req: Request, env: Env): Promise<Response> {
+  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  await env.PICS.delete(picKey(friendId));
+  await env.PICS.delete(picMetaKey(friendId));
+  return json({ ok: true });
+}
+
+// POST a report for any content kind. The reporter proves a real identity by
+// presenting their own bound read token (X-Read-Token matching reporterId). The
+// record lands in the admin Reports inbox; picture reports auto-hide at threshold.
+async function handleReport(targetFriendId: string, req: Request, env: Env): Promise<Response> {
+  const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
+  const limit = Number(env.RATE_LIMIT_PER_HOUR ?? "10");
+  if (await rateLimited(env, "report", ip, limit)) return json({ error: "rate_limited" }, { status: 429 });
+
+  let body: { kind?: unknown; reporterId?: unknown; reason?: unknown; context?: unknown };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return invalidJson();
+  }
+  const kind = typeof body.kind === "string" ? body.kind : "";
+  const reporterId = typeof body.reporterId === "string" ? body.reporterId : "";
+  if (!REPORT_KINDS.has(kind) || !reporterId) return json({ error: "bad_request" }, { status: 400 });
+
+  // Anti-spam: the reporter must own the reporterId (its bound read token).
+  if (!(await verifyReadToken(env, reporterId, req.headers.get("X-Read-Token")))) return forbidden();
+
+  const record = {
+    kind,
+    targetFriendId,
+    reporterId,
+    reason: typeof body.reason === "string" ? body.reason.slice(0, 2000) : "",
+    context: typeof body.context === "string" ? body.context.slice(0, 4000) : "",
+    at: Date.now(),
+    resolved: false,
+  };
+  await env.PICS.put(
+    `_reports/${targetFriendId}/${record.at}-${reporterId}.json`,
+    JSON.stringify(record),
+    { httpMetadata: { contentType: "application/json" } },
+  );
+
+  // Picture reports auto-hide once enough distinct reporters flag them.
+  if (kind === "picture") {
+    const threshold = Number(env.REPORT_AUTOHIDE ?? "3");
+    const listed = await env.PICS.list({ prefix: `_reports/${targetFriendId}/` });
+    const reporters = new Set<string>();
+    for (const o of listed.objects) {
+      const name = o.key.split("/").pop() ?? "";
+      const who = name.replace(/\.json$/, "").split("-").slice(1).join("-");
+      if (who) reporters.add(who);
+    }
+    if (reporters.size >= threshold) {
+      await env.PICS.put(
+        tombstoneKey(targetFriendId),
+        JSON.stringify({ reason: "auto_report_threshold", at: Date.now() }),
+        { httpMetadata: { contentType: "application/json" } },
+      );
+    }
+  }
+
+  return json({ ok: true });
+}
+
+/** sha256 hex over raw bytes (the string variant hashes UTF-8 text). */
+async function sha256hexBytes(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 interface BatchQuery {
