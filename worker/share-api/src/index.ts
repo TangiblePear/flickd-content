@@ -17,13 +17,17 @@ interface Env {
   REPORT_AUTOHIDE?: string;
   // Orphan-profile reaper: delete a friendId folder untouched for this long.
   PROFILE_TTL_SECONDS?: string;
-  // Max folders the reaper purges per scheduled run (keeps each run bounded).
+  // Max folders the reaper purges per run (keeps each run bounded).
   GC_MAX_PREFIXES_PER_RUN?: string;
+  // Opportunistic trigger cadence (no cron budget): run at most once per this.
+  REAP_INTERVAL_SECONDS?: string;
+  // Per-isolate throttle so we don't read the gate object on every request.
+  REAP_GATE_THROTTLE_SECONDS?: string;
 }
 
 import { sendFcmMessage, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
-import { reapOrphanProfiles } from "./reaper";
+import { reapOrphanProfiles, dueForReap } from "./reaper";
 
 interface ShareItem {
   tmdbId: number;
@@ -101,6 +105,11 @@ const invalidJson = () => json({ error: "invalid_json" }, { status: 400 });
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+    // Opportunistic orphan-profile reaper: no cron budget on this account, so we
+    // let ambient request traffic tick the clock. Fire-and-forget — never blocks
+    // the response, self-throttles, and runs the reap at most once per interval.
+    ctx.waitUntil(maybeReap(env));
 
     const url = new URL(req.url);
     const p = url.pathname;
@@ -192,31 +201,57 @@ export default {
 
     return notFound();
   },
-
-  // Scheduled orphan-profile reaper (weekly cron). Deletes friendId folders that
-  // have gone untouched for PROFILE_TTL_SECONDS — a wiped/uninstalled device stops
-  // re-publishing (a live install re-PUTs fcm-token every =<3 days), so its data
-  // ages out. Recovery blobs (backup/, self/) are excluded by prefix shape. The
-  // run is bounded and resumes from a stored cursor.
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runReaper(env));
-  },
 };
 
-async function runReaper(env: Env): Promise<void> {
+// ── Opportunistic orphan-profile reaper ──────────────────────────────────────
+// This account is at its 5-cron limit, so instead of a scheduled() cron the
+// reaper piggybacks on ambient request traffic: any request past the interval
+// fires one bounded reap in the background. A wiped/uninstalled device stops
+// re-publishing (a live install re-PUTs fcm-token every ≤3 days), so its data
+// ages out; recovery blobs (backup/, self/) are excluded by prefix shape.
+
+interface GcState {
+  cursor?: string;
+  lastRunAt?: number;
+}
+const GC_CURSOR_KEY = "_gc/cursor.json";
+
+// Best-effort per-isolate throttle so we hit R2 for the gate object at most once
+// per window regardless of request volume (ephemeral; a recycled isolate just
+// re-reads sooner — correctness rides on the persisted lastRunAt, not this).
+let lastGateCheckMs = 0;
+
+async function maybeReap(env: Env): Promise<void> {
+  try {
+    const now = Date.now();
+    const throttleMs = Number(env.REAP_GATE_THROTTLE_SECONDS ?? "600") * 1000;
+    if (now - lastGateCheckMs < throttleMs) return;
+    lastGateCheckMs = now;
+
+    const state = (await getJson<GcState>(env, GC_CURSOR_KEY)) ?? {};
+    const intervalMs = Number(env.REAP_INTERVAL_SECONDS ?? "86400") * 1000; // default 24h
+    if (!dueForReap(state.lastRunAt, now, intervalMs)) return;
+
+    // Claim the run first so concurrent requests don't double-fire.
+    await putJson(env, GC_CURSOR_KEY, { cursor: state.cursor, lastRunAt: now });
+    await runReaper(env, state.cursor, now);
+  } catch (e) {
+    console.error("reaper: maybeReap failed", e);
+  }
+}
+
+async function runReaper(env: Env, cursor: string | undefined, claimedAt: number): Promise<void> {
   const ttlMs = Number(env.PROFILE_TTL_SECONDS ?? "31536000") * 1000; // default 365d
   const cap = Number(env.GC_MAX_PREFIXES_PER_RUN ?? "500");
-  const saved = await getJson<{ cursor?: string }>(env, GC_CURSOR_KEY);
   const result = await reapOrphanProfiles(
     env.BUCKET,
     (friendId) => purgeFriendScoped(env, friendId),
-    { nowMs: Date.now(), ttlMs, cap, cursor: saved?.cursor },
+    { nowMs: Date.now(), ttlMs, cap, cursor },
   );
-  await putJson(env, GC_CURSOR_KEY, { cursor: result.nextCursor });
+  // Preserve the claim timestamp; advance the cursor for the next run.
+  await putJson(env, GC_CURSOR_KEY, { cursor: result.nextCursor, lastRunAt: claimedAt });
   console.log(`reaper: purged ${result.reaped.length} orphan profile(s)`);
 }
-
-const GC_CURSOR_KEY = "_gc/cursor.json";
 
 // ── R2 helpers ─────────────────────────────────────────────────────────────
 

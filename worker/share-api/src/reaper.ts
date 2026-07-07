@@ -40,6 +40,15 @@ export interface ReapResult {
 /** friendId folders look like `AAAAAAAAAAAA/`; backup/, self/, fc/, share/, rl/ do not. */
 const FRIEND_PREFIX = /^[A-Z0-9]{12,40}\/$/;
 
+/**
+ * Opportunistic-trigger gate: with no cron budget, the reaper fires from normal
+ * request traffic at most once per interval. Due when it has never run or the
+ * interval has fully elapsed since the last run.
+ */
+export function dueForReap(lastRunAtMs: number | undefined, nowMs: number, intervalMs: number): boolean {
+  return nowMs - (lastRunAtMs ?? 0) >= intervalMs;
+}
+
 export async function reapOrphanProfiles(
   bucket: ReaperBucket,
   purge: PurgeFn,

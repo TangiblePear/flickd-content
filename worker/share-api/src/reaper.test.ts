@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   selectReapable,
   reapOrphanProfiles,
+  dueForReap,
   type ReapCandidate,
   type ReaperBucket,
 } from "./reaper";
@@ -58,6 +59,26 @@ function makePurge(bucket: ReaperBucket & { _map: Map<string, Date> }) {
   };
   return { purge, calls };
 }
+
+describe("dueForReap", () => {
+  const INTERVAL = 24 * 60 * 60 * 1000; // 24h
+
+  it("is due when it has never run", () => {
+    expect(dueForReap(undefined, NOW, INTERVAL)).toBe(true);
+  });
+
+  it("is not due right after a run", () => {
+    expect(dueForReap(NOW, NOW, INTERVAL)).toBe(false);
+  });
+
+  it("is not due before the interval elapses", () => {
+    expect(dueForReap(NOW - INTERVAL / 2, NOW, INTERVAL)).toBe(false);
+  });
+
+  it("is due once the interval has elapsed", () => {
+    expect(dueForReap(NOW - INTERVAL, NOW, INTERVAL)).toBe(true);
+  });
+});
 
 describe("reapOrphanProfiles", () => {
   it("reaps only friendId folders past the TTL, never backup/ or self/", async () => {
