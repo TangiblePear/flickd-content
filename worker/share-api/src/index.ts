@@ -15,10 +15,15 @@ interface Env {
   VISION_API_KEY?: string;
   // Distinct-reporter threshold that auto-hides a picture pending admin review.
   REPORT_AUTOHIDE?: string;
+  // Orphan-profile reaper: delete a friendId folder untouched for this long.
+  PROFILE_TTL_SECONDS?: string;
+  // Max folders the reaper purges per scheduled run (keeps each run bounded).
+  GC_MAX_PREFIXES_PER_RUN?: string;
 }
 
 import { sendFcmMessage, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
+import { reapOrphanProfiles } from "./reaper";
 
 interface ShareItem {
   tmdbId: number;
@@ -187,7 +192,31 @@ export default {
 
     return notFound();
   },
+
+  // Scheduled orphan-profile reaper (weekly cron). Deletes friendId folders that
+  // have gone untouched for PROFILE_TTL_SECONDS — a wiped/uninstalled device stops
+  // re-publishing (a live install re-PUTs fcm-token every =<3 days), so its data
+  // ages out. Recovery blobs (backup/, self/) are excluded by prefix shape. The
+  // run is bounded and resumes from a stored cursor.
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(runReaper(env));
+  },
 };
+
+async function runReaper(env: Env): Promise<void> {
+  const ttlMs = Number(env.PROFILE_TTL_SECONDS ?? "31536000") * 1000; // default 365d
+  const cap = Number(env.GC_MAX_PREFIXES_PER_RUN ?? "500");
+  const saved = await getJson<{ cursor?: string }>(env, GC_CURSOR_KEY);
+  const result = await reapOrphanProfiles(
+    env.BUCKET,
+    (friendId) => purgeFriendScoped(env, friendId),
+    { nowMs: Date.now(), ttlMs, cap, cursor: saved?.cursor },
+  );
+  await putJson(env, GC_CURSOR_KEY, { cursor: result.nextCursor });
+  console.log(`reaper: purged ${result.reaped.length} orphan profile(s)`);
+}
+
+const GC_CURSOR_KEY = "_gc/cursor.json";
 
 // ── R2 helpers ─────────────────────────────────────────────────────────────
 
@@ -244,16 +273,26 @@ interface OwnerRecord {
 
 const ownerKey = (friendId: string) => `${friendId}/owner.json`;
 
+/**
+ * Owner-auth result. `created` is true when this call had to freshly create
+ * `owner.json` (trust-on-first-use) — the signal that the relay had lost this
+ * identity's data (e.g. reaped after inactivity), so the client should re-publish.
+ */
+interface OwnerAuth {
+  ok: boolean;
+  created: boolean;
+}
+
 /** Owner-authenticate a write. Binds the secret on first use; verifies after. */
-async function verifyOwner(env: Env, friendId: string, secret: string | null): Promise<boolean> {
-  if (!secret) return false;
+async function verifyOwner(env: Env, friendId: string, secret: string | null): Promise<OwnerAuth> {
+  if (!secret) return { ok: false, created: false };
   const hash = await sha256hex(secret);
   const existing = await getJson<OwnerRecord>(env, ownerKey(friendId));
   if (!existing) {
     await putJson(env, ownerKey(friendId), { h: hash });
-    return true;
+    return { ok: true, created: true };
   }
-  return existing.h === hash;
+  return { ok: existing.h === hash, created: false };
 }
 
 /** Owner-authenticate AND (re)bind the read token friends present to read. */
@@ -262,16 +301,16 @@ async function verifyOwnerBindToken(
   friendId: string,
   secret: string | null,
   readToken: string | null,
-): Promise<boolean> {
-  if (!secret) return false;
+): Promise<OwnerAuth> {
+  if (!secret) return { ok: false, created: false };
   const hash = await sha256hex(secret);
   const existing = await getJson<OwnerRecord>(env, ownerKey(friendId));
-  if (existing && existing.h !== hash) return false;
+  if (existing && existing.h !== hash) return { ok: false, created: false };
   const next: OwnerRecord = { h: hash, t: readToken ?? existing?.t };
   if (!existing || existing.h !== next.h || existing.t !== next.t) {
     await putJson(env, ownerKey(friendId), next);
   }
-  return true;
+  return { ok: true, created: !existing };
 }
 
 /** Read-gate: the presented token must match the author's bound read token. */
@@ -291,9 +330,8 @@ async function handlePutUserObject(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  if (!(await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token")))) {
-    return forbidden();
-  }
+  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"));
+  if (!owner.ok) return forbidden();
   const body = await req.text();
   let cap = MAX_BLOB_BYTES;
   if (kind === "access") cap = MAX_ACCESS_BYTES;
@@ -310,7 +348,7 @@ async function handlePutUserObject(
     ctx.waitUntil(fanOutProfileUpdate(friendId, env));
   }
 
-  return json({ ok: true });
+  return json({ ok: true, ownerRecreated: owner.created });
 }
 
 async function fanOutProfileUpdate(myId: string, env: Env) {
@@ -353,7 +391,8 @@ async function handleGetUserObject(
 
 // PUT one encrypted opinion, located by its blind index hash. Owner-auth.
 async function handlePutOpinion(friendId: string, hash: string, req: Request, env: Env): Promise<Response> {
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   const body = await req.text();
   if (body.length > MAX_BLOB_BYTES) return tooLarge();
   try {
@@ -362,14 +401,15 @@ async function handlePutOpinion(friendId: string, hash: string, req: Request, en
     return invalidJson();
   }
   await putRaw(env, `${friendId}/opinions/${hash}.json`, body);
-  return json({ ok: true });
+  return json({ ok: true, ownerRecreated: auth.created });
 }
 
 // DELETE one opinion (true removal on tombstone). Owner-auth.
 async function handleDeleteOpinion(friendId: string, hash: string, req: Request, env: Env): Promise<Response> {
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   await env.BUCKET.delete(`${friendId}/opinions/${hash}.json`);
-  return json({ ok: true });
+  return json({ ok: true, ownerRecreated: auth.created });
 }
 
 // ── Profile pictures + reports ──────────────────────────────────────────────
@@ -418,9 +458,8 @@ async function handlePutPicture(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  if (!(await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token")))) {
-    return forbidden();
-  }
+  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"));
+  if (!owner.ok) return forbidden();
   const buf = new Uint8Array(await req.arrayBuffer());
   if (buf.byteLength === 0) return invalidJson();
   if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();
@@ -452,7 +491,7 @@ async function handlePutPicture(
   ctx.waitUntil(fanOutProfileUpdate(friendId, env));
 
   const url = `https://flickto.app/api/user/${friendId}/picture?v=${version}`;
-  return json({ ok: true, url, version });
+  return json({ ok: true, url, version, ownerRecreated: owner.created });
 }
 
 // GET a profile picture. Public — the opaque friendId is the capability, so Coil
@@ -474,10 +513,11 @@ async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
 
 // DELETE the owner's own picture. Owner-auth.
 async function handleDeletePicture(friendId: string, req: Request, env: Env): Promise<Response> {
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   await env.PICS.delete(picKey(friendId));
   await env.PICS.delete(picMetaKey(friendId));
-  return json({ ok: true });
+  return json({ ok: true, ownerRecreated: auth.created });
 }
 
 // POST a report for any content kind. The reporter proves a real identity by
@@ -634,18 +674,22 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
 }
 
 async function handleGetInbox(friendId: string, req: Request, env: Env): Promise<Response> {
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   const items = (await getJson<InboxStored[]>(env, `${friendId}/inbox.json`)) ?? [];
-  return json({ items });
+  // ownerRecreated first so a truncated client-side body peek still catches it
+  // even when `items` is large.
+  return json({ ownerRecreated: auth.created, items });
 }
 
 async function handleDeleteInbox(friendId: string, req: Request, env: Env, url: URL): Promise<Response> {
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   const upTo = Number(url.searchParams.get("upTo") ?? "0");
   const key = `${friendId}/inbox.json`;
   const items = (await getJson<InboxStored[]>(env, key)) ?? [];
   await putJson(env, key, items.filter((it) => it.at > upTo));
-  return json({ ok: true });
+  return json({ ok: true, ownerRecreated: auth.created });
 }
 
 interface FreshnessQuery {
@@ -706,7 +750,8 @@ async function handlePublishFriendCode(req: Request, env: Env): Promise<Response
   }
   const friendId = typeof card.friendId === "string" ? card.friendId : "";
   if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) return json({ error: "invalid_card" }, { status: 400 });
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
 
   // Stable code per friendId: reuse the existing one, else mint a unique one.
   const owner = await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`);
@@ -716,7 +761,11 @@ async function handlePublishFriendCode(req: Request, env: Env): Promise<Response
     await putRaw(env, `fc/${code}.json`, body);
     await putJson(env, `${friendId}/friendcode.json`, { c: code });
   }
-  return json({ code, expiresAt: new Date(Date.now() + FRIENDCODE_TTL * 1000).toISOString() });
+  return json({
+    code,
+    expiresAt: new Date(Date.now() + FRIENDCODE_TTL * 1000).toISOString(),
+    ownerRecreated: auth.created,
+  });
 }
 
 async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
@@ -830,7 +879,9 @@ async function handleSocialDelete(req: Request, env: Env): Promise<Response> {
   }
   const friendId = typeof body.friendId === "string" ? body.friendId : "";
   if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) return json({ error: "invalid_request" }, { status: 400 });
-  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret")))) return forbidden();
+  // Deletion endpoint: intentionally does NOT surface ownerRecreated — signaling
+  // "republish" while the user is deleting their data would resurrect it.
+  if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"))).ok) return forbidden();
 
   let removed = await purgeFriendScoped(env, friendId);
   const backupLookupKey = typeof body.backupLookupKey === "string" ? body.backupLookupKey : "";

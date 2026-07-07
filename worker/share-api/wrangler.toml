@@ -38,9 +38,17 @@ bucket_name = "flickto-social"
 binding = "PICS"
 bucket_name = "flickto-profile-pics"
 
+# Weekly orphan-profile reaper (Sundays 04:00 UTC). Deletes friendId folders
+# untouched for PROFILE_TTL_SECONDS; recovery blobs (backup/, self/) are excluded.
+[triggers]
+crons = ["0 4 * * 0"]
+
 [vars]
 SHARE_TTL_SECONDS = "2592000"
 MAX_ITEMS = "100"
+# Orphan-profile reaper: 365-day inactivity TTL, bounded per run.
+PROFILE_TTL_SECONDS = "31536000"
+GC_MAX_PREFIXES_PER_RUN = "500"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
 # Image moderation. Set to "true" and add the VISION_API_KEY secret to enable the
