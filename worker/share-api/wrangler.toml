@@ -40,8 +40,9 @@ bucket_name = "flickto-profile-pics"
 
 # Weekly orphan-profile reaper (Sundays 04:00 UTC). Deletes friendId folders
 # untouched for PROFILE_TTL_SECONDS; recovery blobs (backup/, self/) are excluded.
+# NB: Cloudflare's day-of-week field is 1-7/names, not 0-6 — use SUN, not 0.
 [triggers]
-crons = ["0 4 * * 0"]
+crons = ["0 4 * * SUN"]
 
 [vars]
 SHARE_TTL_SECONDS = "2592000"
