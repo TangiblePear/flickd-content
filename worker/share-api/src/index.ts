@@ -302,11 +302,24 @@ function currentHour(): string {
 
 // ── Auth: trust-on-first-use owner binding + read token ──────────────────────
 
-/** Owner binding for a friendId. `h` = sha256(writeSecret); `t` = current read token. */
+/**
+ * Owner binding for a friendId. `h` = sha256(writeSecret).
+ * Read tokens are split (0a-3) so un-friending can revoke without a bootstrap
+ * deadlock: `ta` is stable and gates `access.json` only; `tc` is rotatable and
+ * gates `profile.json` + `opinions/*`. `t` is the legacy single token (pre-0a-3),
+ * read as both when `ta`/`tc` are absent.
+ */
 interface OwnerRecord {
   h: string;
   t?: string;
+  ta?: string;
+  tc?: string;
 }
+
+/** Effective stable (access) read token, honouring the legacy single token. */
+const effTa = (rec: OwnerRecord): string | undefined => rec.ta ?? rec.t;
+/** Effective rotatable (profile/opinions) read token, honouring the legacy single token. */
+const effTc = (rec: OwnerRecord): string | undefined => rec.tc ?? rec.t;
 
 const ownerKey = (friendId: string) => `${friendId}/owner.json`;
 
@@ -332,29 +345,50 @@ async function verifyOwner(env: Env, friendId: string, secret: string | null): P
   return { ok: existing.h === hash, created: false };
 }
 
-/** Owner-authenticate AND (re)bind the read token friends present to read. */
+/**
+ * Owner-authenticate AND (re)bind the read tokens friends present to read.
+ * `ta` gates access.json (stable); `tc` gates profile/opinions (rotatable). Each
+ * absent value preserves what was bound before, so a write that carries only one
+ * token never clears the other. Rotation is just a write that supplies a new `tc`.
+ */
 async function verifyOwnerBindToken(
   env: Env,
   friendId: string,
   secret: string | null,
-  readToken: string | null,
+  ta: string | null,
+  tc: string | null,
 ): Promise<OwnerAuth> {
   if (!secret) return { ok: false, created: false };
   const hash = await sha256hex(secret);
   const existing = await getJson<OwnerRecord>(env, ownerKey(friendId));
   if (existing && existing.h !== hash) return { ok: false, created: false };
-  const next: OwnerRecord = { h: hash, t: readToken ?? existing?.t };
-  if (!existing || existing.h !== next.h || existing.t !== next.t) {
+  const next: OwnerRecord = {
+    h: hash,
+    ta: ta ?? (existing ? effTa(existing) : undefined),
+    tc: tc ?? (existing ? effTc(existing) : undefined),
+  };
+  if (!existing || existing.h !== next.h || existing.ta !== next.ta || existing.tc !== next.tc) {
     await putJson(env, ownerKey(friendId), next);
   }
   return { ok: true, created: !existing };
 }
 
-/** Read-gate: the presented token must match the author's bound read token. */
-async function verifyReadToken(env: Env, friendId: string, token: string | null): Promise<boolean> {
+/**
+ * Read-gate: the presented token must match the author's bound read token for the
+ * given slot — `"a"` for access.json (stable `ta`), `"c"` for profile/opinions
+ * (rotatable `tc`). A rotated `tc` therefore 403s a stale reader immediately.
+ */
+async function verifyReadToken(
+  env: Env,
+  friendId: string,
+  token: string | null,
+  which: "a" | "c",
+): Promise<boolean> {
   if (!token) return false;
   const rec = await getJson<OwnerRecord>(env, ownerKey(friendId));
-  return !!rec && rec.t === token;
+  if (!rec) return false;
+  const bound = which === "a" ? effTa(rec) : effTc(rec);
+  return !!bound && bound === token;
 }
 
 // ── Social handlers ──────────────────────────────────────────────────────────
@@ -367,7 +401,18 @@ async function handlePutUserObject(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"));
+  // X-Read-Token = stable `ta` (access); X-Read-Token-C = rotatable `tc`
+  // (profile/opinions). Each write rebinds whichever it carries; rotation is just a
+  // write with a new tc. Access writes rate-limited so churn can't hammer the relay.
+  const ta = req.headers.get("X-Read-Token");
+  const tc = req.headers.get("X-Read-Token-C");
+  if (kind === "access") {
+    const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
+    if (await rateLimited(env, "access", ip, Number(env.RATE_LIMIT_PER_HOUR ?? "10") * 6)) {
+      return json({ error: "rate_limited" }, { status: 429 });
+    }
+  }
+  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), ta, tc);
   if (!owner.ok) return forbidden();
   const body = await req.text();
   let cap = MAX_BLOB_BYTES;
@@ -380,13 +425,12 @@ async function handlePutUserObject(
     return invalidJson();
   }
   if (kind === "profile") {
-    // Stash the bound read token on the object so the freshness endpoint can
-    // authorize with a single get() (body + uploaded + customMetadata) instead of
-    // a separate owner.json read + head() — see handleFreshness (0a-2).
-    const readToken = req.headers.get("X-Read-Token");
+    // Stash the rotatable read token (tc) on the object so freshness can authorize
+    // with a single get() (0a-2). Profile is re-PUT on rotation, so this stays
+    // current — unlike opinions, whose batch endpoint checks owner.json.tc directly.
     await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
       httpMetadata: { contentType: "application/json" },
-      ...(readToken ? { customMetadata: { rt: readToken } } : {}),
+      ...(tc ? { customMetadata: { rt: tc } } : {}),
     });
     ctx.waitUntil(fanOutProfileUpdate(friendId, env));
   } else {
@@ -462,7 +506,9 @@ async function handleGetUserObject(
   req: Request,
   env: Env,
 ): Promise<Response> {
-  if (!(await verifyReadToken(env, friendId, req.headers.get("X-Read-Token")))) return forbidden();
+  // access.json is gated by the stable `ta`; profile.json by the rotatable `tc`.
+  const which = kind === "access" ? "a" : "c";
+  if (!(await verifyReadToken(env, friendId, req.headers.get("X-Read-Token"), which))) return forbidden();
   const raw = await getText(env, `${friendId}/${kind}.json`);
   return raw ? rawJson(raw) : notFound();
 }
@@ -541,7 +587,7 @@ async function handlePutPicture(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"));
+  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"), req.headers.get("X-Read-Token-C"));
   if (!owner.ok) return forbidden();
   const buf = new Uint8Array(await req.arrayBuffer());
   if (buf.byteLength === 0) return invalidJson();
@@ -622,7 +668,7 @@ async function handleReport(targetFriendId: string, req: Request, env: Env): Pro
   if (!REPORT_KINDS.has(kind) || !reporterId) return json({ error: "bad_request" }, { status: 400 });
 
   // Anti-spam: the reporter must own the reporterId (its bound read token).
-  if (!(await verifyReadToken(env, reporterId, req.headers.get("X-Read-Token")))) return forbidden();
+  if (!(await verifyReadToken(env, reporterId, req.headers.get("X-Read-Token"), "a"))) return forbidden();
 
   const record = {
     kind,
@@ -696,13 +742,14 @@ async function handleOpinionsBatch(req: Request, env: Env): Promise<Response> {
     const readToken = typeof it.readToken === "string" ? it.readToken : "";
     if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) continue;
     if (!new RegExp(`^${HASH}$`).test(hash)) continue;
-    // One get() carries body + the read token stashed on the object (0a-2); fall
-    // back to owner.json only for opinions written before the token was stamped.
+    // Opinions are gated by the live rotatable `tc` (owner.json), NOT the token
+    // stamped on the object: opinion objects are not re-PUT on rotation, so their
+    // customMetadata goes stale — a removed friend's revoked tc must still 403 here
+    // (0a-3). That is one owner.json read + one object read per friend; the client
+    // chunks the batch so a request never approaches the 50-subrequest cap.
+    if (!(await verifyReadToken(env, friendId, readToken, "c"))) continue;
     const obj = await env.BUCKET.get(`${friendId}/opinions/${hash}.json`);
     if (!obj) continue;
-    const rt = obj.customMetadata?.rt;
-    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken);
-    if (!authed) continue;
     try {
       const file = (await obj.json()) as OpinionFile;
       if (file && typeof file.ciphertext === "string") {
@@ -781,45 +828,76 @@ interface FreshnessQuery {
   friendId?: unknown;
   readToken?: unknown;
   since?: unknown;
+  keyEpoch?: unknown;
+}
+
+/** Blind index of a friendId for access.json slots — matches the client's derivation. */
+async function accessSlotHash(friendId: string): Promise<string> {
+  return sha256hex(`access-slot:${friendId}`);
 }
 
 async function handleFreshness(req: Request, env: Env): Promise<Response> {
-  let body: { items?: unknown };
+  let body: { items?: unknown; requesterId?: unknown };
   try {
-    body = (await req.json()) as { items?: unknown };
+    body = (await req.json()) as { items?: unknown; requesterId?: unknown };
   } catch {
     return invalidJson();
   }
   const items = Array.isArray(body.items) ? (body.items as FreshnessQuery[]) : null;
   if (!items) return json({ error: "invalid_payload" }, { status: 400 });
 
-  const out: Array<{ friendId: string; modifiedAt: number; profile?: unknown }> = [];
+  // The caller's own friendId — lets us return their freshly-sealed access slot
+  // inline when an author rotated (0a-3), so they re-key without an extra request.
+  const requesterId =
+    typeof body.requesterId === "string" && new RegExp(`^${FRIEND_ID}$`).test(body.requesterId)
+      ? body.requesterId
+      : "";
+  const slotHash = requesterId ? await accessSlotHash(requesterId) : "";
+
+  const out: Array<{ friendId: string; modifiedAt: number; profile?: unknown; slot?: unknown; keyEpoch?: number }> = [];
   for (const it of items.slice(0, MAX_BATCH_ITEMS)) {
     const friendId = typeof it.friendId === "string" ? it.friendId : "";
     const readToken = typeof it.readToken === "string" ? it.readToken : "";
     const since = typeof it.since === "number" ? it.since : 0;
+    const sentEpoch = typeof it.keyEpoch === "number" ? it.keyEpoch : 0;
 
     if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) continue;
 
     // Single get() yields body + uploaded + customMetadata — no separate owner.json
-    // read or head() (0a-2). Non-fresh objects skip before the body is ever parsed.
+    // read or head() (0a-2). The plaintext header carries the author's keyEpoch.
     const obj = await env.BUCKET.get(`${friendId}/profile.json`);
     if (!obj) continue;
     const uploaded = obj.uploaded.getTime();
-    if (uploaded <= since) continue;
-
-    // Authorize from the read token stashed on the object; fall back to owner.json
-    // for a profile written before the token was stamped there.
-    const rt = obj.customMetadata?.rt;
-    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken);
-    if (!authed) continue;
-
+    let profile: any = null;
     try {
-      const profile = await obj.json();
-      out.push({ friendId, modifiedAt: uploaded, profile });
+      profile = await obj.json();
     } catch {
-      out.push({ friendId, modifiedAt: uploaded });
+      profile = null;
     }
+    const authorEpoch =
+      profile && profile.header && typeof profile.header.keyEpoch === "number" ? profile.header.keyEpoch : 0;
+
+    // Rotation: the author bumped keyEpoch since the requester last synced. Return
+    // the requester's re-sealed access slot inline so they pick up the new feed key,
+    // tc, and topic in this same call. Membership in access.json is the authorization
+    // (the slot is sealed to their public keyset); a removed friend has no slot and
+    // receives nothing here — actually revoked.
+    if (slotHash && authorEpoch > sentEpoch) {
+      const access = await getJson<{ keys?: Record<string, unknown> }>(env, `${friendId}/access.json`);
+      const slot = access?.keys?.[slotHash];
+      if (slot !== undefined && profile) {
+        out.push({ friendId, modifiedAt: uploaded, profile, slot, keyEpoch: authorEpoch });
+      }
+      continue;
+    }
+
+    // Normal path: fresh + authorized by the rotatable tc (customMetadata, or the
+    // live owner.json for a profile written before the token was stamped).
+    if (uploaded <= since) continue;
+    const rt = obj.customMetadata?.rt;
+    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken, "c");
+    if (!authed) continue;
+    out.push({ friendId, modifiedAt: uploaded, profile: profile ?? undefined });
   }
   return json({ items: out });
 }
