@@ -159,6 +159,9 @@ export default {
     if (userReport && req.method === "POST") return handleReport(userReport[1], req, env);
 
     // ── Inbox (sealed handshake / share messages) ──
+    const inboxAck = p.match(new RegExp(`^/api/inbox/(${FRIEND_ID})/ack$`));
+    if (inboxAck && req.method === "POST") return handleAckInbox(inboxAck[1], req, env);
+
     const inbox = p.match(new RegExp(`^/api/inbox/(${FRIEND_ID})$`));
     if (inbox) {
       if (req.method === "POST") return handlePostInbox(inbox[1], req, env);
@@ -773,6 +776,52 @@ interface InboxStored {
   ciphertext: string;
 }
 
+// An acknowledgement tombstone: the user actioned item `id` on device `by`. Broadcast
+// delivery + shared acks let every device see a message while a single action clears
+// it everywhere (0b).
+interface InboxAck {
+  id: string;
+  at: number;
+  by: string;
+  action: string;
+}
+
+interface InboxRecord {
+  items: InboxStored[];
+  acks: InboxAck[];
+}
+
+// Keep an acked item this long so a device offline for a few days still learns the
+// ack (and dismisses its own copy) rather than re-showing a resolved request.
+const INBOX_ACK_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+// Unacked items expire here — nobody ever actioned them.
+const INBOX_UNACKED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+// Read the inbox, tolerating the legacy bare-array shape (pre-0b) as items-only.
+async function readInbox(env: Env, friendId: string): Promise<InboxRecord> {
+  const raw = await getJson<InboxRecord | InboxStored[]>(env, `${friendId}/inbox.json`);
+  if (!raw) return { items: [], acks: [] };
+  if (Array.isArray(raw)) return { items: raw, acks: [] };
+  return {
+    items: Array.isArray(raw.items) ? raw.items : [],
+    acks: Array.isArray(raw.acks) ? raw.acks : [],
+  };
+}
+
+// Drop acked items past the grace window and unacked items past 30d; keep acks while
+// their item survives or within the grace window. Pruned on every write.
+function pruneInbox(rec: InboxRecord, now: number): InboxRecord {
+  const ackedIds = new Set(rec.acks.map((a) => a.id));
+  const items = rec.items
+    .filter((it) =>
+      ackedIds.has(it.id) ? now - it.at < INBOX_ACK_GRACE_MS : now - it.at < INBOX_UNACKED_TTL_MS,
+    )
+    .slice(-MAX_INBOX_ITEMS);
+  const keptIds = new Set(items.map((it) => it.id));
+  const acks = rec.acks.filter((a) => keptIds.has(a.id) || now - a.at < INBOX_ACK_GRACE_MS);
+  return { items, acks };
+}
+
 // Append a sealed message to a recipient's inbox (open write, rate-limited).
 async function handlePostInbox(friendId: string, req: Request, env: Env): Promise<Response> {
   const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -789,11 +838,11 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
   }
   if (ciphertext.length > MAX_INBOX_ITEM_BYTES) return tooLarge();
 
-  const key = `${friendId}/inbox.json`;
-  const items = (await getJson<InboxStored[]>(env, key)) ?? [];
-  items.push({ id: `${Date.now()}-${randomCode(6)}`, at: Date.now(), ciphertext });
-  await putJson(env, key, items.slice(-MAX_INBOX_ITEMS));
-  
+  const now = Date.now();
+  const rec = await readInbox(env, friendId);
+  rec.items.push({ id: `${now}-${randomCode(6)}`, at: now, ciphertext });
+  await putJson(env, `${friendId}/inbox.json`, pruneInbox(rec, now));
+
   // Fire an FCM push to the recipient so every one of their devices fetches the
   // inbox message immediately. The self-topic reaches all of the recipient's
   // devices in one send; a pre-topics recipient falls back to their device token.
@@ -813,19 +862,57 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
 async function handleGetInbox(friendId: string, req: Request, env: Env): Promise<Response> {
   const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
   if (!auth.ok) return forbidden();
-  const items = (await getJson<InboxStored[]>(env, `${friendId}/inbox.json`)) ?? [];
-  // ownerRecreated first so a truncated client-side body peek still catches it
-  // even when `items` is large.
-  return json({ ownerRecreated: auth.created, items });
+  // Nothing is removed on read: every device sees every item AND every ack, and
+  // filters locally. ownerRecreated first so a truncated client body peek still
+  // catches it even when the record is large.
+  const rec = await readInbox(env, friendId);
+  return json({ ownerRecreated: auth.created, items: rec.items, acks: rec.acks });
 }
 
-async function handleDeleteInbox(friendId: string, req: Request, env: Env, url: URL): Promise<Response> {
+// Acknowledge one or more inbox items (owner-auth). Called when the user *actions* a
+// message on any device; the ack converges every other device to "resolved". Fans an
+// inbox_ack push to the owner's self-topic so siblings dismiss instantly (0b).
+async function handleAckInbox(friendId: string, req: Request, env: Env): Promise<Response> {
   const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
   if (!auth.ok) return forbidden();
-  const upTo = Number(url.searchParams.get("upTo") ?? "0");
-  const key = `${friendId}/inbox.json`;
-  const items = (await getJson<InboxStored[]>(env, key)) ?? [];
-  await putJson(env, key, items.filter((it) => it.at > upTo));
+  let body: { ids?: unknown; action?: unknown; deviceId?: unknown };
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    return invalidJson();
+  }
+  const ids = Array.isArray(body.ids)
+    ? (body.ids.filter((x) => typeof x === "string") as string[]).slice(0, MAX_INBOX_ITEMS)
+    : [];
+  const action = typeof body.action === "string" ? body.action.slice(0, 32) : "processed";
+  const deviceId = typeof body.deviceId === "string" ? body.deviceId.slice(0, 64) : "";
+  if (!ids.length) return json({ ok: true, ownerRecreated: auth.created });
+
+  const now = Date.now();
+  const rec = await readInbox(env, friendId);
+  const existing = new Set(rec.acks.map((a) => a.id));
+  for (const id of ids) if (!existing.has(id)) rec.acks.push({ id, at: now, by: deviceId, action });
+  await putJson(env, `${friendId}/inbox.json`, pruneInbox(rec, now));
+
+  try {
+    const config = fcmConfig(env);
+    if (config) {
+      const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
+      if (target) await sendFcmMessage(config, target, friendId, "inbox_ack");
+    }
+  } catch (e) {
+    // Ignore FCM failures — convergence still happens on the next fetch.
+  }
+
+  return json({ ok: true, ownerRecreated: auth.created });
+}
+
+// Kept owner-authed but a NO-OP (0b): the shared inbox is now cleared per-item via
+// acks, not by a cursor. A stale client still calling DELETE ?upTo= must not wipe
+// messages another device hasn't seen yet. `url` retained for the route signature.
+async function handleDeleteInbox(friendId: string, req: Request, env: Env, _url: URL): Promise<Response> {
+  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
+  if (!auth.ok) return forbidden();
   return json({ ok: true, ownerRecreated: auth.created });
 }
 
