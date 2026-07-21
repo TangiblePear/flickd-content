@@ -436,15 +436,33 @@ async function handlePutUserObject(
     // Stash the rotatable read token (tc) on the object so freshness can authorize
     // with a single get() (0a-2). Profile is re-PUT on rotation, so this stays
     // current — unlike opinions, whose batch endpoint checks owner.json.tc directly.
-    await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
+    const putOpts: R2PutOptions = {
       httpMetadata: { contentType: "application/json" },
       ...(tc ? { customMetadata: { rt: tc } } : {}),
-    });
+    };
+    // Read-merge-write concurrency (0c-2): when the client sends the etag it merged
+    // against (X-If-Match), do a conditional put so two devices can't lose one
+    // another's merge. A mismatch (or a since-deleted object) returns 409 + the
+    // current etag; the client re-reads, re-merges and retries once.
+    const ifMatch = req.headers.get("X-If-Match");
+    if (ifMatch) {
+      const written = await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
+        ...putOpts,
+        onlyIf: { etagMatches: ifMatch },
+      });
+      if (written === null) {
+        const head = await env.BUCKET.head(`${friendId}/${kind}.json`);
+        return json({ error: "etag_conflict", etag: head?.httpEtag }, { status: 409 });
+      }
+      ctx.waitUntil(fanOutProfileUpdate(friendId, env));
+      return json({ ok: true, ownerRecreated: owner.created, etag: written.httpEtag });
+    }
+    const written = await env.BUCKET.put(`${friendId}/${kind}.json`, body, putOpts);
     ctx.waitUntil(fanOutProfileUpdate(friendId, env));
-  } else {
-    await putRaw(env, `${friendId}/${kind}.json`, body);
+    return json({ ok: true, ownerRecreated: owner.created, etag: written?.httpEtag });
   }
 
+  await putRaw(env, `${friendId}/${kind}.json`, body);
   return json({ ok: true, ownerRecreated: owner.created });
 }
 
@@ -517,8 +535,19 @@ async function handleGetUserObject(
   // access.json is gated by the stable `ta`; profile.json by the rotatable `tc`.
   const which = kind === "access" ? "a" : "c";
   if (!(await verifyReadToken(env, friendId, req.headers.get("X-Read-Token"), which))) return forbidden();
-  const raw = await getText(env, `${friendId}/${kind}.json`);
-  return raw ? rawJson(raw) : notFound();
+  // get() (not getText) so we can surface the ETag — the owner's read-merge-write
+  // sends it back as X-If-Match for the conditional profile write (0c-2).
+  const obj = await env.BUCKET.get(`${friendId}/${kind}.json`);
+  if (!obj) return notFound();
+  const raw = await obj.text();
+  return new Response(raw, {
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS,
+      "Access-Control-Expose-Headers": "ETag",
+      ETag: obj.httpEtag,
+    },
+  });
 }
 
 // PUT one encrypted opinion, located by its blind index hash. Owner-auth.
