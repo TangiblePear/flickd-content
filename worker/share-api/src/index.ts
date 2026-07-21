@@ -318,8 +318,13 @@ interface OwnerRecord {
 
 /** Effective stable (access) read token, honouring the legacy single token. */
 const effTa = (rec: OwnerRecord): string | undefined => rec.ta ?? rec.t;
-/** Effective rotatable (profile/opinions) read token, honouring the legacy single token. */
-const effTc = (rec: OwnerRecord): string | undefined => rec.tc ?? rec.t;
+/**
+ * Effective rotatable (profile/opinions) read token. Falls back to the legacy
+ * single token, then to `ta`, so an author who bound only `ta` (a pre-0a-3 client
+ * against this worker) is still readable during rollout. A real 0a-3 author always
+ * binds `tc`, so this fallback never weakens their rotation-based revocation.
+ */
+const effTc = (rec: OwnerRecord): string | undefined => rec.tc ?? rec.t ?? rec.ta;
 
 const ownerKey = (friendId: string) => `${friendId}/owner.json`;
 
