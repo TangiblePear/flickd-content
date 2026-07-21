@@ -25,7 +25,7 @@ interface Env {
   REAP_GATE_THROTTLE_SECONDS?: string;
 }
 
-import { sendFcmMessage, FcmConfig } from "./fcm";
+import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
 
@@ -128,12 +128,14 @@ export default {
       return handleOpinionsBatch(req, env);
     }
 
-    // ── User-scoped objects: access keys, profile, per-title opinions, fcm-token ──
-    const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(access|profile|fcm-token)$`));
+    // ── User-scoped objects: access keys, profile, per-title opinions, push ──
+    // `push` (was `fcm-token`) carries the owner's topic names for O(1) fan-out;
+    // both are accepted during rollout and neither is client-readable (GET refused).
+    const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(access|profile|fcm-token|push)$`));
     if (userObj) {
       const [, friendId, kind] = userObj;
       if (req.method === "PUT") return handlePutUserObject(friendId, kind, req, env, ctx);
-      if (req.method === "GET" && kind !== "fcm-token") return handleGetUserObject(friendId, kind, req, env);
+      if (req.method === "GET" && kind !== "fcm-token" && kind !== "push") return handleGetUserObject(friendId, kind, req, env);
     }
 
     const userOpinion = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/opinions/(${HASH})$`));
@@ -370,7 +372,7 @@ async function handlePutUserObject(
   const body = await req.text();
   let cap = MAX_BLOB_BYTES;
   if (kind === "access") cap = MAX_ACCESS_BYTES;
-  if (kind === "fcm-token") cap = 2048;
+  if (kind === "fcm-token" || kind === "push") cap = 2048;
   if (body.length > cap) return tooLarge();
   try {
     JSON.parse(body);
@@ -386,25 +388,58 @@ async function handlePutUserObject(
   return json({ ok: true, ownerRecreated: owner.created });
 }
 
-async function fanOutProfileUpdate(myId: string, env: Env) {
-  if (!env.FCM_PROJECT_ID || !env.FCM_SERVICE_ACCOUNT_EMAIL || !env.FCM_PRIVATE_KEY) return;
-  const config: FcmConfig = {
+interface PushRecord {
+  selfTopic?: string;
+  friendTopic?: string;
+  token?: string;
+}
+
+/** Read an owner's push record, preferring `push.json` over the legacy `fcm-token.json`. */
+async function readPushRecord(env: Env, friendId: string): Promise<PushRecord | null> {
+  const raw = (await getText(env, `${friendId}/push.json`)) ?? (await getText(env, `${friendId}/fcm-token.json`));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as PushRecord;
+  } catch {
+    return null;
+  }
+}
+
+function fcmConfig(env: Env): FcmConfig | null {
+  if (!env.FCM_PROJECT_ID || !env.FCM_SERVICE_ACCOUNT_EMAIL || !env.FCM_PRIVATE_KEY) return null;
+  return {
     projectId: env.FCM_PROJECT_ID,
     clientEmail: env.FCM_SERVICE_ACCOUNT_EMAIL,
     privateKey: env.FCM_PRIVATE_KEY,
   };
-  const accessStr = await getText(env, `${myId}/access.json`);
-  if (!accessStr) return;
+}
+
+// Ambient profile fan-out. With push topics this is O(1): publish one message to
+// the owner's friend-topic and Google delivers it to every subscribed friend on
+// every device. Only a pre-topics owner (no `friendTopic` yet) falls back to the
+// legacy per-friend token loop, which self-resolves once the owner republishes
+// `push.json` within the client's ~3-day heartbeat.
+async function fanOutProfileUpdate(myId: string, env: Env) {
+  const config = fcmConfig(env);
+  if (!config) return;
   try {
+    const mine = await readPushRecord(env, myId);
+    if (mine && typeof mine.friendTopic === "string" && mine.friendTopic) {
+      const target = pickFcmTarget(mine, "friend");
+      if (target && "topic" in target) {
+        await sendFcmMessage(config, target, myId, "social_update");
+        return;
+      }
+    }
+    // Legacy fallback: owner not yet on topics — notify each friend's device token.
+    const accessStr = await getText(env, `${myId}/access.json`);
+    if (!accessStr) return;
     const access = JSON.parse(accessStr) as { keys?: Record<string, unknown> };
     if (!access.keys) return;
-    const friendIds = Object.keys(access.keys);
-    for (const friendId of friendIds) {
-      const fcmStr = await getText(env, `${friendId}/fcm-token.json`);
-      if (!fcmStr) continue;
-      const fcmTokenData = JSON.parse(fcmStr) as { token?: string };
-      if (fcmTokenData.token) {
-        await sendFcmMessage(config, fcmTokenData.token, myId);
+    for (const friendId of Object.keys(access.keys)) {
+      const rec = await readPushRecord(env, friendId);
+      if (rec && typeof rec.token === "string" && rec.token) {
+        await sendFcmMessage(config, { token: rec.token }, myId, "social_update");
       }
     }
   } catch (e) {
@@ -684,22 +719,14 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
   items.push({ id: `${Date.now()}-${randomCode(6)}`, at: Date.now(), ciphertext });
   await putJson(env, key, items.slice(-MAX_INBOX_ITEMS));
   
-  // Fire an FCM push to the recipient so they fetch the inbox message immediately
+  // Fire an FCM push to the recipient so every one of their devices fetches the
+  // inbox message immediately. The self-topic reaches all of the recipient's
+  // devices in one send; a pre-topics recipient falls back to their device token.
   try {
-    if (env.FCM_PROJECT_ID && env.FCM_SERVICE_ACCOUNT_EMAIL && env.FCM_PRIVATE_KEY) {
-      const config: FcmConfig = {
-        projectId: env.FCM_PROJECT_ID,
-        clientEmail: env.FCM_SERVICE_ACCOUNT_EMAIL,
-        privateKey: env.FCM_PRIVATE_KEY,
-      };
-      const fcmStr = await getText(env, `${friendId}/fcm-token.json`);
-      if (fcmStr) {
-        const fcmTokenData = JSON.parse(fcmStr) as { token?: string };
-        if (fcmTokenData.token) {
-          // Pass 'inbox_update' as the type, FCM will wake up the app instantly to show the notification.
-          await sendFcmMessage(config, fcmTokenData.token, friendId, "inbox_update");
-        }
-      }
+    const config = fcmConfig(env);
+    if (config) {
+      const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
+      if (target) await sendFcmMessage(config, target, friendId, "inbox_update");
     }
   } catch (e) {
     // Ignore FCM failures, inbox is durable
