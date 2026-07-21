@@ -379,10 +379,18 @@ async function handlePutUserObject(
   } catch {
     return invalidJson();
   }
-  await putRaw(env, `${friendId}/${kind}.json`, body);
-
   if (kind === "profile") {
+    // Stash the bound read token on the object so the freshness endpoint can
+    // authorize with a single get() (body + uploaded + customMetadata) instead of
+    // a separate owner.json read + head() — see handleFreshness (0a-2).
+    const readToken = req.headers.get("X-Read-Token");
+    await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
+      httpMetadata: { contentType: "application/json" },
+      ...(readToken ? { customMetadata: { rt: readToken } } : {}),
+    });
     ctx.waitUntil(fanOutProfileUpdate(friendId, env));
+  } else {
+    await putRaw(env, `${friendId}/${kind}.json`, body);
   }
 
   return json({ ok: true, ownerRecreated: owner.created });
@@ -470,7 +478,12 @@ async function handlePutOpinion(friendId: string, hash: string, req: Request, en
   } catch {
     return invalidJson();
   }
-  await putRaw(env, `${friendId}/opinions/${hash}.json`, body);
+  // Stash the read token so the batch endpoint can authorize with one get() (0a-2).
+  const readToken = req.headers.get("X-Read-Token");
+  await env.BUCKET.put(`${friendId}/opinions/${hash}.json`, body, {
+    httpMetadata: { contentType: "application/json" },
+    ...(readToken ? { customMetadata: { rt: readToken } } : {}),
+  });
   return json({ ok: true, ownerRecreated: auth.created });
 }
 
@@ -683,10 +696,20 @@ async function handleOpinionsBatch(req: Request, env: Env): Promise<Response> {
     const readToken = typeof it.readToken === "string" ? it.readToken : "";
     if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) continue;
     if (!new RegExp(`^${HASH}$`).test(hash)) continue;
-    if (!(await verifyReadToken(env, friendId, readToken))) continue;
-    const file = await getJson<OpinionFile>(env, `${friendId}/opinions/${hash}.json`);
-    if (file && typeof file.ciphertext === "string") {
-      out.push({ friendId, hash, ciphertext: file.ciphertext });
+    // One get() carries body + the read token stashed on the object (0a-2); fall
+    // back to owner.json only for opinions written before the token was stamped.
+    const obj = await env.BUCKET.get(`${friendId}/opinions/${hash}.json`);
+    if (!obj) continue;
+    const rt = obj.customMetadata?.rt;
+    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken);
+    if (!authed) continue;
+    try {
+      const file = (await obj.json()) as OpinionFile;
+      if (file && typeof file.ciphertext === "string") {
+        out.push({ friendId, hash, ciphertext: file.ciphertext });
+      }
+    } catch {
+      // skip malformed
     }
   }
   return json({ items: out });
@@ -775,21 +798,27 @@ async function handleFreshness(req: Request, env: Env): Promise<Response> {
     const friendId = typeof it.friendId === "string" ? it.friendId : "";
     const readToken = typeof it.readToken === "string" ? it.readToken : "";
     const since = typeof it.since === "number" ? it.since : 0;
-    
+
     if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) continue;
-    if (!(await verifyReadToken(env, friendId, readToken))) continue;
-    
-    const head = await env.BUCKET.head(`${friendId}/profile.json`);
-    if (head && head.uploaded.getTime() > since) {
-      const obj = await env.BUCKET.get(`${friendId}/profile.json`);
-      if (obj) {
-        try {
-          const profile = await obj.json();
-          out.push({ friendId, modifiedAt: head.uploaded.getTime(), profile });
-        } catch {
-          out.push({ friendId, modifiedAt: head.uploaded.getTime() });
-        }
-      }
+
+    // Single get() yields body + uploaded + customMetadata — no separate owner.json
+    // read or head() (0a-2). Non-fresh objects skip before the body is ever parsed.
+    const obj = await env.BUCKET.get(`${friendId}/profile.json`);
+    if (!obj) continue;
+    const uploaded = obj.uploaded.getTime();
+    if (uploaded <= since) continue;
+
+    // Authorize from the read token stashed on the object; fall back to owner.json
+    // for a profile written before the token was stamped there.
+    const rt = obj.customMetadata?.rt;
+    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken);
+    if (!authed) continue;
+
+    try {
+      const profile = await obj.json();
+      out.push({ friendId, modifiedAt: uploaded, profile });
+    } catch {
+      out.push({ friendId, modifiedAt: uploaded });
     }
   }
   return json({ items: out });
