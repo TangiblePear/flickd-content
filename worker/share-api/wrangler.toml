@@ -16,7 +16,8 @@ routes = [
   { pattern = "flickto.app/api/inbox/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/friendcode", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/friendcode/*", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/account/*", zone_name = "flickto.app" }
 ]
 
 
@@ -54,6 +55,11 @@ RATE_LIMIT_PER_HOUR = "10"
 MODERATION_ENABLED = "true"
 # Distinct reporters that auto-hide a picture pending admin review.
 REPORT_AUTOHIDE = "3"
+# Google account linking (Part 1). The OAuth **Web** client ID the ID token's `aud`
+# must equal — fill in before deploying account linking. ACCOUNT_PEPPER is a SECRET
+# (not here): `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account
+# endpoints return 503 not_configured and the rest of the Worker is unaffected.
+GOOGLE_WEB_CLIENT_ID = "REPLACE_WITH_OAUTH_WEB_CLIENT_ID.apps.googleusercontent.com"
 
 [observability]
 enabled = true

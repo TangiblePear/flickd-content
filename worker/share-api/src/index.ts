@@ -23,11 +23,17 @@ interface Env {
   REAP_INTERVAL_SECONDS?: string;
   // Per-isolate throttle so we don't read the gate object on every request.
   REAP_GATE_THROTTLE_SECONDS?: string;
+  // Google account linking (Part 1). GOOGLE_WEB_CLIENT_ID is the OAuth Web client
+  // id the ID token's `aud` must match; ACCOUNT_PEPPER is a 32-byte secret used to
+  // wrap the per-account DEK. Both absent → the account endpoints report not_configured.
+  GOOGLE_WEB_CLIENT_ID?: string;
+  ACCOUNT_PEPPER?: string;
 }
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
+import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 
 interface ShareItem {
   tmdbId: number;
@@ -199,6 +205,13 @@ export default {
       if (req.method === "PUT") return handlePutSelf(selfObj[1], req, env);
       if (req.method === "DELETE") return handleDeleteSelf(selfObj[1], env);
     }
+
+    // ── Google account linking (Part 1) ──
+    if (p === "/api/account/link" && req.method === "POST") {
+      return handleAccountLink(req, env, url, (friendId) => purgeFriendScoped(env, friendId));
+    }
+    if (p === "/api/account/resolve" && req.method === "GET") return handleAccountResolve(req, env);
+    if (p === "/api/account/unlink" && req.method === "POST") return handleAccountUnlink(req, env);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);
@@ -1173,6 +1186,9 @@ async function handleSocialDelete(req: Request, env: Env): Promise<Response> {
   // "republish" while the user is deleting their data would resurrect it.
   if (!(await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"))).ok) return forbidden();
 
+  // Drop the linked-account record (keyed by the reverse pointer under this
+  // friendId) before purging the prefix, so the Play data-deletion promise holds.
+  await deleteAccountForFriend(env, friendId);
   let removed = await purgeFriendScoped(env, friendId);
   const backupLookupKey = typeof body.backupLookupKey === "string" ? body.backupLookupKey : "";
   const selfLookupKey = typeof body.selfLookupKey === "string" ? body.selfLookupKey : "";
