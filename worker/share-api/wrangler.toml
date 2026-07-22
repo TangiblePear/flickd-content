@@ -59,7 +59,7 @@ REPORT_AUTOHIDE = "3"
 # must equal — fill in before deploying account linking. ACCOUNT_PEPPER is a SECRET
 # (not here): `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account
 # endpoints return 503 not_configured and the rest of the Worker is unaffected.
-GOOGLE_WEB_CLIENT_ID = "REPLACE_WITH_OAUTH_WEB_CLIENT_ID.apps.googleusercontent.com"
+GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googleusercontent.com"
 
 [observability]
 enabled = true
