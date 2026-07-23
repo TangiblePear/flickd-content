@@ -1,8 +1,5 @@
 interface Env {
   BUCKET: R2Bucket;
-  // Profile-picture bytes + moderation reports/tombstones (server-visible, not
-  // E2EE) so the flickto-web admin panel can bind the same bucket for review.
-  PICS: R2Bucket;
   SHARE_TTL_SECONDS: string;
   MAX_ITEMS: string;
   RATE_LIMIT_PER_HOUR: string;
@@ -592,15 +589,15 @@ async function handleDeleteOpinion(friendId: string, hash: string, req: Request,
 }
 
 // ── Profile pictures + reports ──────────────────────────────────────────────
-// All picture-domain objects live in the PICS bucket (server-visible, not E2EE)
+// All picture-domain objects live in the social bucket alongside E2EE user data
 // so the flickto-web admin panel can bind the same bucket for review/takedown:
 //   pics/{friendId}/picture.jpg           — the image bytes
 //   pics/{friendId}/meta.json             — { version, contentType, sha256, verdict }
 //   _moderation/{friendId}.json           — takedown tombstone (auto or admin)
 //   _reports/{targetId}/{ts}-{reporter}.json — one report record
 const MAX_PICTURE_BYTES = 512 * 1024;
-const picKey = (friendId: string) => `pics/${friendId}/picture.jpg`;
-const picMetaKey = (friendId: string) => `pics/${friendId}/meta.json`;
+const picKey = (friendId: string) => `${friendId}/pics/picture.jpg`;
+const picMetaKey = (friendId: string) => `${friendId}/pics/meta.json`;
 const tombstoneKey = (friendId: string) => `_moderation/${friendId}.json`;
 const REPORT_KINDS = new Set(["user", "feed_comment", "picture"]);
 
@@ -652,7 +649,7 @@ async function handlePutPicture(
   }
 
   const version = Date.now();
-  await env.PICS.put(picKey(friendId), buf, { httpMetadata: { contentType } });
+  await env.BUCKET.put(picKey(friendId), buf, { httpMetadata: { contentType } });
   const meta: PictureMeta = {
     version,
     contentType,
@@ -660,11 +657,11 @@ async function handlePutPicture(
     verdict: result.verdict,
     updatedAt: version,
   };
-  await env.PICS.put(picMetaKey(friendId), JSON.stringify(meta), {
+  await env.BUCKET.put(picMetaKey(friendId), JSON.stringify(meta), {
     httpMetadata: { contentType: "application/json" },
   });
   // A new image supersedes any earlier auto/admin takedown.
-  await env.PICS.delete(tombstoneKey(friendId));
+  await env.BUCKET.delete(tombstoneKey(friendId));
 
   // Reuse the profile fan-out so friends refresh and pull the new pictureUrl.
   ctx.waitUntil(fanOutProfileUpdate(friendId, env));
@@ -676,9 +673,9 @@ async function handlePutPicture(
 // GET a profile picture. Public — the opaque friendId is the capability, so Coil
 // loads it with no custom headers. A takedown tombstone yields 410.
 async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
-  const tomb = await env.PICS.get(tombstoneKey(friendId));
+  const tomb = await env.BUCKET.get(tombstoneKey(friendId));
   if (tomb) return new Response("gone", { status: 410, headers: { ...CORS } });
-  const obj = await env.PICS.get(picKey(friendId));
+  const obj = await env.BUCKET.get(picKey(friendId));
   if (!obj) return new Response("not found", { status: 404, headers: { ...CORS } });
   const contentType = obj.httpMetadata?.contentType ?? "image/jpeg";
   return new Response(obj.body, {
@@ -694,8 +691,8 @@ async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
 async function handleDeletePicture(friendId: string, req: Request, env: Env): Promise<Response> {
   const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
   if (!auth.ok) return forbidden();
-  await env.PICS.delete(picKey(friendId));
-  await env.PICS.delete(picMetaKey(friendId));
+  await env.BUCKET.delete(picKey(friendId));
+  await env.BUCKET.delete(picMetaKey(friendId));
   return json({ ok: true, ownerRecreated: auth.created });
 }
 
@@ -729,7 +726,7 @@ async function handleReport(targetFriendId: string, req: Request, env: Env): Pro
     at: Date.now(),
     resolved: false,
   };
-  await env.PICS.put(
+  await env.BUCKET.put(
     `_reports/${targetFriendId}/${record.at}-${reporterId}.json`,
     JSON.stringify(record),
     { httpMetadata: { contentType: "application/json" } },
@@ -738,7 +735,7 @@ async function handleReport(targetFriendId: string, req: Request, env: Env): Pro
   // Picture reports auto-hide once enough distinct reporters flag them.
   if (kind === "picture") {
     const threshold = Number(env.REPORT_AUTOHIDE ?? "3");
-    const listed = await env.PICS.list({ prefix: `_reports/${targetFriendId}/` });
+    const listed = await env.BUCKET.list({ prefix: `_reports/${targetFriendId}/` });
     const reporters = new Set<string>();
     for (const o of listed.objects) {
       const name = o.key.split("/").pop() ?? "";
@@ -746,7 +743,7 @@ async function handleReport(targetFriendId: string, req: Request, env: Env): Pro
       if (who) reporters.add(who);
     }
     if (reporters.size >= threshold) {
-      await env.PICS.put(
+      await env.BUCKET.put(
         tombstoneKey(targetFriendId),
         JSON.stringify({ reason: "auto_report_threshold", at: Date.now() }),
         { httpMetadata: { contentType: "application/json" } },

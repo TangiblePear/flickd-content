@@ -30,14 +30,7 @@ routes = [
 binding = "BUCKET"
 bucket_name = "flickto-social"
 
-# Server-visible profile pictures + moderation reports/tombstones. Kept off the
-# ciphertext bucket so it can carry different caching/lifecycle and so the
-# flickto-web admin panel can bind THIS bucket alone for review/takedown.
-# Create with: wrangler r2 bucket create flickto-profile-pics
-# Recommended lifecycle rule (dashboard): expire `_reports/` after 90 days.
-[[r2_buckets]]
-binding = "PICS"
-bucket_name = "flickto-profile-pics"
+
 
 [vars]
 SHARE_TTL_SECONDS = "2592000"
