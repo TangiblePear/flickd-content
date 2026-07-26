@@ -22,7 +22,15 @@ routes = [
   # Phase 2 server-authoritative profiles. Without these patterns the Worker never
   # sees the requests at all — and `wrangler deploy --dry-run` passes regardless.
   { pattern = "flickto.app/api/me/*", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/profile/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/profile/*", zone_name = "flickto.app" },
+  # Phase 3/4. Note the bare patterns as WELL as the wildcards: `/api/friends/*`
+  # does NOT match `/api/friends`, so the list endpoint would fall through to the
+  # static site and answer 404 while every test and the dry-run stayed green.
+  { pattern = "flickto.app/api/friends", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/friends/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/blocks", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/blocks/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/report", zone_name = "flickto.app" }
 ]
 
 
