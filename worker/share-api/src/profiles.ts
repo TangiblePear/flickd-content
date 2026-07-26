@@ -145,26 +145,44 @@ interface ValidatedProfile {
   visibility: Visibility;
 }
 
-/** Null on a payload we refuse outright (oversize layout); otherwise a clamped row. */
-function validate(body: Record<string, unknown>): ValidatedProfile | null {
-  const layout = jsonList(body.layout);
+/**
+ * Merge an incoming payload over the existing row.
+ *
+ * **Omitted key means "leave unchanged"; present-but-empty means "clear".** This
+ * is deliberately NOT a full replace: Android versions in the wild will always lag
+ * the API, and a client that has never heard of a field must not blank it. The
+ * `version` check still serialises concurrent writers, so this stays safe.
+ *
+ * Returns null on a payload we refuse outright (oversize layout).
+ */
+function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | null): ValidatedProfile | null {
+  const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+  const layout = has("layout") ? jsonList(body.layout) : (existing?.layout ?? null);
   if (layout != null && layout.length > MAX_LAYOUT_BYTES) return null;
+
+  const text = (key: string, column: keyof ProfileRow, max: number) =>
+    has(key) ? str(body[key], max) : ((existing?.[column] as string | null) ?? null);
+  const list = (key: string, column: keyof ProfileRow) =>
+    has(key) ? jsonList(body[key]) : ((existing?.[column] as string | null) ?? null);
+
   return {
-    display_name: str(body.displayName, MAX_NAME),
-    avatar_id: str(body.avatarId, MAX_SHORT),
-    border_id: str(body.borderId, MAX_SHORT),
-    picture_url: str(body.pictureUrl, MAX_URL),
-    header_color: str(body.headerColor, MAX_SHORT),
-    header_backdrop_url: str(body.headerBackdropUrl, MAX_URL),
+    display_name: text("displayName", "display_name", MAX_NAME),
+    avatar_id: text("avatarId", "avatar_id", MAX_SHORT),
+    border_id: text("borderId", "border_id", MAX_SHORT),
+    picture_url: text("pictureUrl", "picture_url", MAX_URL),
+    header_color: text("headerColor", "header_color", MAX_SHORT),
+    header_backdrop_url: text("headerBackdropUrl", "header_backdrop_url", MAX_URL),
     layout,
-    bio: str(body.bio, MAX_BIO),
-    favourite_movies: jsonList(body.favouriteMovies),
-    favourite_shows: jsonList(body.favouriteShows),
-    favourite_people: jsonList(body.favouritePeople),
-    featured_achievements: jsonList(body.featuredAchievements),
-    personality_id: str(body.personalityId, MAX_SHORT),
+    bio: text("bio", "bio", MAX_BIO),
+    favourite_movies: list("favouriteMovies", "favourite_movies"),
+    favourite_shows: list("favouriteShows", "favourite_shows"),
+    favourite_people: list("favouritePeople", "favourite_people"),
+    featured_achievements: list("featuredAchievements", "featured_achievements"),
+    personality_id: text("personalityId", "personality_id", MAX_SHORT),
     // Unknown values fall to `friends` — an unrecognised string must never widen access.
-    visibility: parseVisibility(typeof body.visibility === "string" ? body.visibility : undefined),
+    visibility: has("visibility")
+      ? parseVisibility(typeof body.visibility === "string" ? body.visibility : undefined)
+      : parseVisibility(existing?.visibility),
   };
 }
 
@@ -198,16 +216,15 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-  const next = validate(body);
-  if (!next) return json({ error: "too_large" }, 413);
-
   const ifMatchRaw = (req.headers.get("If-Match") ?? "").replace(/"/g, "").trim();
   const ifMatch = ifMatchRaw === "" ? null : Number(ifMatchRaw);
   if (ifMatch != null && !Number.isInteger(ifMatch)) return json({ error: "invalid_if_match" }, 400);
 
-  const existing = await env.DB.prepare("SELECT version FROM profiles WHERE user_id = ?")
-    .bind(session.userId)
-    .first<{ version: number }>();
+  // Read the whole row, not just the version: fields the client omitted are carried
+  // forward rather than blanked (see mergeValidated).
+  const existing = await readProfileRow(env, session.userId);
+  const next = mergeValidated(body, existing);
+  if (!next) return json({ error: "too_large" }, 413);
   const currentVersion = existing?.version ?? 0;
   // Absent If-Match is only acceptable on a first write; otherwise a client with no
   // idea of the current state could silently clobber another device's edit.

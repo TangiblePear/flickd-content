@@ -334,6 +334,45 @@ describe("owner profile", () => {
     expect(got.profile.visibility).toBe("friends");
   });
 
+  // Android versions in the wild always lag the API. A client that has never heard
+  // of `bio` must not blank it just by saving its own fields.
+  describe("partial updates", () => {
+    it("carries omitted fields forward instead of blanking them", async () => {
+      const env = await env0();
+      await handlePutMyProfile(
+        put("tok-owner", { displayName: "Pear", bio: "kept", personalityId: "p1", layout: [{ type: "BIO" }] }),
+        env,
+      );
+      // An older client that only knows about displayName saves its change.
+      await handlePutMyProfile(put("tok-owner", { displayName: "Pear II" }, "1"), env);
+
+      const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+      expect(got.profile.displayName).toBe("Pear II");
+      expect(got.profile.bio).toBe("kept");
+      expect(got.profile.personalityId).toBe("p1");
+      expect(got.profile.layout).toEqual([{ type: "BIO" }]);
+    });
+
+    it("still lets a present-but-empty value clear a field", async () => {
+      const env = await env0();
+      await handlePutMyProfile(put("tok-owner", { displayName: "Pear", bio: "temporary" }), env);
+      await handlePutMyProfile(put("tok-owner", { bio: "" }, "1"), env);
+
+      const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+      expect(got.profile.bio).toBe("");
+      expect(got.profile.displayName).toBe("Pear"); // untouched
+    });
+
+    it("preserves visibility when the client omits it", async () => {
+      const env = await env0();
+      await handlePutMyProfile(put("tok-owner", { visibility: "private" }), env);
+      await handlePutMyProfile(put("tok-owner", { displayName: "x" }, "1"), env);
+
+      const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+      expect(got.profile.visibility).toBe("private");
+    });
+  });
+
   it("400s malformed JSON", async () => {
     const env = await env0();
     const bad = authed("tok-owner", "/api/me/profile", { method: "PUT", body: "{not json" });
