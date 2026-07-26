@@ -25,12 +25,18 @@ interface Env {
   // wrap the per-account DEK. Both absent → the account endpoints report not_configured.
   GOOGLE_WEB_CLIENT_ID?: string;
   ACCOUNT_PEPPER?: string;
+  // Accounts/profiles/friendships/blocks. Bound in wrangler.toml as `DB`.
+  DB: D1Database;
+  // Firebase project **id** (not the project number) — a Firebase ID token's
+  // `aud`. Absent → /api/auth/* reports not_configured.
+  FIREBASE_PROJECT_ID?: string;
 }
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
+import { handleAuthSession, handleAuthLogout } from "./auth";
 
 interface ShareItem {
   tmdbId: number;
@@ -60,7 +66,7 @@ interface StoredShare {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Feed-Secret, X-Read-Token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Feed-Secret, X-Read-Token",
 };
 
 // ── Limits (the relay stores ciphertext only; these just cap abuse) ──
@@ -209,6 +215,10 @@ export default {
     }
     if (p === "/api/account/resolve" && req.method === "GET") return handleAccountResolve(req, env);
     if (p === "/api/account/unlink" && req.method === "POST") return handleAccountUnlink(req, env);
+
+    // ── Firebase Auth sessions (Phase 1) ──
+    if (p === "/api/auth/session" && req.method === "POST") return handleAuthSession(req, env);
+    if (p === "/api/auth/logout" && req.method === "POST") return handleAuthLogout(req, env);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

@@ -17,7 +17,8 @@ routes = [
   { pattern = "flickto.app/api/friendcode", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/friendcode/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/account/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/account/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/auth/*", zone_name = "flickto.app" }
 ]
 
 
@@ -29,6 +30,14 @@ routes = [
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "flickto-social"
+
+
+# Accounts, profiles, friendships, blocks (server-authoritative — NOT zero-knowledge).
+# Get the id with: wrangler d1 list
+[[d1_databases]]
+binding = "DB"
+database_name = "flickto-accounts"
+database_id = "5c474f4f8c165daca8b28eb4a824e512"
 
 
 
@@ -53,6 +62,9 @@ REPORT_AUTOHIDE = "3"
 # (not here): `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account
 # endpoints return 503 not_configured and the rest of the Worker is unaffected.
 GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googleusercontent.com"
+# Firebase Auth (Phase 1). The project **id** — a Firebase ID token's `aud` is the
+# project id, NOT the project number (468641021144). Unset → /api/auth/* 503s.
+FIREBASE_PROJECT_ID = "flickto-cf7b6"
 
 [observability]
 enabled = true
