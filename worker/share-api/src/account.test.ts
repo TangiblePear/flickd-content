@@ -136,6 +136,21 @@ describe("account link conflict (Part 1)", () => {
       ctx,
     );
 
+  // Sign-in re-links every time now, so this runs constantly. Treating it as a
+  // clash asked the user to choose between two copies of the same identity on
+  // every single login.
+  it("re-linking the SAME identity is idempotent, not a conflict", async () => {
+    const env = makeEnv();
+    const token = await makeToken(validClaims());
+    const body = { ciphertext: "ct", dek: btoa("dek-material"), friendId: "AAAAAAAAAAAA", friendCount: 3 };
+
+    expect((await link(env, token, body)).status).toBe(200);
+    // Same account, same identity, updated friend count — must just succeed.
+    const again = await link(env, token, { ...body, friendCount: 5 });
+    expect(again.status).toBe(200);
+    expect((await again.json()) as any).toEqual({ ok: true, friendId: "AAAAAAAAAAAA" });
+  });
+
   it("links, then 409s a second sub with the existing friendId + count, and force overwrites", async () => {
     const env = makeEnv();
     const token = await makeToken(validClaims());

@@ -239,7 +239,11 @@ export async function handleAccountLink(
 
   const lookupKey = await accountLookupKey(v.sub);
   const existing = await getJson<AccountRecord>(env, accountKey(lookupKey));
-  if (existing && url.searchParams.get("force") !== "1") {
+  // A conflict is only a conflict when the account holds a DIFFERENT identity.
+  // Re-linking the identity already stored here is idempotent — it happens on every
+  // sign-in now that linking is part of the account flow, and treating it as a clash
+  // asked the user "which one do you want to keep?" about two copies of the same thing.
+  if (existing && existing.friendId !== friendId && url.searchParams.get("force") !== "1") {
     return json({ error: "conflict", existingFriendId: existing.friendId, friendCount: existing.friendCount }, 409);
   }
   // Confirmed overwrite onto a different identity → purge the previous one.
