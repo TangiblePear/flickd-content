@@ -355,7 +355,10 @@ describe("bridging legacy device pairings", () => {
       }), env)
     ).json()) as any;
 
-    expect(res).toEqual({ linked: 1, pendingSignup: 1 });
+    expect(res.linked).toBe(1);
+    expect(res.pendingSignup).toBe(1);
+    // The client cannot address a friend server-side without this pairing.
+    expect(res.mapping).toEqual([{ friendId: "BBBBBB151CNQ6XHC0J", userId: B }]);
     // Already mutually agreed on the old system — re-confirming would be a regression.
     const after = (await (await handleGetFriends(get("tok-a", "/api/friends"), env)).json()) as any;
     expect(after.accepted).toEqual([B]);

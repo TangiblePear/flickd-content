@@ -360,7 +360,7 @@ export async function handleLinkLegacyFriends(
   const ids = raw
     .filter((v): v is string => typeof v === "string" && FRIEND_ID_RE.test(v))
     .slice(0, MAX_LEGACY_FRIEND_IDS);
-  if (ids.length === 0) return json({ linked: 0, pendingSignup: 0 });
+  if (ids.length === 0) return json({ linked: 0, pendingSignup: 0, mapping: [] });
 
   const placeholders = ids.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
@@ -371,10 +371,17 @@ export async function handleLinkLegacyFriends(
 
   const now = Date.now();
   const statements = [];
+  // The caller needs this: it knows its friends by device friendId, but every
+  // server-side operation (blocks, profile reads) keys on users.id. Without
+  // returning the pairs, the client can never address a friend server-side, and
+  // there is deliberately no friendId -> userId lookup endpoint — that would let
+  // anyone probe whether a given friendId has an account.
+  const mapping: { friendId: string; userId: string }[] = [];
   let linked = 0;
   for (const row of results ?? []) {
     if (row.id === session.userId) continue;
     if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
+    mapping.push({ friendId: row.friend_id, userId: row.id });
     const [a, b] = friendshipKey(session.userId, row.id);
     statements.push(
       env.DB
@@ -388,7 +395,7 @@ export async function handleLinkLegacyFriends(
     linked++;
   }
   if (statements.length > 0) await env.DB.batch(statements);
-  return json({ linked, pendingSignup: ids.length - linked });
+  return json({ linked, pendingSignup: ids.length - linked, mapping });
 }
 
 // ── Account deletion (§9b — legal requirement) ───────────────────────────────
