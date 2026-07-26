@@ -156,14 +156,31 @@ describe("publishing", () => {
 });
 
 describe("reading", () => {
-  it("returns my friends' events and my own, newest first", async () => {
+  it("returns friends' events, newest first", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-me", [ev("mine", 100)]), env);
     await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("older", 100)]), env);
 
     const feed = await loadFeed(env, ME, 50);
-    expect(feed.map((e) => e.id)).toEqual(["theirs", "mine"]);
+    expect(feed.map((e) => e.id)).toEqual(["theirs", "older"]);
+  });
+
+  /** The client cannot attribute your own events to a friend row, so they would
+   *  be dropped on arrival — and a heavy user's would fill the page first. */
+  it("excludes the caller's OWN events", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    await handlePublishFeed(publish("tok-me", [ev("mine", 300)]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
+
+    expect((await loadFeed(env, ME, 50)).map((e) => e.id)).toEqual(["theirs"]);
+  });
+
+  it("is empty with no friends rather than showing yourself", async () => {
+    const env = await env0();
+    await handlePublishFeed(publish("tok-me", [ev("mine", 100)]), env);
+    expect(await loadFeed(env, ME, 50)).toEqual([]);
   });
 
   it("never shows a stranger's events", async () => {
@@ -186,7 +203,8 @@ describe("reading", () => {
 
   it("pages with `before`", async () => {
     const env = await env0();
-    await handlePublishFeed(publish("tok-me", [ev("a", 100), ev("b", 200), ev("c", 300)]), env);
+    befriend(env, ME, FRIEND);
+    await handlePublishFeed(publish("tok-friend", [ev("a", 100), ev("b", 200), ev("c", 300)]), env);
     const page = await loadFeed(env, ME, 50, 300);
     expect(page.map((e) => e.id)).toEqual(["b", "a"]);
   });

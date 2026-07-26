@@ -68,9 +68,12 @@ const toWire = (r: FeedEventRow) => ({
  */
 export async function loadFeed(env: FeedEnv, userId: string, limit: number, before?: number) {
   const { accepted } = await loadFriendships(env as any, userId);
-  // Your own events are deliberately included: the feed reads as "what my circle
-  // has been watching", and omitting yourself makes a solo user's feed empty.
-  const authors = [userId, ...accepted].slice(0, MAX_AUTHORS_PER_QUERY);
+  // Friends ONLY. The client renders this as a friends feed and drops anything it
+  // cannot attribute to a friend row, so returning the caller's own events wastes
+  // the page: a heavy user's 100 events would fill the limit and crowd out every
+  // friend they have.
+  const authors = accepted.slice(0, MAX_AUTHORS_PER_QUERY);
+  if (authors.length === 0) return [];
   const placeholders = authors.map(() => "?").join(",");
   const cutoff = before && Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER;
 
