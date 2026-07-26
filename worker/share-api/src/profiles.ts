@@ -12,6 +12,7 @@
 
 import { canView, parseVisibility, Visibility } from "./authz";
 import { resolveSession } from "./auth";
+import { loadFriendships } from "./friends";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -327,19 +328,22 @@ export async function handleGetProfile(
  * D1 row budget on the free plan, so collapsing three calls into one roughly
  * triples the supported user count.
  *
- * `friends` and `pending` are always present but stay empty until Phase 3 —
- * clients must tolerate that rather than treating it as an error.
+ * Since Phase 3 this also carries the friend graph, so app-open is genuinely one
+ * request: profile, stats, accepted friends and pending requests in both
+ * directions.
  */
 export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return unauthorized();
   const row = await readProfileRow(env, session.userId);
+  const friendships = await loadFriendships(env as any, session.userId);
   return json({
     userId: session.userId,
     profile: row ? toWire(row) : null,
     stats: row ? await readStats(env, session.userId) : null,
-    friends: [],
-    pending: [],
+    friends: friendships.accepted,
+    pending: friendships.incoming,
+    outgoing: friendships.outgoing,
     serverTime: Date.now(),
   });
 }

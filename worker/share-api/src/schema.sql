@@ -96,3 +96,19 @@ CREATE TABLE IF NOT EXISTS blocks (
   PRIMARY KEY (blocker_id, blocked_id)
 );
 CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
+
+
+-- ── Phase 4: moderation ─────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS reports (
+  id          TEXT PRIMARY KEY,
+  reporter_id TEXT NOT NULL,
+  target_id   TEXT NOT NULL,
+  kind        TEXT NOT NULL,     -- user | profile | comment | picture
+  context     TEXT,              -- free text from the reporter, capped
+  state       TEXT NOT NULL,     -- open | actioned | dismissed
+  created_at  INTEGER NOT NULL
+);
+-- Admin queue: oldest open first.
+CREATE INDEX IF NOT EXISTS idx_reports_state ON reports(state, created_at);
+-- One reporter may not spam the same target; enforced in code via this lookup.
+CREATE INDEX IF NOT EXISTS idx_reports_pair ON reports(reporter_id, target_id);

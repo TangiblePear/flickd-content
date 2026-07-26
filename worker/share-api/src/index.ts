@@ -38,6 +38,19 @@ import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout } from "./auth";
 import {
+  handleBlock,
+  handleClaimFriendId,
+  handleDeleteAccount,
+  handleFriendAccept,
+  handleFriendRemove,
+  handleFriendRequest,
+  handleGetBlocks,
+  handleGetFriends,
+  handleLinkLegacyFriends,
+  handleReport as handleUserReport,
+  handleUnblock,
+} from "./friends";
+import {
   handleBootstrap,
   handleGetMyProfile,
   handleGetProfile,
@@ -240,6 +253,26 @@ export default {
 
     const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
+
+    // ── Friendships, blocks, reports (Phase 3/4). Session-authenticated. ──
+    if (p === "/api/me/friend-id" && req.method === "PUT") return handleClaimFriendId(req, env, ctx);
+    if (p === "/api/me/account" && req.method === "DELETE") return handleDeleteAccount(req, env, ctx);
+    if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
+    if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx);
+    if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx);
+    if (p === "/api/friends/link-legacy" && req.method === "POST") return handleLinkLegacyFriends(req, env, ctx);
+
+    const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx);
+
+    if (p === "/api/blocks" && req.method === "GET") return handleGetBlocks(req, env, ctx);
+    const blockTarget = p.match(/^\/api\/blocks\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (blockTarget) {
+      if (req.method === "POST") return handleBlock(blockTarget[1], req, env, ctx);
+      if (req.method === "DELETE") return handleUnblock(blockTarget[1], req, env, ctx);
+    }
+
+    if (p === "/api/report" && req.method === "POST") return handleUserReport(req, env, ctx);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);
