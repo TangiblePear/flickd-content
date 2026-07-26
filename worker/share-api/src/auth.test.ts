@@ -149,9 +149,17 @@ class FakeStmt {
       const [token_hash, user_id, created_at, expires_at] = this.args as [string, string, number, number];
       this.db.sessions.push({ token_hash, user_id, created_at, expires_at, revoked_at: null });
     } else if (s.startsWith("UPDATE sessions SET revoked_at")) {
+      // Two shapes: logout revokes by hash alone; the session-mint path also
+      // scopes to user_id so a Firebase token can't revoke another user's session.
       const [revoked_at, token_hash] = this.args as [number, string];
-      const row = this.db.sessions.find((x) => x.token_hash === token_hash && x.revoked_at == null);
+      const scopedUserId = s.includes("user_id = ?") ? (this.args[2] as string) : null;
+      const row = this.db.sessions.find(
+        (x) => x.token_hash === token_hash && x.revoked_at == null && (scopedUserId == null || x.user_id === scopedUserId),
+      );
       if (row) row.revoked_at = revoked_at;
+    } else if (s.startsWith("DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?")) {
+      const [user_id, cutoff] = this.args as [string, number];
+      this.db.sessions = this.db.sessions.filter((x) => !(x.user_id === user_id && x.expires_at <= cutoff));
     } else {
       throw new Error(`FakeD1: unhandled run() for ${s}`);
     }
@@ -322,6 +330,66 @@ describe("session lifecycle", () => {
     expect(b.sessionToken).not.toBe(a.sessionToken);
     expect(env.DB.users.length).toBe(1);
     expect(env.DB.sessions.length).toBe(2);
+  });
+
+  // Without X-Revoke-Session a renewed token stayed valid for its full 90 days
+  // with no device holding it, so nothing could revoke it and signing out did not
+  // end it. Device-confirmed on 2026-07-26: 3 sessions, 1 revoked, 2 still live.
+  describe("retiring the replaced session (X-Revoke-Session)", () => {
+    const renewReq = async (old: string) =>
+      new Request("https://flickto.app/api/auth/session", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${await makeToken(validClaims())}`, "X-Revoke-Session": old },
+      });
+
+    it("revokes the old session so it stops resolving", async () => {
+      const env = makeEnv();
+      const first = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      const second = (await (await handleAuthSession(await renewReq(first.sessionToken), env)).json()) as any;
+
+      expect(await resolveSession(bearerReq(first.sessionToken), env)).toBeNull();
+      expect(await resolveSession(bearerReq(second.sessionToken), env)).toEqual({ userId: second.userId });
+      expect(env.DB.sessions.filter((s: any) => s.revoked_at == null).length).toBe(1);
+    });
+
+    it("leaves one live session after renew-then-logout", async () => {
+      const env = makeEnv();
+      const first = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      const second = (await (await handleAuthSession(await renewReq(first.sessionToken), env)).json()) as any;
+      await handleAuthLogout(bearerReq(second.sessionToken, "https://flickto.app/api/auth/logout"), env);
+
+      // The whole point: no live session survives a sign-out.
+      expect(env.DB.sessions.filter((s: any) => s.revoked_at == null).length).toBe(0);
+    });
+
+    it("cannot revoke another user's session", async () => {
+      const env = makeEnv();
+      const victim = (await (
+        await handleAuthSession(bearerReq(await makeToken(validClaims({ sub: "firebase-uid-2" }))), env)
+      ).json()) as any;
+      // Attacker holds their own valid Firebase token and names the victim's session.
+      await handleAuthSession(await renewReq(victim.sessionToken), env);
+
+      expect(await resolveSession(bearerReq(victim.sessionToken), env)).toEqual({ userId: victim.userId });
+    });
+
+    it("ignores an unknown or blank outgoing token", async () => {
+      const env = makeEnv();
+      await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+      expect((await handleAuthSession(await renewReq("never-issued"), env)).status).toBe(200);
+      expect((await handleAuthSession(await renewReq("   "), env)).status).toBe(200);
+    });
+
+    it("purges the user's expired sessions on mint", async () => {
+      const env = makeEnv();
+      const live = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      // Age the existing row out, then mint again.
+      env.DB.sessions[0].expires_at = Date.now() - 1000;
+      await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+
+      expect(env.DB.sessions.length).toBe(1);
+      expect(await resolveSession(bearerReq(live.sessionToken), env)).toBeNull();
+    });
   });
 
   it("gives different uids different opaque user ids", async () => {

@@ -66,7 +66,7 @@ interface StoredShare {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Feed-Secret, X-Read-Token",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Feed-Secret, X-Read-Token, X-Revoke-Session",
 };
 
 // ── Limits (the relay stores ciphertext only; these just cap abuse) ──

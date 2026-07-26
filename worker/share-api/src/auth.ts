@@ -21,7 +21,7 @@ export interface AuthEnv {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Revoke-Session",
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...CORS } });
@@ -266,6 +266,11 @@ function edgeCache(): Cache | null {
  * session token. Creates the `users` + `identities` rows on first sight of a
  * uid. Returns `{ sessionToken, userId, expiresAt }` where `expiresAt` is epoch
  * MILLISECONDS. 503 not_configured / 401 unauthorized / 403 forbidden.
+ *
+ * `X-Revoke-Session: <old session token>` retires the caller's outgoing session
+ * in the same request. A client renewing its session MUST send this: without it
+ * the replaced token stays valid for its full 90 days with no device holding it,
+ * so nothing can ever revoke it and signing out does not end it.
  */
 export async function handleAuthSession(req: Request, env: AuthEnv): Promise<Response> {
   if (!env.FIREBASE_PROJECT_ID) return json({ error: "not_configured" }, 503);
@@ -295,9 +300,31 @@ export async function handleAuthSession(req: Request, env: AuthEnv): Promise<Res
 
   const token = newSessionToken();
   const expiresAt = now + SESSION_TTL_MS;
-  await env.DB.prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)")
-    .bind(await sha256Hex(token), userId, now, expiresAt)
-    .run();
+  const statements = [
+    env.DB.prepare("INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)").bind(
+      await sha256Hex(token),
+      userId,
+      now,
+      expiresAt,
+    ),
+    // Drop this user's already-dead sessions. Bounded (one user, uses
+    // idx_sessions_user) and it runs on a write, never on a read, so it keeps the
+    // table from growing forever without needing a cron we have no budget for.
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?").bind(userId, now),
+  ];
+
+  // Retire the session being replaced, scoped to this user so holding a Firebase
+  // token can never revoke somebody else's.
+  const outgoing = req.headers.get("X-Revoke-Session")?.trim();
+  if (outgoing) {
+    statements.push(
+      env.DB.prepare(
+        "UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND user_id = ? AND revoked_at IS NULL",
+      ).bind(now, await sha256Hex(outgoing), userId),
+    );
+  }
+  await env.DB.batch(statements);
+  if (outgoing) await edgeCache()?.delete(sessionCacheKey(await sha256Hex(outgoing)));
 
   return json({ sessionToken: token, userId, expiresAt });
 }
