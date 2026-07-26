@@ -94,6 +94,34 @@ describe("verifyGoogleIdToken (Part 1)", () => {
   it("rejects a wrong issuer", async () => {
     expect(await verifyGoogleIdToken(await makeToken(validClaims({ iss: "evil.example.com" })), makeEnv())).toBeNull();
   });
+
+  // Both OAuth client ids must be accepted while the Android client migrates
+  // between Google Cloud projects: shipped apps send the old project's id, new
+  // builds send the Firebase project's. Dropping either breaks real users.
+  describe("multiple accepted audiences", () => {
+    const OTHER = "firebase-web-client.apps.googleusercontent.com";
+    const multiEnv = () => ({ ...makeEnv(), GOOGLE_WEB_CLIENT_ID: `${AUD},${OTHER}` });
+
+    it("accepts the first configured aud", async () => {
+      expect(await verifyGoogleIdToken(await makeToken(validClaims()), multiEnv())).toEqual({ sub: "google-sub-1" });
+    });
+    it("accepts the second configured aud", async () => {
+      expect(await verifyGoogleIdToken(await makeToken(validClaims({ aud: OTHER })), multiEnv())).toEqual({
+        sub: "google-sub-1",
+      });
+    });
+    it("still rejects an aud that is in neither", async () => {
+      expect(await verifyGoogleIdToken(await makeToken(validClaims({ aud: "someone-else" })), multiEnv())).toBeNull();
+    });
+    it("tolerates whitespace around the separator", async () => {
+      const env = { ...makeEnv(), GOOGLE_WEB_CLIENT_ID: ` ${AUD} , ${OTHER} ` };
+      expect(await verifyGoogleIdToken(await makeToken(validClaims({ aud: OTHER })), env)).toEqual({ sub: "google-sub-1" });
+    });
+    it("rejects everything when no aud is configured", async () => {
+      const env = { ...makeEnv(), GOOGLE_WEB_CLIENT_ID: "" };
+      expect(await verifyGoogleIdToken(await makeToken(validClaims()), env)).toBeNull();
+    });
+  });
 });
 
 describe("account link conflict (Part 1)", () => {

@@ -37,7 +37,7 @@ bucket_name = "flickto-social"
 [[d1_databases]]
 binding = "DB"
 database_name = "flickto-accounts"
-database_id = "5c474f4f8c165daca8b28eb4a824e512"
+database_id = "5ddfdff4-c818-4131-98aa-41350f164ce0"
 
 
 
@@ -57,11 +57,18 @@ RATE_LIMIT_PER_HOUR = "10"
 MODERATION_ENABLED = "true"
 # Distinct reporters that auto-hide a picture pending admin review.
 REPORT_AUTOHIDE = "3"
-# Google account linking (Part 1). The OAuth **Web** client ID the ID token's `aud`
-# must equal — fill in before deploying account linking. ACCOUNT_PEPPER is a SECRET
-# (not here): `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account
-# endpoints return 503 not_configured and the rest of the Worker is unaffected.
-GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googleusercontent.com"
+# Google account linking (Part 1). The OAuth **Web** client id(s) an ID token's `aud`
+# may equal — comma-separated, all accepted. ACCOUNT_PEPPER is a SECRET (not here):
+# `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account endpoints
+# return 503 not_configured and the rest of the Worker is unaffected.
+#
+# TWO ids during the OAuth client migration, and BOTH are required:
+#   326222246100-…  the original project — every app already on the Play Store
+#                   sends this; dropping it breaks linking for real users.
+#   468641021144-…  the Firebase project (flickto-cf7b6) — what new builds send.
+# Drop the first only once the release cutover is done and shipped apps have
+# updated. Order is irrelevant.
+GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googleusercontent.com,468641021144-3s841cgmadpis3qct264k7udicmbrp3r.apps.googleusercontent.com"
 # Firebase Auth (Phase 1). The project **id** — a Firebase ID token's `aud` is the
 # project id, NOT the project number (468641021144). Unset → /api/auth/* 503s.
 FIREBASE_PROJECT_ID = "flickto-cf7b6"

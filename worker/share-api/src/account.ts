@@ -12,6 +12,12 @@
 
 export interface AccountEnv {
   BUCKET: R2Bucket;
+  /**
+   * Accepted `aud` values — one OAuth Web client id, or several comma-separated.
+   * Several are needed while the Android OAuth client migrates between Google
+   * Cloud projects: already-shipped apps send the old project's id and new builds
+   * send the Firebase project's, and both must keep working through the cutover.
+   */
   GOOGLE_WEB_CLIENT_ID?: string;
   ACCOUNT_PEPPER?: string;
   RATE_LIMIT_PER_HOUR?: string;
@@ -103,14 +109,23 @@ async function getGoogleJwks(): Promise<Jwk[]> {
   return body.keys;
 }
 
+/** Accepted `aud` values, parsed from the comma-separated [AccountEnv.GOOGLE_WEB_CLIENT_ID]. */
+function allowedAudiences(env: AccountEnv): string[] {
+  return (env.GOOGLE_WEB_CLIENT_ID ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
 /**
  * Verify a Google ID token and return its `sub`, or null. Asserts RS256, a known
- * `kid`, `iss ∈ {accounts.google.com, https://accounts.google.com}`, `aud ==
- * GOOGLE_WEB_CLIENT_ID`, a future `exp`, and a present `sub`. Never keys off email.
+ * `kid`, `iss ∈ {accounts.google.com, https://accounts.google.com}`, `aud` among
+ * the configured client ids, a future `exp`, and a present `sub`. Never keys off email.
  */
 export async function verifyGoogleIdToken(token: string, env: AccountEnv): Promise<{ sub: string } | null> {
   try {
-    if (!env.GOOGLE_WEB_CLIENT_ID) return null;
+    const audiences = allowedAudiences(env);
+    if (audiences.length === 0) return null;
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0]))) as { kid?: string; alg?: string };
@@ -122,7 +137,7 @@ export async function verifyGoogleIdToken(token: string, env: AccountEnv): Promi
       exp?: number;
     };
     if (claims.iss !== "accounts.google.com" && claims.iss !== "https://accounts.google.com") return null;
-    if (claims.aud !== env.GOOGLE_WEB_CLIENT_ID) return null;
+    if (typeof claims.aud !== "string" || !audiences.includes(claims.aud)) return null;
     if (!claims.sub) return null;
     if (typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now()) return null;
 
