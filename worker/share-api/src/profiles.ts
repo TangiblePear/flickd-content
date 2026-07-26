@@ -1,0 +1,328 @@
+// ── Server-authoritative profiles (Phase 2) ──────────────────────────────────
+// The profile now lives here, not on the device. The client keeps Room as an
+// offline cache, but the server row wins on read.
+//
+// Concurrency is optimistic on `profiles.version` and nothing else: a PUT sends
+// `If-Match: <version>` and gets 409 + the current version if it lost. That single
+// mechanism replaces the client's per-field last-write-wins layer.
+//
+// Request budget, not query budget, is the binding constraint on the free plan
+// (§12 of the plan), which is why `/api/me/bootstrap` exists — one request on app
+// open instead of three.
+
+import { canView, parseVisibility, Visibility } from "./authz";
+import { resolveSession } from "./auth";
+
+export interface ProfileEnv {
+  DB: D1Database;
+  FIREBASE_PROJECT_ID?: string;
+}
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-Match, X-Revoke-Session",
+};
+const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS, ...headers },
+  });
+
+const unauthorized = () => json({ error: "unauthorized" }, 401);
+/** Used for BOTH "no such profile" and "not allowed" — see the authz.ts header. */
+const notFound = () => json({ error: "not_found" }, 404);
+
+// ── Size caps. Every one of these is a write the client controls. ──
+const MAX_BIO = 500;
+const MAX_NAME = 60;
+const MAX_SHORT = 120; // ids, hex colours
+const MAX_URL = 500;
+const MAX_LAYOUT_BYTES = 8 * 1024;
+const MAX_STATS_BYTES = 16 * 1024;
+const MAX_LIST_ITEMS = 50;
+const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
+
+interface ProfileRow {
+  user_id: string;
+  display_name: string | null;
+  avatar_id: string | null;
+  border_id: string | null;
+  picture_url: string | null;
+  header_color: string | null;
+  header_backdrop_url: string | null;
+  layout: string | null;
+  bio: string | null;
+  favourite_movies: string | null;
+  favourite_shows: string | null;
+  favourite_people: string | null;
+  featured_achievements: string | null;
+  personality_id: string | null;
+  visibility: string;
+  version: number;
+  updated_at: number;
+}
+
+const PROFILE_COLUMNS =
+  "user_id, display_name, avatar_id, border_id, picture_url, header_color, header_backdrop_url, " +
+  "layout, bio, favourite_movies, favourite_shows, favourite_people, featured_achievements, " +
+  "personality_id, visibility, version, updated_at";
+
+/** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
+function jsonColumn<T>(raw: string | null, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Row → wire. Absent columns become empty values, never null, so clients need no null-handling. */
+function toWire(row: ProfileRow) {
+  return {
+    userId: row.user_id,
+    displayName: row.display_name ?? "",
+    avatarId: row.avatar_id ?? "",
+    borderId: row.border_id ?? "",
+    pictureUrl: row.picture_url ?? "",
+    headerColor: row.header_color ?? "",
+    headerBackdropUrl: row.header_backdrop_url ?? "",
+    layout: jsonColumn<unknown[]>(row.layout, []),
+    bio: row.bio ?? "",
+    favouriteMovies: jsonColumn<number[]>(row.favourite_movies, []),
+    favouriteShows: jsonColumn<number[]>(row.favourite_shows, []),
+    favouritePeople: jsonColumn<unknown[]>(row.favourite_people, []),
+    featuredAchievements: jsonColumn<unknown[]>(row.featured_achievements, []),
+    personalityId: row.personality_id ?? "",
+    visibility: parseVisibility(row.visibility),
+    version: row.version,
+    updatedAt: row.updated_at,
+  };
+}
+
+async function readProfileRow(env: ProfileEnv, userId: string): Promise<ProfileRow | null> {
+  return env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM profiles WHERE user_id = ?`)
+    .bind(userId)
+    .first<ProfileRow>();
+}
+
+async function readStats(env: ProfileEnv, userId: string): Promise<unknown | null> {
+  const row = await env.DB.prepare("SELECT stats FROM profile_stats WHERE user_id = ?")
+    .bind(userId)
+    .first<{ stats: string | null }>();
+  return row ? jsonColumn<unknown | null>(row.stats, null) : null;
+}
+
+// ── Incoming payload validation ──────────────────────────────────────────────
+
+function str(value: unknown, max: number): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed.slice(0, max);
+}
+
+/** Re-serialize a list field, capping length. Returns null for anything unusable. */
+function jsonList(value: unknown, max = MAX_LIST_ITEMS): string | null {
+  if (!Array.isArray(value)) return null;
+  return JSON.stringify(value.slice(0, max));
+}
+
+interface ValidatedProfile {
+  display_name: string | null;
+  avatar_id: string | null;
+  border_id: string | null;
+  picture_url: string | null;
+  header_color: string | null;
+  header_backdrop_url: string | null;
+  layout: string | null;
+  bio: string | null;
+  favourite_movies: string | null;
+  favourite_shows: string | null;
+  favourite_people: string | null;
+  featured_achievements: string | null;
+  personality_id: string | null;
+  visibility: Visibility;
+}
+
+/** Null on a payload we refuse outright (oversize layout); otherwise a clamped row. */
+function validate(body: Record<string, unknown>): ValidatedProfile | null {
+  const layout = jsonList(body.layout);
+  if (layout != null && layout.length > MAX_LAYOUT_BYTES) return null;
+  return {
+    display_name: str(body.displayName, MAX_NAME),
+    avatar_id: str(body.avatarId, MAX_SHORT),
+    border_id: str(body.borderId, MAX_SHORT),
+    picture_url: str(body.pictureUrl, MAX_URL),
+    header_color: str(body.headerColor, MAX_SHORT),
+    header_backdrop_url: str(body.headerBackdropUrl, MAX_URL),
+    layout,
+    bio: str(body.bio, MAX_BIO),
+    favourite_movies: jsonList(body.favouriteMovies),
+    favourite_shows: jsonList(body.favouriteShows),
+    favourite_people: jsonList(body.favouritePeople),
+    featured_achievements: jsonList(body.featuredAchievements),
+    personality_id: str(body.personalityId, MAX_SHORT),
+    // Unknown values fall to `friends` — an unrecognised string must never widen access.
+    visibility: parseVisibility(typeof body.visibility === "string" ? body.visibility : undefined),
+  };
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
+
+/** GET /api/me/profile — the owner's canonical record. 200 with `profile: null` when none exists yet. */
+export async function handleGetMyProfile(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return unauthorized();
+  const row = await readProfileRow(env, session.userId);
+  if (!row) return json({ profile: null, stats: null });
+  return json({ profile: toWire(row), stats: await readStats(env, session.userId) }, 200, {
+    ETag: `"${row.version}"`,
+  });
+}
+
+/**
+ * PUT /api/me/profile — replace the owner's profile.
+ *
+ * `If-Match: <version>` is REQUIRED once a profile exists; a mismatch returns 409
+ * with the current version so the client can re-read and retry. `If-Match: 0` (or
+ * absent) means "I believe none exists" and only succeeds on a first write.
+ */
+export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return unauthorized();
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  const next = validate(body);
+  if (!next) return json({ error: "too_large" }, 413);
+
+  const ifMatchRaw = (req.headers.get("If-Match") ?? "").replace(/"/g, "").trim();
+  const ifMatch = ifMatchRaw === "" ? null : Number(ifMatchRaw);
+  if (ifMatch != null && !Number.isInteger(ifMatch)) return json({ error: "invalid_if_match" }, 400);
+
+  const existing = await env.DB.prepare("SELECT version FROM profiles WHERE user_id = ?")
+    .bind(session.userId)
+    .first<{ version: number }>();
+  const currentVersion = existing?.version ?? 0;
+  // Absent If-Match is only acceptable on a first write; otherwise a client with no
+  // idea of the current state could silently clobber another device's edit.
+  const claimed = ifMatch ?? 0;
+  if (claimed !== currentVersion) {
+    return json({ error: "version_conflict", version: currentVersion }, 409);
+  }
+
+  const now = Date.now();
+  const version = currentVersion + 1;
+  await env.DB.prepare(
+    `INSERT INTO profiles (user_id, display_name, avatar_id, border_id, picture_url, header_color,
+       header_backdrop_url, layout, bio, favourite_movies, favourite_shows, favourite_people,
+       featured_achievements, personality_id, visibility, version, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       display_name = excluded.display_name, avatar_id = excluded.avatar_id,
+       border_id = excluded.border_id, picture_url = excluded.picture_url,
+       header_color = excluded.header_color, header_backdrop_url = excluded.header_backdrop_url,
+       layout = excluded.layout, bio = excluded.bio,
+       favourite_movies = excluded.favourite_movies, favourite_shows = excluded.favourite_shows,
+       favourite_people = excluded.favourite_people,
+       featured_achievements = excluded.featured_achievements,
+       personality_id = excluded.personality_id, visibility = excluded.visibility,
+       version = excluded.version, updated_at = excluded.updated_at`,
+  )
+    .bind(
+      session.userId,
+      next.display_name,
+      next.avatar_id,
+      next.border_id,
+      next.picture_url,
+      next.header_color,
+      next.header_backdrop_url,
+      next.layout,
+      next.bio,
+      next.favourite_movies,
+      next.favourite_shows,
+      next.favourite_people,
+      next.featured_achievements,
+      next.personality_id,
+      next.visibility,
+      version,
+      now,
+    )
+    .run();
+
+  return json({ version, updatedAt: now }, 200, { ETag: `"${version}"` });
+}
+
+/** PUT /api/me/stats — derived data, versionless. Rewritten wholesale by the owner. */
+export async function handlePutMyStats(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return unauthorized();
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  const serialized = JSON.stringify(body ?? null);
+  if (serialized.length > MAX_STATS_BYTES) return json({ error: "too_large" }, 413);
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO profile_stats (user_id, stats, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET stats = excluded.stats, updated_at = excluded.updated_at`,
+  )
+    .bind(session.userId, serialized, now)
+    .run();
+  return json({ updatedAt: now });
+}
+
+/**
+ * GET /api/profile/{userId} — a foreign profile, gated by [canView].
+ *
+ * Denied and nonexistent both return **404 `not_found`**, byte-identical, so this
+ * cannot be used to enumerate accounts or detect a block.
+ */
+export async function handleGetProfile(
+  userId: string,
+  req: Request,
+  env: ProfileEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return unauthorized();
+  if (!USER_ID_RE.test(userId)) return notFound();
+
+  const row = await readProfileRow(env, userId);
+  if (!row) return notFound();
+  if (!(await canView(env, session.userId, userId, parseVisibility(row.visibility)))) return notFound();
+
+  return json({ profile: toWire(row), stats: await readStats(env, userId) });
+}
+
+/**
+ * GET /api/me/bootstrap — everything app-open needs, in ONE request.
+ *
+ * Not an optimisation for later: the Worker request cap is ~17× tighter than the
+ * D1 row budget on the free plan, so collapsing three calls into one roughly
+ * triples the supported user count.
+ *
+ * `friends` and `pending` are always present but stay empty until Phase 3 —
+ * clients must tolerate that rather than treating it as an error.
+ */
+export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return unauthorized();
+  const row = await readProfileRow(env, session.userId);
+  return json({
+    userId: session.userId,
+    profile: row ? toWire(row) : null,
+    stats: row ? await readStats(env, session.userId) : null,
+    friends: [],
+    pending: [],
+    serverTime: Date.now(),
+  });
+}

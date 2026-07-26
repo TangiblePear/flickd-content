@@ -37,6 +37,13 @@ import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout } from "./auth";
+import {
+  handleBootstrap,
+  handleGetMyProfile,
+  handleGetProfile,
+  handlePutMyProfile,
+  handlePutMyStats,
+} from "./profiles";
 
 interface ShareItem {
   tmdbId: number;
@@ -66,7 +73,8 @@ interface StoredShare {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type, X-Feed-Secret, X-Read-Token, X-Revoke-Session",
+  "Access-Control-Allow-Headers":
+    "Authorization, Content-Type, If-Match, X-Feed-Secret, X-Read-Token, X-Revoke-Session",
 };
 
 // ── Limits (the relay stores ciphertext only; these just cap abuse) ──
@@ -219,6 +227,19 @@ export default {
     // ── Firebase Auth sessions (Phase 1) ──
     if (p === "/api/auth/session" && req.method === "POST") return handleAuthSession(req, env);
     if (p === "/api/auth/logout" && req.method === "POST") return handleAuthLogout(req, env);
+
+    // ── Server-authoritative profiles (Phase 2). Session-authenticated. ──
+    // NOT the same as /api/user/{friendId}/profile above, which is the E2EE
+    // ciphertext blob and is staying — different auth, different data.
+    if (p === "/api/me/bootstrap" && req.method === "GET") return handleBootstrap(req, env, ctx);
+    if (p === "/api/me/profile") {
+      if (req.method === "GET") return handleGetMyProfile(req, env, ctx);
+      if (req.method === "PUT") return handlePutMyProfile(req, env, ctx);
+    }
+    if (p === "/api/me/stats" && req.method === "PUT") return handlePutMyStats(req, env, ctx);
+
+    const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

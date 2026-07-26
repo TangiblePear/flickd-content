@@ -18,7 +18,11 @@ routes = [
   { pattern = "flickto.app/api/friendcode/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/account/*", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/auth/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/auth/*", zone_name = "flickto.app" },
+  # Phase 2 server-authoritative profiles. Without these patterns the Worker never
+  # sees the requests at all — and `wrangler deploy --dry-run` passes regardless.
+  { pattern = "flickto.app/api/me/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/profile/*", zone_name = "flickto.app" }
 ]
 
 

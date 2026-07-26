@@ -34,3 +34,65 @@ CREATE TABLE IF NOT EXISTS sessions (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+
+-- ── Phase 2: profiles ───────────────────────────────────────────────────────
+-- List-shaped fields are JSON. They are never filtered on, and keeping them
+-- inline holds a profile fetch to a single row read.
+CREATE TABLE IF NOT EXISTS profiles (
+  user_id               TEXT PRIMARY KEY REFERENCES users(id),
+  display_name          TEXT,
+  avatar_id             TEXT,
+  border_id             TEXT,
+  picture_url           TEXT,
+  header_color          TEXT,
+  header_backdrop_url   TEXT,
+  layout                TEXT,     -- JSON [{type, config}]
+  bio                   TEXT,
+  favourite_movies      TEXT,     -- JSON [tmdbId]
+  favourite_shows       TEXT,     -- JSON [tmdbId]
+  favourite_people      TEXT,     -- JSON [{id, name, profilePath}]
+  featured_achievements TEXT,     -- JSON [{id, tier}]
+  personality_id        TEXT,
+  visibility            TEXT NOT NULL DEFAULT 'friends',  -- private | friends | public
+  -- Optimistic concurrency. This is the ENTIRE concurrency story — it replaces
+  -- the client's per-field last-write-wins layer. A PUT sends If-Match: <version>
+  -- and gets 409 + the current version if it lost the race.
+  version               INTEGER NOT NULL DEFAULT 1,
+  updated_at            INTEGER NOT NULL
+);
+
+-- Split from `profiles` deliberately: derived data, by far the largest field, and
+-- rewritten on a different cadence to the user's own edits. Keeps the profile row
+-- small for the common read.
+CREATE TABLE IF NOT EXISTS profile_stats (
+  user_id    TEXT PRIMARY KEY REFERENCES users(id),
+  stats      TEXT,                -- JSON ProfileStatsSnapshot
+  updated_at INTEGER NOT NULL
+);
+
+
+-- ── Created in Phase 2, written in Phase 3/4 ────────────────────────────────
+-- These exist early on purpose: `canView()` reads them on every foreign profile
+-- read, and authorization here FAILS OPEN if a handler forgets to consult it.
+-- Writing the check once against real (empty) tables is safer than a Phase 2 stub
+-- that has to be swapped out later.
+CREATE TABLE IF NOT EXISTS friendships (
+  user_a       TEXT NOT NULL,     -- canonical ordering: user_a < user_b (lexicographic)
+  user_b       TEXT NOT NULL,
+  state        TEXT NOT NULL,     -- pending | accepted
+  requested_by TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL,
+  PRIMARY KEY (user_a, user_b)
+);
+-- The PK covers lookups from the user_a side; this covers the other direction.
+CREATE INDEX IF NOT EXISTS idx_friendships_b ON friendships(user_b, state);
+
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id TEXT NOT NULL,
+  blocked_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id)
+);
+CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
