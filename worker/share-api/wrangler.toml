@@ -30,7 +30,9 @@ routes = [
   { pattern = "flickto.app/api/friends/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/blocks", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/blocks/*", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/report", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/report", zone_name = "flickto.app" },
+  # Bare pattern: /api/feed is not matched by any wildcard above.
+  { pattern = "flickto.app/api/feed", zone_name = "flickto.app" }
 ]
 
 

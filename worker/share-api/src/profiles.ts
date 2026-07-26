@@ -13,6 +13,7 @@
 import { canView, parseVisibility, Visibility } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
+import { loadFeed } from "./feed";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -344,6 +345,9 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
     friends: friendships.accepted,
     pending: friendships.incoming,
     outgoing: friendships.outgoing,
+    // First page of the feed rides along: app-open should cost ONE request, and
+    // the Worker request cap binds far tighter than the row budget.
+    feed: await loadFeed(env as any, session.userId, 50),
     serverTime: Date.now(),
   });
 }

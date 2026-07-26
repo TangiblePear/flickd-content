@@ -37,6 +37,7 @@ import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout } from "./auth";
+import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
 import {
   handleBlock,
   handleClaimFriendId,
@@ -273,6 +274,13 @@ export default {
     }
 
     if (p === "/api/report" && req.method === "POST") return handleUserReport(req, env, ctx);
+
+    // ── Activity feed (Phase 6). Replaces the E2EE feed blob; opinions stay E2EE. ──
+    if (p === "/api/feed" && req.method === "GET") return handleGetFeed(req, env, ctx);
+    if (p === "/api/me/feed") {
+      if (req.method === "POST") return handlePublishFeed(req, env, ctx);
+      if (req.method === "DELETE") return handleClearFeed(req, env, ctx);
+    }
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

@@ -112,3 +112,22 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE INDEX IF NOT EXISTS idx_reports_state ON reports(state, created_at);
 -- One reporter may not spam the same target; enforced in code via this lookup.
 CREATE INDEX IF NOT EXISTS idx_reports_pair ON reports(reporter_id, target_id);
+
+
+-- ── Phase 6: activity feed ──────────────────────────────────────────────────
+-- Fan-out on READ, not on write. Friend counts here are tens, so the thing that
+-- forces write-fanout at scale does not apply — and the free plan allows 5M rows
+-- read/day against only 100k written, so multiplying every watch event by friend
+-- count would spend the scarcer budget.
+CREATE TABLE IF NOT EXISTS feed_events (
+  id         TEXT PRIMARY KEY,     -- client-supplied + stable, so re-publishing is idempotent
+  author_id  TEXT NOT NULL REFERENCES users(id),
+  kind       TEXT NOT NULL,        -- watch | achievement | personality
+  tmdb_id    INTEGER,
+  media_type TEXT,                 -- movie | show
+  payload    TEXT,                 -- small JSON (season/episode, achievement id + tier)
+  created_at INTEGER NOT NULL
+);
+-- THE index the whole design rests on. D1 bills rows SCANNED, not returned: with
+-- this, a feed read is one seek per friend; without it, a full table scan per load.
+CREATE INDEX IF NOT EXISTS idx_feed_author_time ON feed_events(author_id, created_at DESC);
