@@ -26,6 +26,7 @@
 
 import { areFriends, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
+import type { Notifier } from "./lists";
 
 export interface MatchEnv {
   DB: D1Database;
@@ -209,6 +210,7 @@ export async function handleMatchRequest(
   env: MatchEnv,
   ctx?: ExecutionContext,
   resolveCard?: CardResolver,
+  notify?: Notifier,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -283,6 +285,8 @@ export async function handleMatchRequest(
   }
 
   await putPayload(env, id, session.userId, sealed, now);
+  // Not reached by the block branch above — see the note in `handleShareList`.
+  notify?.(target);
   return json({ id, state: "pending" });
 }
 
@@ -297,6 +301,7 @@ export async function handleMatchAccept(
   req: Request,
   env: MatchEnv,
   ctx?: ExecutionContext,
+  notify?: Notifier,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -327,6 +332,9 @@ export async function handleMatchAccept(
   await env.DB.prepare("UPDATE match_requests SET state = 'accepted', updated_at = ? WHERE id = ?")
     .bind(now, id)
     .run();
+  // The requester has been waiting on this since they asked, and their half is only
+  // collectable now — without a wake-up they would not fetch it until the next sync.
+  notify?.(row.requester_id);
   return json({ state: "accepted" });
 }
 

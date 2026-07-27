@@ -566,6 +566,57 @@ describe("stranger match (origin = scan)", () => {
   });
 });
 
+// The regression that made the whole feature look broken on device (2026-07-27):
+// the inbox path fired an FCM on every delivery, D1 fired none, so a share sat on the
+// server with nothing telling the recipient to look. It surfaced only on the next
+// scheduled sync — up to 24h. Server state was perfect the entire time, which is
+// exactly why this needs a test rather than a comment.
+describe("waking the recipient", () => {
+  it("wakes the recipient on a delivered share, and nobody on a blocked one", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const woken: string[] = [];
+    const wake = (u: string) => { woken.push(u); };
+
+    await handleShareList(post("tok-a", "/api/lists/share", shareBody(B)), env, undefined, wake);
+    expect(woken).toEqual([B]);
+
+    // A block reports success and creates nothing; waking them would be pointless and
+    // would leak the block back to the sender as a timing signal.
+    const env2 = await env0();
+    befriend(env2, A, B);
+    env2.DB.blocks.push({ blocker_id: B, blocked_id: A });
+    const woken2: string[] = [];
+    await handleShareList(post("tok-a", "/api/lists/share", shareBody(B)), env2, undefined, (u) => { woken2.push(u); });
+    expect(woken2).toEqual([]);
+  });
+
+  it("wakes the target on a match request and the requester on accept", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const woken: string[] = [];
+    const wake = (u: string) => { woken.push(u); };
+
+    const { id } = (await (
+      await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env, undefined, undefined, wake)
+    ).json()) as any;
+    expect(woken).toEqual([B]);
+
+    // The requester has been waiting since they asked, and their half only becomes
+    // collectable now — without this they would not fetch it until the next sync.
+    await handleMatchAccept(id, post("tok-b", "", { sealed: "SEALED-BY-TARGET" }), env, undefined, wake);
+    expect(woken).toEqual([B, A]);
+  });
+
+  it("still delivers when there is no notifier at all", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    // A push is best-effort; a delivered share must never depend on one.
+    expect((await handleShareList(post("tok-a", "/api/lists/share", shareBody(B)), env)).status).toBe(200);
+    expect(env.DB.shared_lists.length).toBe(1);
+  });
+});
+
 describe("account erasure reaches these tables", () => {
   // A table that is not in the erasure batch is a SILENT compliance gap: nothing
   // fails, nothing logs, and the data simply survives a deletion the user was told

@@ -26,6 +26,25 @@ export interface ListsEnv {
   FIREBASE_PROJECT_ID?: string;
 }
 
+/**
+ * Wake a user's devices so they sync **now**.
+ *
+ * Injected rather than imported: the push record lives in R2 and is keyed by the
+ * device friendId, neither of which belongs in a D1-only module — the same reason
+ * `sync.ts` takes a `RelayLoader` and the match request takes a `CardResolver`.
+ *
+ * **This is not a nicety, it is what makes the feature work.** The inbox path it
+ * replaces fired an FCM on every delivery (`handlePostInbox`), and the recipient
+ * synced within seconds. Moving to D1 without carrying the push across left the
+ * row sitting on the server with nothing telling anyone to look, so a share only
+ * surfaced on the next scheduled sync — up to 24 hours later. Measured on device
+ * 2026-07-27: the share landed 5 seconds after the recipient's last sync and was
+ * still invisible ten minutes on.
+ *
+ * Fire-and-forget by contract: a delivered share must never fail because a push did.
+ */
+export type Notifier = (userId: string) => void;
+
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -119,7 +138,12 @@ function toWire(row: SharedListRow) {
  * A share to someone who has blocked you returns `{ id }` exactly as a delivered
  * one does, and writes nothing.
  */
-export async function handleShareList(req: Request, env: ListsEnv, ctx?: ExecutionContext): Promise<Response> {
+export async function handleShareList(
+  req: Request,
+  env: ListsEnv,
+  ctx?: ExecutionContext,
+  notify?: Notifier,
+): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
@@ -151,6 +175,9 @@ export async function handleShareList(req: Request, env: ListsEnv, ctx?: Executi
     .bind(id, session.userId, recipient, title, kind, itemCount, blob, Date.now())
     .run();
 
+  // Deliberately NOT reached by the block branch above: waking someone's devices for
+  // a share that was never created would be both pointless and a way to sense a block.
+  notify?.(recipient);
   return json({ id });
 }
 

@@ -327,7 +327,11 @@ export default {
     // These replace the last two directed-message types on the E2EE inbox. Both
     // live in the D1 half deliberately — folding them into the relay would keep
     // alive the thing this work exists to retire.
-    if (p === "/api/lists/share" && req.method === "POST") return handleShareList(req, env, ctx);
+    // `wake` is fire-and-forget: ctx.waitUntil keeps the push alive past the response
+    // without ever delaying or failing it.
+    const wake = (userId: string) => ctx.waitUntil(notifyAccount(env, userId));
+
+    if (p === "/api/lists/share" && req.method === "POST") return handleShareList(req, env, ctx, wake);
     if (p === "/api/lists/shared" && req.method === "GET") return handleGetSharedLists(req, env, ctx);
 
     const listAccept = p.match(/^\/api\/lists\/shared\/([0-9A-HJKMNP-TV-Z]{8,40})\/accept$/);
@@ -340,14 +344,14 @@ export default {
     if (p === "/api/match/request" && req.method === "POST") {
       // The card resolver is injected because the friend card lives in R2 and
       // `match.ts` is deliberately D1-only — same reason `sync.ts` takes a RelayLoader.
-      return handleMatchRequest(req, env, ctx, (code) => resolveCardOwner(env, code));
+      return handleMatchRequest(req, env, ctx, (code) => resolveCardOwner(env, code), wake);
     }
 
     const matchPayload = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})\/payload$/);
     if (matchPayload && req.method === "GET") return handleGetMatchPayload(matchPayload[1], req, env, ctx);
 
     const matchAccept = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})\/accept$/);
-    if (matchAccept && req.method === "POST") return handleMatchAccept(matchAccept[1], req, env, ctx);
+    if (matchAccept && req.method === "POST") return handleMatchAccept(matchAccept[1], req, env, ctx, wake);
 
     const matchTarget = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (matchTarget && req.method === "DELETE") return handleDeleteMatch(matchTarget[1], req, env, ctx);
@@ -1425,6 +1429,42 @@ async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
  * in invite links, so holding it says nothing about being in the room. What makes
  * the stranger path safe is the exchange order, not this check.
  */
+/**
+ * Wake every device belonging to account [userId] so it syncs immediately.
+ *
+ * The D1 half of this Worker knows accounts (`users.id`); push topics are keyed by
+ * the **device friendId** and the record lives in R2. This bridges the two, which is
+ * why it lives here and is injected into `lists.ts`/`match.ts` rather than imported
+ * by them — those stay D1-only by design.
+ *
+ * **Sends `inbox_update` deliberately, despite nothing arriving in the inbox.** That
+ * is the signal already-shipped clients turn into an immediate
+ * `WorkScheduler.scheduleSocialSyncNow` (`SocialMessagingService`), and
+ * `SocialSyncWorker` now reads the D1 lists and handshakes in the same pass. Inventing
+ * a new `type` would be tidier and would reach **no device in the field** until they
+ * updated — the whole point of this fix is that it works on the build people already
+ * have. Treat it as "wake up and sync", not as a claim about the inbox.
+ *
+ * Best-effort throughout: a share that was delivered must not fail because a push did.
+ */
+async function notifyAccount(env: Env, userId: string): Promise<void> {
+  try {
+    const row = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
+      .bind(userId)
+      .first<{ friend_id: string | null }>();
+    const friendId = row?.friend_id;
+    // No claimed friendId means no device has ever published a push record — there is
+    // nothing to wake, and that is normal for a brand-new account.
+    if (!friendId) return;
+    const config = fcmConfig(env);
+    if (!config) return;
+    const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
+    if (target) await sendFcmMessage(config, target, friendId, "inbox_update");
+  } catch (e) {
+    console.error("notifyAccount failed", e);
+  }
+}
+
 async function resolveCardOwner(env: Env, code: string): Promise<string | null> {
   const card = await getJson<{ serverUserId?: unknown }>(env, `fc/${code}.json`);
   const owner = card && typeof card.serverUserId === "string" ? card.serverUserId : "";
