@@ -7,6 +7,7 @@
 // before they consent), and the terminal states.
 
 import { describe, it, expect } from "vitest";
+import { handleDeleteAccount } from "./friends";
 import {
   handleAcceptSharedList,
   handleDeleteSharedList,
@@ -152,12 +153,26 @@ class FakeStmt {
       if (r) r.state = "accepted";
       return { success: true, meta: { changes: r ? 1 : 0 } };
     }
+    // Account erasure — both directions. Must precede the by-id variant below, which
+    // shares its prefix and would otherwise swallow it.
+    if (s.startsWith("DELETE FROM shared_lists WHERE sender_id = ? OR recipient_id = ?")) {
+      this.db.shared_lists = this.db.shared_lists.filter(
+        (x) => x.sender_id !== a[0] && x.recipient_id !== a[1],
+      );
+      return { success: true, meta: { changes: 1 } };
+    }
     if (s.startsWith("DELETE FROM shared_lists")) {
       const before = this.db.shared_lists.length;
       this.db.shared_lists = this.db.shared_lists.filter(
         (x) => !(x.id === a[0] && (x.recipient_id === a[1] || x.sender_id === a[2])),
       );
       return { success: true, meta: { changes: before - this.db.shared_lists.length } };
+    }
+    if (s.startsWith("DELETE FROM match_requests WHERE requester_id = ? OR target_id = ?")) {
+      this.db.match_requests = this.db.match_requests.filter(
+        (x) => x.requester_id !== a[0] && x.target_id !== a[1],
+      );
+      return { success: true, meta: { changes: 1 } };
     }
     if (s.startsWith("INSERT INTO match_requests")) {
       this.db.match_requests.push({
@@ -200,9 +215,36 @@ class FakeStmt {
       this.db.match_payloads = this.db.match_payloads.filter((x) => !(x.created_at < a[0] && once.has(x.request_id)));
       return { success: true, meta: { changes: 1 } };
     }
+    // Erasure cascade: every blob whose handshake touches this user.
+    if (s.startsWith("DELETE FROM match_payloads WHERE request_id IN")) {
+      const mine = new Set(
+        this.db.match_requests.filter((x) => x.requester_id === a[0] || x.target_id === a[1]).map((x) => x.id),
+      );
+      this.db.match_payloads = this.db.match_payloads.filter((x) => !mine.has(x.request_id));
+      return { success: true, meta: { changes: 1 } };
+    }
     if (s.startsWith("DELETE FROM match_payloads WHERE request_id")) {
       this.db.match_payloads = this.db.match_payloads.filter((x) => x.request_id !== a[0]);
       return { success: true, meta: { changes: 1 } };
+    }
+    // The rest of the account-erasure batch. These tables have no bearing on the
+    // behaviour under test, but the batch runs as one unit so they must not throw.
+    for (const [prefix, table, col] of [
+      ["DELETE FROM sessions", "sessions", null],
+      ["DELETE FROM blocks", "blocks", null],
+      ["DELETE FROM friendships", "friendships", null],
+      ["DELETE FROM reports", "reports", null],
+      ["DELETE FROM profile_stats", "profile_stats", null],
+      ["DELETE FROM profiles", "profiles", null],
+      ["DELETE FROM identities", "identities", null],
+      ["DELETE FROM users", "users", "id"],
+    ] as [string, string, string | null][]) {
+      if (s.startsWith(prefix)) {
+        if (col && (this.db as any)[table]) {
+          (this.db as any)[table] = (this.db as any)[table].filter((r: any) => r[col] !== a[0]);
+        }
+        return { success: true, meta: { changes: 1 } };
+      }
     }
     throw new Error(`FakeD1: unhandled run() ${s}`);
   }
@@ -519,6 +561,39 @@ describe("stranger match (origin = scan)", () => {
     );
     expect(res.status).toBe(200);
     expect(env.DB.match_requests.length).toBe(0);
+  });
+});
+
+describe("account erasure reaches these tables", () => {
+  // A table that is not in the erasure batch is a SILENT compliance gap: nothing
+  // fails, nothing logs, and the data simply survives a deletion the user was told
+  // had happened. All three of these were exactly that until this test existed.
+  it("erases shared lists in BOTH directions and the whole match handshake", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    // A sent one list and received another; both are A's data.
+    await handleShareList(post("tok-a", "/api/lists/share", shareBody(B)), env);
+    await handleShareList(post("tok-b", "/api/lists/share", shareBody(A, LIST_ID2)), env);
+    const { id } = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
+    await handleMatchAccept(id, post("tok-b", "", { sealed: "SEALED-BY-TARGET" }), env);
+    expect(env.DB.shared_lists.length).toBe(2);
+    expect(env.DB.match_payloads.length).toBe(2);
+
+    const res = await handleDeleteAccount(
+      new Request("https://flickto.app/api/me/account", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer tok-a" },
+      }),
+      env,
+    );
+    expect(res.status).toBe(204);
+
+    // A list A *sent* is as much A's content as one A received — leaving the sender's
+    // copy would keep it readable by the recipient after erasure.
+    expect(env.DB.shared_lists.length).toBe(0);
+    expect(env.DB.match_requests.length).toBe(0);
+    // A sealed blob outliving its handshake is unreachable data nobody can delete.
+    expect(env.DB.match_payloads.length).toBe(0);
   });
 });
 

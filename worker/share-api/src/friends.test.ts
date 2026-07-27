@@ -160,6 +160,12 @@ class FakeStmt {
       return { success: true, meta: { changes: 1 } };
     }
     for (const [prefix, table, col] of [
+      // Part of the erasure batch but not modelled here — `listsMatch.test.ts` owns
+      // the assertions for those three tables. They must not throw, though: the batch
+      // runs as one unit, so an unhandled statement fails the whole erasure.
+      ["DELETE FROM match_payloads", "match_payloads", null],
+      ["DELETE FROM match_requests", "match_requests", null],
+      ["DELETE FROM shared_lists", "shared_lists", null],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],

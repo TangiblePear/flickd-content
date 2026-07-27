@@ -407,6 +407,11 @@ export async function handleLinkLegacyFriends(
  * rather than orphaned. GDPR erasure has to actually erase: a stale `users` row
  * with a live `friendships` edge is a failure, not a partial success.
  *
+ * **Every table holding this user's data must appear below.** A new table that does
+ * not is a silent compliance gap — nothing fails, nothing logs, and the data simply
+ * survives an erasure the user was told had happened. `shared_lists`, `match_requests`
+ * and `match_payloads` were exactly that until they were added here.
+ *
  * The caller is still responsible for the Firebase Auth user and the relay purge —
  * both live outside D1, and both must happen after this returns.
  */
@@ -415,6 +420,18 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
   if (!session) return json({ error: "unauthorized" }, 401);
   const id = session.userId;
   await env.DB.batch([
+    // Sealed match payloads first: they are children of match_requests, and a blob
+    // outliving the handshake that addressed it is unreachable data nobody can delete.
+    env.DB
+      .prepare(
+        `DELETE FROM match_payloads WHERE request_id IN
+           (SELECT id FROM match_requests WHERE requester_id = ? OR target_id = ?)`,
+      )
+      .bind(id, id),
+    env.DB.prepare("DELETE FROM match_requests WHERE requester_id = ? OR target_id = ?").bind(id, id),
+    // Both directions. A list you sent is as much your data as one you received, and
+    // leaving the sender's copy behind would keep your content readable after erasure.
+    env.DB.prepare("DELETE FROM shared_lists WHERE sender_id = ? OR recipient_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),
