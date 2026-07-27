@@ -34,6 +34,10 @@ interface Env {
   // Firebase project **id** (not the project number) — a Firebase ID token's
   // `aud`. Absent → /api/auth/* reports not_configured.
   FIREBASE_PROJECT_ID?: string;
+  // Epoch ms after which the E2EE **inbox** stops being served. Unset ⇒ never, which
+  // is the default and changes nothing. Scoped to the inbox: `freshness` and the
+  // friends record ride the same relay and do NOT retire here.
+  RELAY_RETIRES_AT?: string;
 }
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
@@ -55,7 +59,7 @@ import {
   handleMatchAccept,
   handleMatchRequest,
 } from "./match";
-import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
+import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
   handleClaimFriendId,
@@ -1161,6 +1165,11 @@ function pruneInbox(rec: InboxRecord, now: number): InboxRecord {
 
 // Append a sealed message to a recipient's inbox (open write, rate-limited).
 async function handlePostInbox(friendId: string, req: Request, env: Env): Promise<Response> {
+  // Retired: accept and discard. Deliberately NOT an error — a stale client posting a
+  // friend request should fail quietly rather than surface a crash-shaped message for
+  // something the user cannot act on. The recipient's own client has stopped reading
+  // this by now, so storing it would only grow the bucket.
+  if (inboxRetired(env)) return json({ ok: true });
   const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
   const limit = Number(env.RATE_LIMIT_PER_HOUR ?? "10") * 6; // inbox is chattier than share-create
   if (await rateLimited(env, "inbox", ip, limit)) return json({ error: "rate_limited" }, { status: 429 });
@@ -1183,6 +1192,8 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
   // Fire an FCM push to the recipient so every one of their devices fetches the
   // inbox message immediately. The self-topic reaches all of the recipient's
   // devices in one send; a pre-topics recipient falls back to their device token.
+  //
+  // (Retirement is checked before any of the above — see the guard at the top.)
   try {
     const config = fcmConfig(env);
     if (config) {
@@ -1199,6 +1210,9 @@ async function handlePostInbox(friendId: string, req: Request, env: Env): Promis
 async function handleGetInbox(friendId: string, req: Request, env: Env): Promise<Response> {
   const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
   if (!auth.ok) return forbidden();
+  // Retired: an empty inbox, not an error. Owner-auth still runs first so this cannot
+  // be used to probe whether an identity exists.
+  if (inboxRetired(env)) return json({ ownerRecreated: auth.created, items: [], acks: [] });
   // Nothing is removed on read: every device sees every item AND every ack, and
   // filters locally. ownerRecreated first so a truncated client body peek still
   // catches it even when the record is large.
@@ -1212,6 +1226,9 @@ async function handleGetInbox(friendId: string, req: Request, env: Env): Promise
 async function handleAckInbox(friendId: string, req: Request, env: Env): Promise<Response> {
   const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
   if (!auth.ok) return forbidden();
+  // Retired: nothing left to acknowledge, and writing an ack for an item nobody can
+  // read would only resurrect the object the retirement exists to stop writing.
+  if (inboxRetired(env)) return json({ ok: true, ownerRecreated: auth.created });
   let body: { ids?: unknown; action?: unknown; deviceId?: unknown };
   try {
     body = (await req.json()) as typeof body;
