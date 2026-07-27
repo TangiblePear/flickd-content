@@ -15,9 +15,11 @@
 import { resolveSession } from "./auth";
 import { loadFeed, publishEvents, type FeedEnv } from "./feed";
 import { loadFriendships } from "./friends";
+import { loadSharedLists, type ListsEnv } from "./lists";
+import { loadMatches, sweepOnceMatchPayloads, type MatchEnv } from "./match";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
 
-export type SyncEnv = FeedEnv & ProfileEnv;
+export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -52,6 +54,17 @@ export interface SyncRequest {
    * comments move out of E2EE this handler becomes two D1 queries.
    */
   relay?: RelayRequest;
+  /**
+   * Opt in to the shared-list and Friend Match handshakes. Both are bounded by
+   * friend count and both used to be read every pass through the inbox, so they add
+   * rows to a request rather than a request.
+   *
+   * **Flags, not always-on**, for the same reason `relay` is: a field the client did
+   * not ask for is bytes on every sync forever, and a client that renders neither
+   * should not pay for them.
+   */
+  lists?: boolean;
+  match?: boolean;
 }
 
 export interface RelayRequest {
@@ -130,7 +143,13 @@ export async function handleSync(
   const row = await readProfileRow(env, session.userId);
   const profile = row && row.version > held ? toWire(row) : null;
 
-  // 3. R2, if the caller asked for it.
+  // 3. The D1 replacements for the last two inbox message types. Null when not
+  //    asked for, which is also what a client on an older Worker sees — so the
+  //    absent case must mean "fall back", never "you have none".
+  const lists = body.lists ? await loadSharedLists(env, session.userId) : null;
+  const match = body.match ? await loadMatches(env, session.userId) : null;
+
+  // 4. R2, if the caller asked for it.
   let relay: RelayResponse | null = null;
   if (body.relay && loadRelay) {
     relay = await loadRelay(env, session.userId, {
@@ -139,11 +158,18 @@ export async function handleSync(
     });
   }
 
+  // Backstop delete for `once` match payloads nobody collected. Rides ambient sync
+  // traffic because this account has no cron budget left — same reason the
+  // orphan-profile reaper is opportunistic. Never blocks the response.
+  if (body.match) ctx?.waitUntil(sweepOnceMatchPayloads(env).catch(() => {}));
+
   return json({
     written,
     feed: { events, cursor },
     friends,
     profile,
+    lists,
+    match,
     relay,
     serverTime: Date.now(),
   });

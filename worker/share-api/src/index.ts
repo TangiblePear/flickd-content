@@ -38,6 +38,18 @@ import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout, resolveSession } from "./auth";
 import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
+import {
+  handleAcceptSharedList,
+  handleDeleteSharedList,
+  handleGetSharedLists,
+  handleShareList,
+} from "./lists";
+import {
+  handleDeleteMatch,
+  handleGetMatchPayload,
+  handleMatchAccept,
+  handleMatchRequest,
+} from "./match";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
@@ -305,6 +317,34 @@ export default {
     }
 
     if (p === "/api/report" && req.method === "POST") return handleUserReport(req, env, ctx);
+
+    // ── Shared lists + Friend Match (D1). Session-authenticated. ──
+    // These replace the last two directed-message types on the E2EE inbox. Both
+    // live in the D1 half deliberately — folding them into the relay would keep
+    // alive the thing this work exists to retire.
+    if (p === "/api/lists/share" && req.method === "POST") return handleShareList(req, env, ctx);
+    if (p === "/api/lists/shared" && req.method === "GET") return handleGetSharedLists(req, env, ctx);
+
+    const listAccept = p.match(/^\/api\/lists\/shared\/([0-9A-HJKMNP-TV-Z]{8,40})\/accept$/);
+    if (listAccept && req.method === "POST") return handleAcceptSharedList(listAccept[1], req, env, ctx);
+
+    const listTarget = p.match(/^\/api\/lists\/shared\/([0-9A-HJKMNP-TV-Z]{8,40})$/);
+    if (listTarget && req.method === "DELETE") return handleDeleteSharedList(listTarget[1], req, env, ctx);
+
+    if (p === "/api/match/request" && req.method === "POST") {
+      // The card resolver is injected because the friend card lives in R2 and
+      // `match.ts` is deliberately D1-only — same reason `sync.ts` takes a RelayLoader.
+      return handleMatchRequest(req, env, ctx, (code) => resolveCardOwner(env, code));
+    }
+
+    const matchPayload = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})\/payload$/);
+    if (matchPayload && req.method === "GET") return handleGetMatchPayload(matchPayload[1], req, env, ctx);
+
+    const matchAccept = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})\/accept$/);
+    if (matchAccept && req.method === "POST") return handleMatchAccept(matchAccept[1], req, env, ctx);
+
+    const matchTarget = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (matchTarget && req.method === "DELETE") return handleDeleteMatch(matchTarget[1], req, env, ctx);
 
     // ── One chargeable request per refresh (see src/sync.ts). ──
     // The relay half is injected here because the R2 object layout and its crypto
@@ -1358,6 +1398,21 @@ async function handlePublishFriendCode(req: Request, env: Env): Promise<Response
 async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
   const raw = await getText(env, `fc/${code}.json`);
   return raw ? rawJson(raw) : notFound();
+}
+
+/**
+ * The account that published friend card [code], or null.
+ *
+ * Injected into `POST /api/match/request` so a stranger match can be gated on
+ * having actually seen someone's code. **This is spam control, not a proximity
+ * proof** — the same card is published under the shareable friend code that goes
+ * in invite links, so holding it says nothing about being in the room. What makes
+ * the stranger path safe is the exchange order, not this check.
+ */
+async function resolveCardOwner(env: Env, code: string): Promise<string | null> {
+  const card = await getJson<{ serverUserId?: unknown }>(env, `fc/${code}.json`);
+  const owner = card && typeof card.serverUserId === "string" ? card.serverUserId : "";
+  return owner || null;
 }
 
 // ── Portable identity backup ──────────────────────────────────────────────────
