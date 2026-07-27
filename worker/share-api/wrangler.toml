@@ -71,8 +71,30 @@ routes = [
 # Zero-knowledge object storage for the social channel. The relay only ever
 # stores ciphertext + opaque tokens/hashes.
 # Create with: wrangler r2 bucket create flickto-social
-# Recommended lifecycle rules (dashboard): expire `share/` after 30 days and
-# `rl/` after 1 day so abandoned share links and rate-limit counters self-clean.
+#
+# LIFECYCLE RULES — APPLIED 2026-07-27, not aspirational. Verify with
+#   npx wrangler r2 bucket lifecycle list flickto-social
+#
+#   expire-share-links          share/  expire after 31 days
+#   expire-rate-limit-counters  rl/     expire after 1 day
+#
+# Re-create with:
+#   npx wrangler r2 bucket lifecycle add flickto-social "expire-share-links" "share/" --expire-days 31 -y
+#   npx wrangler r2 bucket lifecycle add flickto-social "expire-rate-limit-counters" "rl/" --expire-days 1 -y
+#
+# **The share/ rule is load-bearing for the privacy policy**, which states that a
+# share link's data is deleted after 30 days. Expiry in the Worker is enforced on
+# READ ONLY (`isExpired` → 404); nothing in code deletes the object. Without this
+# rule the link stops working while the data is kept forever, and the published
+# policy becomes false. That was the live state until 2026-07-27.
+#
+# 31 days, not 30, so the object always outlives its logical expiry rather than
+# racing it — there is never a window where it is physically gone before the app
+# considers it expired.
+#
+# These live in Cloudflare, not in this file, so nothing here can enforce them.
+# Treat a claim in a comment as a claim, not a fact: check the list before relying
+# on one — that is exactly how the policy came to say something untrue.
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "flickto-social"
