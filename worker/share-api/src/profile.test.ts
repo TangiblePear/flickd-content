@@ -1,7 +1,16 @@
 import { describe, it, expect } from "vitest";
 import worker from "./index";
 
-/** R2 stand-in that models httpEtag + onlyIf.etagMatches (what 0c-2 relies on). */
+/**
+ * R2 stand-in that models httpEtag + onlyIf.etagMatches (what 0c-2 relies on).
+ *
+ * Two details are modelled deliberately because getting either wrong is invisible
+ * in a test that doesn't have them, and both cost production outages:
+ *  - `httpEtag` is QUOTED (`"e1"`) but `etagMatches` compares the BARE value, so a
+ *    caller cannot simply echo back what it read.
+ *  - a quoted or weak `etagMatches` makes R2 **throw**, it does not merely fail to
+ *    match — which surfaces as a 500, not the 409 the retry logic expects.
+ */
 class FakeBucket {
   store = new Map<string, { body: string; etag: string; meta?: Record<string, string> }>();
   seq = 0;
@@ -11,7 +20,7 @@ class FakeBucket {
     return {
       text: async () => rec.body,
       json: async () => JSON.parse(rec.body),
-      httpEtag: rec.etag,
+      httpEtag: `"${rec.etag}"`,
       customMetadata: rec.meta,
       uploaded: new Date(),
     };
@@ -19,14 +28,17 @@ class FakeBucket {
   async put(key: string, value: string, opts?: { onlyIf?: { etagMatches?: string }; customMetadata?: Record<string, string> }) {
     const cur = this.store.get(key);
     const want = opts?.onlyIf?.etagMatches;
-    if (want !== undefined && cur?.etag !== want) return null; // conditional write failed
-    const etag = `"e${++this.seq}"`;
+    if (want !== undefined) {
+      if (/["']|^W\//.test(want)) throw new TypeError(`invalid etag: ${want}`);
+      if (cur?.etag !== want) return null; // conditional write failed
+    }
+    const etag = `e${++this.seq}`;
     this.store.set(key, { body: value, etag, meta: opts?.customMetadata });
-    return { httpEtag: etag };
+    return { httpEtag: `"${etag}"` };
   }
   async head(key: string) {
     const rec = this.store.get(key);
-    return rec ? { httpEtag: rec.etag } : null;
+    return rec ? { httpEtag: `"${rec.etag}"` } : null;
   }
   async delete(key: string | string[]) {
     for (const k of Array.isArray(key) ? key : [key]) this.store.delete(k);
@@ -85,21 +97,22 @@ describe("profile conditional write (0c-2)", () => {
   });
 
   /**
-   * Cloudflare hands the client a WEAK etag (`W/"e1"`) even though R2 stored the
-   * strong one, so echoing the header back verbatim used to 409 every time — the
-   * conditional write could never succeed and profiles silently stopped
-   * publishing. Reads through the CDN are the only kind clients make, so this is
-   * the normal path, not an edge case.
+   * The etag a client can actually obtain is the weak, quoted one Cloudflare
+   * returns through the CDN (`W/"e1"`) — never the bare value R2 compares. Echoing
+   * the header back verbatim failed 100% of the time, so profiles silently stopped
+   * publishing for days. This is the normal path for every client, not an edge case.
    */
-  it("accepts the weak etag Cloudflare returns to clients", async () => {
+  it("accepts the weak quoted etag a client reads back from a GET", async () => {
     const env = makeEnv();
-    const e1 = ((await (await putProfile(env, JSON.stringify({ ciphertext: "a" }))).json()) as any).etag;
+    await putProfile(env, JSON.stringify({ ciphertext: "a" }));
+    const asClientSeesIt = (await getProfile(env)).headers.get("ETag")!;
+    expect(asClientSeesIt).toMatch(/^"/); // quoted, exactly what R2 hands back
 
-    const ok = await putProfile(env, JSON.stringify({ ciphertext: "b" }), `W/${e1}`);
+    const ok = await putProfile(env, JSON.stringify({ ciphertext: "b" }), `W/${asClientSeesIt}`);
     expect(ok.status).toBe(200);
 
-    // Still a real comparison: a weak-wrapped STALE etag must lose.
-    const conflict = await putProfile(env, JSON.stringify({ ciphertext: "c" }), `W/${e1}`);
+    // Still a real comparison, not a bypass: the now-stale etag must lose.
+    const conflict = await putProfile(env, JSON.stringify({ ciphertext: "c" }), `W/${asClientSeesIt}`);
     expect(conflict.status).toBe(409);
   });
 });

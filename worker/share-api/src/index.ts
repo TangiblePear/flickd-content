@@ -484,17 +484,23 @@ async function verifyReadToken(
 // ── Social handlers ──────────────────────────────────────────────────────────
 
 /**
- * The etag a client read back from a GET, normalised to what R2 stored.
+ * The etag a client read back from a GET, in the form `onlyIf.etagMatches` wants:
+ * bare hex, no `W/` prefix and no quotes.
  *
- * Cloudflare rewrites strong etags to weak ones (`W/"…"`) on the way out through
- * the CDN, so the value a client echoes into `X-If-Match` never equals the strong
- * etag `onlyIf.etagMatches` compares against — every conditional PUT 409s, on
- * every attempt, forever. Clients already in the field send the weak form and
- * cannot be fixed retroactively, so the normalisation belongs here.
+ * Both wrappers have to go, and for different reasons. Cloudflare rewrites strong
+ * etags to weak ones (`W/"…"`) on the way out through the CDN, so the value a
+ * client echoes back never equals the strong etag R2 compares against. And R2
+ * *throws* on a quoted value rather than simply not matching it — even though the
+ * quoted form is exactly what `httpEtag` hands back. Passing the header through
+ * verbatim therefore fails 100% of the time: it 409'd on the weak form, and
+ * 500'd once the prefix alone was stripped.
+ *
+ * Clients in the field send the weak quoted form and cannot be fixed
+ * retroactively, so the normalisation belongs here.
  */
 function strongEtag(value: string | null): string | null {
-  const v = value?.trim();
-  return v ? v.replace(/^W\//, "") : null;
+  const v = value?.trim().replace(/^W\//, "").replace(/"/g, "");
+  return v ? v : null;
 }
 
 // PUT access.json / profile.json — owner-auth + bind read token. Body is opaque.
