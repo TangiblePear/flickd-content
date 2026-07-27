@@ -358,7 +358,7 @@ export default {
     if (matchAccept && req.method === "POST") return handleMatchAccept(matchAccept[1], req, env, ctx, wake);
 
     const matchTarget = p.match(/^\/api\/match\/([0-9A-HJKMNP-TV-Z]{26})$/);
-    if (matchTarget && req.method === "DELETE") return handleDeleteMatch(matchTarget[1], req, env, ctx);
+    if (matchTarget && req.method === "DELETE") return handleDeleteMatch(matchTarget[1], req, env, ctx, wake);
 
     // ── One chargeable request per refresh (see src/sync.ts). ──
     // The relay half is injected here because the R2 object layout and its crypto

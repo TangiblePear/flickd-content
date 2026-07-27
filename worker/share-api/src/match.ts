@@ -420,6 +420,7 @@ export async function handleDeleteMatch(
   req: Request,
   env: MatchEnv,
   ctx?: ExecutionContext,
+  notify?: Notifier,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -440,6 +441,12 @@ export async function handleDeleteMatch(
       .bind(state, Date.now(), id),
     env.DB.prepare("DELETE FROM match_payloads WHERE request_id = ?").bind(id),
   ]);
+  // Wake the OTHER party. Request and accept both did this; decline and revoke did
+  // not, so the one person actually waiting on the answer — the requester, sitting on
+  // a "Pending" button — did not learn of it until their next sync, which in practice
+  // meant leaving the Friends screen and coming back. Symmetric on purpose: a revoke
+  // should clear the target's prompt just as promptly.
+  notify?.(row.requester_id === session.userId ? row.target_id : row.requester_id);
   return noContent();
 }
 

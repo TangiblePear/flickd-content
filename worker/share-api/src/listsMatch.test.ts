@@ -611,6 +611,29 @@ describe("waking the recipient", () => {
     expect(woken).toEqual([B, A]);
   });
 
+  /**
+   * The requester is the one person actually waiting on this — they are sitting on a
+   * "Pending" button. Request and accept both woke the other side; decline and revoke
+   * did not, so the answer did not surface until the next sync, which in practice meant
+   * leaving the Friends screen and coming back. Observed on device 2026-07-27.
+   */
+  it("wakes the other party on decline and on revoke", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const woken: string[] = [];
+    const wake = (u: string) => { woken.push(u); };
+
+    const first = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
+    // B declines → A must hear about it.
+    await handleDeleteMatch(first.id, del("tok-b", ""), env, undefined, wake);
+    expect(woken).toEqual([A]);
+
+    // ...and symmetrically, a revoke by A must clear B's prompt.
+    const again = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
+    await handleDeleteMatch(again.id, del("tok-a", ""), env, undefined, wake);
+    expect(woken).toEqual([A, B]);
+  });
+
   it("still delivers when there is no notifier at all", async () => {
     const env = await env0();
     befriend(env, A, B);
