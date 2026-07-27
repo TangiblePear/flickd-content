@@ -247,14 +247,33 @@ export async function handleMatchRequest(
 
   const now = Date.now();
   const existing = await env.DB.prepare(
-    "SELECT id, state FROM match_requests WHERE requester_id = ? AND target_id = ?",
+    "SELECT id, state, retention FROM match_requests WHERE requester_id = ? AND target_id = ?",
   )
     .bind(session.userId, target)
-    .first<{ id: string; state: string }>();
+    .first<{ id: string; state: string; retention: string }>();
 
-  // Re-requesting a live handshake is a no-op, which is what the unique index buys:
-  // today a duplicate is possible and only the client de-dupes it.
-  if (existing && !isTerminal(existing.state)) return json({ id: existing.id, state: existing.state });
+  // Re-requesting a *live* handshake is a no-op, which is what the unique index buys:
+  // without it a duplicate is possible and only the client de-dupes it.
+  //
+  // But a `once` match whose payloads have both been collected is **over**, even though
+  // the row still reads `accepted` — `consumeIfCollected` deleted them on purpose, and
+  // the handshake row survives only as the record that a match happened. Treating that
+  // as live made it permanently un-rematchable: the row is not terminal, so every later
+  // request returned instantly, created nothing and notified nobody. Measured on device
+  // 2026-07-27 as "I pressed Match and nothing happened", forever, with no way back.
+  if (existing && !isTerminal(existing.state)) {
+    const spent =
+      existing.state === "accepted" &&
+      existing.retention === RETENTION_ONCE &&
+      !(await hasPayloads(env, existing.id));
+    if (!spent) {
+      // Asking again while they have not answered re-sends the nudge. The first push
+      // can be dropped, and a retry that visibly does nothing is worse than a spare
+      // notification — this is user-initiated and costs one message.
+      if (existing.state === "pending") notify?.(target);
+      return json({ id: existing.id, state: existing.state });
+    }
+  }
 
   if (await requestRateLimited(env, session.userId)) return json({ error: "rate_limited" }, 429);
 
@@ -433,6 +452,14 @@ async function putPayload(env: MatchEnv, requestId: string, senderId: string, se
   )
     .bind(requestId, senderId, sealed, now)
     .run();
+}
+
+/** Any sealed halves still held for this handshake. Distinguishes a live `once` match from a spent one. */
+async function hasPayloads(env: MatchEnv, requestId: string): Promise<boolean> {
+  const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM match_payloads WHERE request_id = ?")
+    .bind(requestId)
+    .first<{ n: number }>();
+  return (row?.n ?? 0) > 0;
 }
 
 /** Both directions collected on a `once` match ⇒ drop both blobs. */

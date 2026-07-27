@@ -90,9 +90,12 @@ class FakeStmt {
       const r = this.db.shared_lists.find((x) => x.id === a[0] && x.recipient_id === a[1]);
       return r ? ({ id: r.id } as T) : null;
     }
-    if (s.startsWith("SELECT id, state FROM match_requests")) {
+    if (s.startsWith("SELECT id, state, retention FROM match_requests")) {
       const r = this.db.match_requests.find((x) => x.requester_id === a[0] && x.target_id === a[1]);
-      return r ? ({ id: r.id, state: r.state } as T) : null;
+      return r ? ({ id: r.id, state: r.state, retention: r.retention } as T) : null;
+    }
+    if (s.startsWith("SELECT COUNT(*) AS n FROM match_payloads WHERE request_id")) {
+      return { n: this.db.match_payloads.filter((x) => x.request_id === a[0]).length } as T;
     }
     if (s.startsWith("SELECT id, requester_id, target_id, state FROM match_requests")) {
       const r = this.db.match_requests.find((x) => x.id === a[0] && x.target_id === a[1]);
@@ -652,6 +655,60 @@ describe("account erasure reaches these tables", () => {
     expect(env.DB.match_payloads.length).toBe(0);
     // Only the deleted account's events — B's feed is none of A's business.
     expect(env.DB.feed_events.map((e: any) => e.author_id)).toEqual([B]);
+  });
+});
+
+describe("re-requesting a match", () => {
+  /**
+   * A `once` match whose payloads have both been collected is over — the blobs are
+   * deleted on purpose and the row survives only as the record that it happened.
+   * Treating that as still-live made the pair permanently un-rematchable, because
+   * `accepted` is not a terminal state. Observed on device 2026-07-27.
+   */
+  it("lets a spent `once` match be started again", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const first = (await (
+      await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B, { retention: "once" })), env)
+    ).json()) as any;
+    await handleMatchAccept(first.id, post("tok-b", "", { sealed: "SEALED-BY-TARGET" }), env);
+    await handleGetMatchPayload(first.id, get("tok-a", ""), env);
+    await handleGetMatchPayload(first.id, get("tok-b", ""), env);
+    expect(env.DB.match_payloads.length).toBe(0); // spent
+
+    const again = (await (
+      await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B, { retention: "once" })), env)
+    ).json()) as any;
+    expect(again.state).toBe("pending");
+    // Reuses the row (the unique index is per pair) and re-arms the exchange.
+    expect(env.DB.match_requests.length).toBe(1);
+    expect(env.DB.match_payloads.map((p: any) => p.sender_id)).toEqual([A]);
+  });
+
+  it("still no-ops a `keep` match that is genuinely live", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const first = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
+    await handleMatchAccept(first.id, post("tok-b", "", { sealed: "SEALED-BY-TARGET" }), env);
+
+    const again = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
+    expect(again.state).toBe("accepted");
+    expect(env.DB.match_requests.length).toBe(1);
+    // Both halves still held — nothing was re-armed or thrown away.
+    expect(env.DB.match_payloads.length).toBe(2);
+  });
+
+  // A dropped push is exactly the failure this whole area has been bitten by; a retry
+  // that visibly does nothing is worse than a spare notification.
+  it("re-sends the nudge when they have not answered yet", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const woken: string[] = [];
+    const wake = (u: string) => { woken.push(u); };
+    await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env, undefined, undefined, wake);
+    await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env, undefined, undefined, wake);
+    expect(woken).toEqual([B, B]);
+    expect(env.DB.match_requests.length).toBe(1);
   });
 });
 
