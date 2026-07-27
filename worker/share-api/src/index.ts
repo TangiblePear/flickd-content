@@ -68,11 +68,13 @@ import {
   handleFriendRemove,
   handleFriendRequest,
   handleGetBlocks,
+  handleGetFriendCards,
   handleGetFriends,
   handleLinkLegacyFriends,
   handleReport as handleUserReport,
   handleUnblock,
 } from "./friends";
+import type { PublicCard } from "./friends";
 import {
   handleBootstrap,
   handleGetMyProfile,
@@ -314,6 +316,9 @@ export default {
     if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx);
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx);
     if (p === "/api/friends/link-legacy" && req.method === "POST") return handleLinkLegacyFriends(req, env, ctx);
+    if (p === "/api/friends/cards" && req.method === "POST") {
+      return handleGetFriendCards(req, env, (friendId) => loadPublicCard(env, friendId), ctx);
+    }
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx);
@@ -1435,6 +1440,32 @@ async function handlePublishFriendCode(req: Request, env: Env): Promise<Response
 async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
   const raw = await getText(env, `fc/${code}.json`);
   return raw ? rawJson(raw) : notFound();
+}
+
+/**
+ * The public card a device published, by its friendId — the R2 half of
+ * `POST /api/friends/cards`.
+ *
+ * Two gets, because cards are stored under the *code* (which is what a scanner
+ * has) and the pointer from friendId to code lives beside the owner's other
+ * objects. Callers are edge-gated and capped, so this never fans out far enough
+ * to matter against the subrequest budget.
+ *
+ * Returns only the pairing fields. The stored card is client-written, so nothing
+ * here may be trusted beyond being public — `handleGetFriendCards` re-checks the
+ * friendId against the claim-checked `users.friend_id`.
+ */
+async function loadPublicCard(env: Env, friendId: string): Promise<PublicCard | null> {
+  const owner = await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`);
+  if (!owner?.c) return null;
+  const card = await getJson<Record<string, unknown>>(env, `fc/${owner.c}.json`);
+  if (!card || typeof card.friendId !== "string" || typeof card.publicKeyset !== "string") return null;
+  return {
+    friendId: card.friendId,
+    publicKeyset: card.publicKeyset,
+    displayName: typeof card.displayName === "string" ? card.displayName : "",
+    avatarId: typeof card.avatarId === "string" ? card.avatarId : "",
+  };
 }
 
 /**

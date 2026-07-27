@@ -398,6 +398,90 @@ export async function handleLinkLegacyFriends(
   return json({ linked, pendingSignup: ids.length - linked, mapping });
 }
 
+// ── Friend cards (pairing off the E2EE inbox) ────────────────────────────────
+
+/**
+ * Fetch the published friend card for a device friendId, or null.
+ *
+ * Injected rather than imported so this module stays D1-only and therefore
+ * testable without a bucket — the same reason `sync.ts` takes a `RelayLoader`.
+ * Cards live in R2 and are written by the device that owns them.
+ */
+export type CardLoader = (friendId: string) => Promise<PublicCard | null>;
+
+/** Only the fields needed to build a local friend row. Never anything secret. */
+export interface PublicCard {
+  friendId: string;
+  displayName: string;
+  avatarId: string;
+  publicKeyset: string;
+}
+
+const MAX_CARD_LOOKUPS = 25;
+
+/**
+ * POST /api/friends/cards `{ userIds: [...] }` — the public cards for people you
+ * already have a friendship edge with.
+ *
+ * This is what lets pairing leave the E2EE inbox. `GET /api/friends` answers with
+ * bare `users.id` values, and a local friend row needs a display name, an avatar and
+ * above all a **public keyset** — everything E2EE is sealed to it. Without this the
+ * client can see that it has an incoming request but can neither render nor answer it.
+ *
+ * **Edge-gated, and that is the whole security argument.** A card is already public
+ * to anyone holding its friend *code*, which is a capability the owner chose to hand
+ * out. A `users.id` is not — it appears in feeds and graphs. Serving cards by id
+ * without requiring an edge would turn every signed-in session into a card-enumeration
+ * oracle over the whole user base. Blocked pairs are excluded for the same reason
+ * everything else here excludes them.
+ *
+ * Unknown ids, ids with no edge, and users who have never published a card are all
+ * **omitted silently** rather than erroring: distinguishing them would answer
+ * "does this account exist" for an arbitrary id, which is rule 1 of this file.
+ */
+export async function handleGetFriendCards(
+  req: Request,
+  env: FriendsEnv,
+  loadCard: CardLoader,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await requireSession(req, env, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  const payload = await body(req);
+  const raw = Array.isArray(payload?.userIds) ? payload!.userIds : null;
+  if (!raw) return json({ error: "invalid_payload" }, 400);
+
+  const wanted = [...new Set(raw.filter((v): v is string => typeof v === "string" && USER_ID_RE.test(v)))]
+    .filter((id) => id !== session.userId)
+    .slice(0, MAX_CARD_LOOKUPS);
+  if (wanted.length === 0) return json({ cards: [] });
+
+  // One query for the edges, one for the friendIds — never one round trip per id.
+  const { accepted, incoming, outgoing } = await loadFriendships(env, session.userId);
+  const related = new Set([...accepted, ...incoming, ...outgoing]);
+  const allowed = wanted.filter((id) => related.has(id));
+  if (allowed.length === 0) return json({ cards: [] });
+
+  const placeholders = allowed.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT id, friend_id FROM users
+      WHERE id IN (${placeholders}) AND status = 'active' AND friend_id IS NOT NULL`,
+  )
+    .bind(...allowed)
+    .all<{ id: string; friend_id: string }>();
+
+  const cards: (PublicCard & { userId: string })[] = [];
+  for (const row of results ?? []) {
+    if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
+    const card = await loadCard(row.friend_id);
+    // A card whose friendId disagrees with the claimed one is not this user's, and
+    // `users.friend_id` is the claim-checked side — trust it over the R2 blob.
+    if (!card || card.friendId !== row.friend_id) continue;
+    cards.push({ userId: row.id, ...card });
+  }
+  return json({ cards });
+}
+
 // ── Account deletion (§9b — legal requirement) ───────────────────────────────
 
 /**

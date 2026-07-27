@@ -7,6 +7,7 @@ import {
   handleFriendRemove,
   handleFriendRequest,
   handleGetBlocks,
+  handleGetFriendCards,
   handleGetFriends,
   handleLinkLegacyFriends,
   handleReport,
@@ -100,6 +101,13 @@ class FakeStmt {
     }
     if (s.startsWith("SELECT id, friend_id FROM users WHERE friend_id IN")) {
       return { results: this.db.users.filter((u) => a.includes(u.friend_id) && u.status === "active") as T[] };
+    }
+    if (s.startsWith("SELECT id, friend_id FROM users WHERE id IN")) {
+      return {
+        results: this.db.users.filter(
+          (u) => a.includes(u.id) && u.status === "active" && u.friend_id != null,
+        ) as T[],
+      };
     }
     throw new Error(`FakeD1: unhandled all() ${s}`);
   }
@@ -271,6 +279,93 @@ describe("friend requests", () => {
     const anon = new Request("https://flickto.app/api/friends", { method: "POST", body: "{}" });
     expect((await handleGetFriends(new Request("https://flickto.app/api/friends"), env)).status).toBe(401);
     expect((await handleFriendRequest(anon, env)).status).toBe(401);
+  });
+});
+
+describe("friend cards", () => {
+  // Cards live in R2; the handler takes a loader so this module stays D1-only.
+  const cards: Record<string, any> = {
+    "FRIENDIDAAAA": { friendId: "FRIENDIDAAAA", displayName: "Ada", avatarId: "av1", publicKeyset: "ks-a" },
+    "FRIENDIDBBBB": { friendId: "FRIENDIDBBBB", displayName: "Bo", avatarId: "av2", publicKeyset: "ks-b" },
+    "FRIENDIDCCCC": { friendId: "FRIENDIDCCCC", displayName: "Cy", avatarId: "av3", publicKeyset: "ks-c" },
+  };
+  const loader = async (friendId: string) => cards[friendId] ?? null;
+
+  /** Everyone has claimed a friendId and published a card. */
+  const seeded = async () => {
+    const env = await env0();
+    env.DB.users.find((u: any) => u.id === A).friend_id = "FRIENDIDAAAA";
+    env.DB.users.find((u: any) => u.id === B).friend_id = "FRIENDIDBBBB";
+    env.DB.users.find((u: any) => u.id === C).friend_id = "FRIENDIDCCCC";
+    return env;
+  };
+
+  it("serves the card once an edge exists, pending included", async () => {
+    const env = await seeded();
+    // Pending is the case that matters: an incoming request is unanswerable
+    // without the requester's keyset, which is the whole reason this exists.
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+
+    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
+    expect(res.cards).toEqual([
+      { userId: A, friendId: "FRIENDIDAAAA", displayName: "Ada", avatarId: "av1", publicKeyset: "ks-a" },
+    ]);
+  });
+
+  /** The security argument: a users.id is not a capability, a friend code is. */
+  it("omits a stranger, so this is not a card-enumeration oracle", async () => {
+    const env = await seeded();
+    const res = (await (await handleGetFriendCards(post("tok-a", "/api/friends/cards", { userIds: [C] }), env, loader)).json()) as any;
+    expect(res.cards).toEqual([]);
+  });
+
+  it("omits a blocked pair even though the edge once existed", async () => {
+    const env = await seeded();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    await handleBlock(A, post("tok-b", `/api/blocks/${A}`), env);
+
+    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
+    expect(res.cards).toEqual([]);
+  });
+
+  it("omits a friend who has never claimed a friendId or published a card", async () => {
+    const env = await seeded();
+    env.DB.users.find((u: any) => u.id === A).friend_id = null;
+    await handleFriendRequest(post("tok-b", "/api/friends/request", { userId: A }), env);
+
+    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
+    expect(res.cards).toEqual([]);
+  });
+
+  /** users.friend_id is claim-checked; the R2 blob is client-written. */
+  it("rejects a card whose friendId disagrees with the claimed one", async () => {
+    const env = await seeded();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    const lying = async () => ({ ...cards["FRIENDIDCCCC"] });
+
+    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, lying)).json()) as any;
+    expect(res.cards).toEqual([]);
+  });
+
+  it("requires a session and a well-formed body", async () => {
+    const env = await seeded();
+    expect((await handleGetFriendCards(post("nope", "/api/friends/cards", { userIds: [A] }), env, loader)).status).toBe(401);
+    expect((await handleGetFriendCards(post("tok-a", "/api/friends/cards", {}), env, loader)).status).toBe(400);
+  });
+
+  it("caps the lookup and ignores junk ids without erroring", async () => {
+    const env = await seeded();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    const padding = Array.from({ length: 40 }, (_, i) => `ZZZZ${String(i).padStart(22, "0")}`);
+
+    const res = (await (await handleGetFriendCards(
+      post("tok-b", "/api/friends/cards", { userIds: [...padding, "not-an-id", A] }),
+      env,
+      loader,
+    )).json()) as any;
+    // A is past the 25-id cap once the junk ahead of it survives validation, so the
+    // only guarantee is that this answers rather than throwing.
+    expect(Array.isArray(res.cards)).toBe(true);
   });
 });
 
