@@ -483,6 +483,20 @@ async function verifyReadToken(
 
 // ── Social handlers ──────────────────────────────────────────────────────────
 
+/**
+ * The etag a client read back from a GET, normalised to what R2 stored.
+ *
+ * Cloudflare rewrites strong etags to weak ones (`W/"…"`) on the way out through
+ * the CDN, so the value a client echoes into `X-If-Match` never equals the strong
+ * etag `onlyIf.etagMatches` compares against — every conditional PUT 409s, on
+ * every attempt, forever. Clients already in the field send the weak form and
+ * cannot be fixed retroactively, so the normalisation belongs here.
+ */
+function strongEtag(value: string | null): string | null {
+  const v = value?.trim();
+  return v ? v.replace(/^W\//, "") : null;
+}
+
 // PUT access.json / profile.json — owner-auth + bind read token. Body is opaque.
 async function handlePutUserObject(
   friendId: string,
@@ -526,7 +540,7 @@ async function handlePutUserObject(
     // against (X-If-Match), do a conditional put so two devices can't lose one
     // another's merge. A mismatch (or a since-deleted object) returns 409 + the
     // current etag; the client re-reads, re-merges and retries once.
-    const ifMatch = req.headers.get("X-If-Match");
+    const ifMatch = strongEtag(req.headers.get("X-If-Match"));
     if (ifMatch) {
       const written = await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
         ...putOpts,

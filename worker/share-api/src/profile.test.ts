@@ -83,4 +83,23 @@ describe("profile conditional write (0c-2)", () => {
     expect(conflict.status).toBe(409);
     expect(((await conflict.json()) as any).etag).toBe(e2);
   });
+
+  /**
+   * Cloudflare hands the client a WEAK etag (`W/"e1"`) even though R2 stored the
+   * strong one, so echoing the header back verbatim used to 409 every time — the
+   * conditional write could never succeed and profiles silently stopped
+   * publishing. Reads through the CDN are the only kind clients make, so this is
+   * the normal path, not an edge case.
+   */
+  it("accepts the weak etag Cloudflare returns to clients", async () => {
+    const env = makeEnv();
+    const e1 = ((await (await putProfile(env, JSON.stringify({ ciphertext: "a" }))).json()) as any).etag;
+
+    const ok = await putProfile(env, JSON.stringify({ ciphertext: "b" }), `W/${e1}`);
+    expect(ok.status).toBe(200);
+
+    // Still a real comparison: a weak-wrapped STALE etag must lose.
+    const conflict = await putProfile(env, JSON.stringify({ ciphertext: "c" }), `W/${e1}`);
+    expect(conflict.status).toBe(409);
+  });
 });

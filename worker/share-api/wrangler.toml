@@ -31,8 +31,13 @@ routes = [
   { pattern = "flickto.app/api/blocks", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/blocks/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/report", zone_name = "flickto.app" },
-  # Bare pattern: /api/feed is not matched by any wildcard above.
-  { pattern = "flickto.app/api/feed", zone_name = "flickto.app" }
+  # Bare pattern: /api/feed is not matched by any wildcard above. The trailing `*`
+  # is NOT optional either — routes match the full URL including the query string,
+  # so a bare `…/api/feed` answers `/api/feed` but lets `/api/feed?limit=50` — the
+  # only form the client actually sends — fall through to the static site as a 404.
+  # This is the same trap as `/api/friends` above, from the other direction, and it
+  # is invisible to both the test suite and `wrangler deploy --dry-run`.
+  { pattern = "flickto.app/api/feed*", zone_name = "flickto.app" }
 ]
 
 
