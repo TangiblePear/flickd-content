@@ -167,6 +167,18 @@ export async function handleSync(
   const row = await readProfileRow(env, session.userId);
   const profile = row && row.version > held ? toWire(row) : null;
 
+  // Has this account claimed a device friendId? It is the ONLY route from an account
+  // to a push topic (topics are keyed by friendId, and the record lives in R2), so
+  // without it `notifyAccount` finds nothing and every push silently does not happen.
+  //
+  // Asked here, on a request the client already makes, because the alternatives are
+  // worse: claiming on sign-in alone never retries after a transient failure and never
+  // reaches an account that signed in before the code existed, and a debug-only button
+  // reaches no real user at all. One PK lookup, and the client acts only when told to.
+  const claimed = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
+    .bind(session.userId)
+    .first<{ friend_id: string | null }>();
+
   // 3. The D1 replacements for the last two inbox message types. Null when not
   //    asked for, which is also what a client on an older Worker sees — so the
   //    absent case must mean "fall back", never "you have none".
@@ -201,7 +213,13 @@ export async function handleSync(
     // Server-controlled so the date can move without an app release — a date baked
     // into a build cannot be corrected for anyone who never updates. Null until one
     // is set, which is the default, so this changes nothing until you schedule it.
-    policy: { inboxRetiresAt: inboxRetiresAt(env) || null },
+    policy: {
+      inboxRetiresAt: inboxRetiresAt(env) || null,
+      // "Claim your device friendId, I have none for you." Self-healing by design:
+      // it stays true until the claim lands, so a failed attempt simply retries on
+      // the next sync instead of leaving the account permanently unreachable by push.
+      needsFriendId: !claimed?.friend_id,
+    },
     serverTime: Date.now(),
   });
 }

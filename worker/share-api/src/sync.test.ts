@@ -46,6 +46,13 @@ class FakeStmt {
     if (s.includes("FROM profiles WHERE user_id = ?")) {
       return (this.db.profiles.find((p) => p.user_id === this.args[0]) ?? null) as T | null;
     }
+    // Has this account claimed a device friendId? Drives `policy.needsFriendId`, which
+    // is what makes push delivery self-healing. `users` is not modelled here, so the
+    // default is "claimed" — tests that care set `db.friendIds`.
+    if (s.startsWith("SELECT friend_id FROM users WHERE id = ?")) {
+      const claimed = (this.db as any).friendIds?.get(this.args[0]) ?? "CLAIMED000000000";
+      return ({ friend_id: claimed || null } as T);
+    }
     throw new Error(`unhandled first(): ${s}`);
   }
   async all<T>(): Promise<{ results: T[] }> {
