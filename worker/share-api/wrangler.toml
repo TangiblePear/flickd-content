@@ -40,9 +40,17 @@ routes = [
   { pattern = "flickto.app/api/feed*", zone_name = "flickto.app" },
   # One chargeable request per refresh (src/sync.ts). Same wildcard trap as
   # /api/feed above — routes match the FULL URL including the query string, so the
-  # trailing `*` is not optional even though the client POSTs a body. Verify with a
-  # live curl after deploy: an unauthenticated POST must answer 401 (Worker reached),
-  # never 404 (static site). `wrangler deploy --dry-run` proves nothing about this.
+  # trailing `*` is not optional even though the client POSTs a body.
+  #
+  # `wrangler deploy --dry-run` proves nothing about routing. Verify with a live
+  # curl; the three answers mean three different things (measured 2026-07-27):
+  #   405 -> the Worker was NEVER REACHED. The static site answered, since it
+  #          serves GET/HEAD only. This is what a missing/wrong pattern looks like.
+  #   404 -> the Worker was reached but its router had no handler for that
+  #          method+path (e.g. POST /api/me/bootstrap, which is GET-only).
+  #   401 -> route matched, handler ran, session rejected. THIS is the target.
+  #   curl.exe -s -o NUL -w "%{http_code}" -X POST https://flickto.app/api/sync \
+  #     -H "Content-Type: application/json" -d "{}"
   { pattern = "flickto.app/api/sync*", zone_name = "flickto.app" }
 ]
 
