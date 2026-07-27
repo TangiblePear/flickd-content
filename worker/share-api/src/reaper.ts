@@ -90,6 +90,43 @@ async function lastSeen(bucket: ReaperBucket, friendId: string): Promise<number>
 }
 
 /**
+ * Delete moderation reports older than [ttlMs].
+ *
+ * `_reports/{target}/{at}-{reporter}.json` had nothing pruning it: the orphan-profile
+ * reaper skips the prefix (it only walks folders shaped like a friendId), the admin
+ * only deletes on an explicit dismiss, and R2 has no TTL of its own. So the prefix
+ * grew forever, and adding share-code reports under it made that worse.
+ *
+ * Reports are a safety record, so the TTL is long and the delete is age-based only —
+ * this is retention hygiene, not moderation. It never resolves anything, and it is
+ * bounded per run because it rides ambient request traffic (no cron budget) rather
+ * than a schedule.
+ *
+ * An R2 lifecycle rule on `_reports/` would do the same thing with no code, which is
+ * how `share/` and `rl/` are handled; this exists because a rule nobody has clicked
+ * in the dashboard is not a fix.
+ */
+export async function reapOldReports(
+  bucket: ReaperBucket,
+  deleteKeys: (keys: string[]) => Promise<void>,
+  opts: { nowMs: number; ttlMs: number; cap: number },
+): Promise<string[]> {
+  const doomed: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await bucket.list({ prefix: "_reports/", cursor });
+    for (const obj of page.objects) {
+      if (opts.nowMs - obj.uploaded.getTime() > opts.ttlMs) doomed.push(obj.key);
+      if (doomed.length >= opts.cap) break;
+    }
+    cursor = doomed.length >= opts.cap || !page.truncated ? undefined : page.cursor;
+  } while (cursor);
+
+  if (doomed.length) await deleteKeys(doomed);
+  return doomed;
+}
+
+/**
  * Pure decision core: which candidates are past the TTL, capped at `cap`.
  * A candidate is reapable only when it has been cold for strictly longer than
  * the TTL, so a folder touched exactly at the boundary is kept.

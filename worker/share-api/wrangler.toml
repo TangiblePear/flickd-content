@@ -104,6 +104,12 @@ MAX_ITEMS = "100"
 PROFILE_TTL_SECONDS = "31536000"
 GC_MAX_PREFIXES_PER_RUN = "500"
 REAP_INTERVAL_SECONDS = "86400"
+# Retention for `_reports/` moderation records (365d). NOTHING else prunes that
+# prefix — the orphan reaper only walks friendId-shaped folders, and the admin only
+# deletes on an explicit dismiss — so it grew forever until the same opportunistic
+# run started pruning it. An R2 lifecycle rule on `_reports/` would do the same job
+# with no code; this exists because a rule nobody has clicked is not a fix.
+REPORT_TTL_SECONDS = "31536000"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
 # Image moderation. Set to "true" and add the VISION_API_KEY secret to enable the

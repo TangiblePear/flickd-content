@@ -46,6 +46,7 @@ class FakeD1 {
   shared_lists: any[] = [];
   match_requests: any[] = [];
   match_payloads: any[] = [];
+  feed_events: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -230,6 +231,7 @@ class FakeStmt {
     // The rest of the account-erasure batch. These tables have no bearing on the
     // behaviour under test, but the batch runs as one unit so they must not throw.
     for (const [prefix, table, col] of [
+      ["DELETE FROM feed_events", "feed_events", "author_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],
@@ -576,6 +578,9 @@ describe("account erasure reaches these tables", () => {
     await handleShareList(post("tok-b", "/api/lists/share", shareBody(A, LIST_ID2)), env);
     const { id } = (await (await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)).json()) as any;
     await handleMatchAccept(id, post("tok-b", "", { sealed: "SEALED-BY-TARGET" }), env);
+    // Activity feed events, which were missing from the batch for a different reason:
+    // they predate this branch entirely and nobody had noticed.
+    env.DB.feed_events.push({ id: "e1", author_id: A }, { id: "e2", author_id: B });
     expect(env.DB.shared_lists.length).toBe(2);
     expect(env.DB.match_payloads.length).toBe(2);
 
@@ -594,6 +599,8 @@ describe("account erasure reaches these tables", () => {
     expect(env.DB.match_requests.length).toBe(0);
     // A sealed blob outliving its handshake is unreachable data nobody can delete.
     expect(env.DB.match_payloads.length).toBe(0);
+    // Only the deleted account's events — B's feed is none of A's business.
+    expect(env.DB.feed_events.map((e: any) => e.author_id)).toEqual([B]);
   });
 });
 

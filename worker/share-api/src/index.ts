@@ -14,6 +14,10 @@ interface Env {
   REPORT_AUTOHIDE?: string;
   // Orphan-profile reaper: delete a friendId folder untouched for this long.
   PROFILE_TTL_SECONDS?: string;
+  // Retention for `_reports/` records. Nothing else prunes that prefix, so without
+  // this it grows forever. Longer than a profile folder: a safety record should
+  // outlive an inactive device.
+  REPORT_TTL_SECONDS?: string;
   // Max folders the reaper purges per run (keeps each run bounded).
   GC_MAX_PREFIXES_PER_RUN?: string;
   // Opportunistic trigger cadence (no cron budget): run at most once per this.
@@ -34,7 +38,7 @@ interface Env {
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
-import { reapOrphanProfiles, dueForReap } from "./reaper";
+import { reapOrphanProfiles, reapOldReports, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout, resolveSession } from "./auth";
 import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
@@ -418,6 +422,16 @@ async function runReaper(env: Env, cursor: string | undefined, claimedAt: number
   // Preserve the claim timestamp; advance the cursor for the next run.
   await putJson(env, GC_CURSOR_KEY, { cursor: result.nextCursor, lastRunAt: claimedAt });
   console.log(`reaper: purged ${result.reaped.length} orphan profile(s)`);
+
+  // Retention hygiene for the moderation queue, which nothing else prunes. Its own
+  // TTL, because a safety record should outlive an inactive profile folder.
+  const reportTtlMs = Number(env.REPORT_TTL_SECONDS ?? "31536000") * 1000; // default 365d
+  const dropped = await reapOldReports(
+    env.BUCKET,
+    (keys) => env.BUCKET.delete(keys),
+    { nowMs: Date.now(), ttlMs: reportTtlMs, cap },
+  );
+  if (dropped.length) console.log(`reaper: pruned ${dropped.length} expired report(s)`);
 }
 
 // ── R2 helpers ─────────────────────────────────────────────────────────────

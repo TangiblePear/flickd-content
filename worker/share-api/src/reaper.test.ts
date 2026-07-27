@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   selectReapable,
   reapOrphanProfiles,
+  reapOldReports,
   dueForReap,
   type ReapCandidate,
   type ReaperBucket,
@@ -138,5 +139,62 @@ describe("selectReapable", () => {
       lastSeenMs: NOW - TTL - DAY,
     }));
     expect(selectReapable(candidates, NOW, TTL, 2)).toHaveLength(2);
+  });
+});
+
+// `_reports/` had nothing pruning it: this reaper skips the prefix (it only walks
+// friendId-shaped folders), the admin only deletes on an explicit dismiss, and R2
+// has no TTL of its own. Adding share-code reports under it made that worse.
+describe("reapOldReports", () => {
+  it("deletes records past the TTL and keeps the rest", async () => {
+    const bucket = makeR2({
+      "_reports/AAAAAAAAAAAA/1-rep1.json": NOW - 400 * DAY, // stale
+      "_reports/AAAAAAAAAAAA/2-rep2.json": NOW - 10 * DAY, // recent
+      "_reports/ABC123/3-rep3.json": NOW - 400 * DAY, // stale share-code report
+      "AAAAAAAAAAAA/profile.json": NOW - 400 * DAY, // NOT a report — must survive
+      "share/ABC123.json": NOW - 400 * DAY, // NOT a report — must survive
+    });
+    const deleted: string[] = [];
+    const dropped = await reapOldReports(
+      bucket,
+      async (keys) => {
+        for (const k of keys) {
+          deleted.push(k);
+          (bucket as any)._map.delete(k);
+        }
+      },
+      { nowMs: NOW, ttlMs: TTL, cap: 500 },
+    );
+
+    expect(dropped.sort()).toEqual([
+      "_reports/AAAAAAAAAAAA/1-rep1.json",
+      "_reports/ABC123/3-rep3.json",
+    ]);
+    // Age-based only, and scoped to the prefix — it must never touch anything else.
+    expect([...(bucket as any)._map.keys()].sort()).toEqual([
+      "AAAAAAAAAAAA/profile.json",
+      "_reports/AAAAAAAAAAAA/2-rep2.json",
+      "share/ABC123.json",
+    ].sort());
+  });
+
+  it("stays bounded by the cap, so one run cannot blow the subrequest budget", async () => {
+    const entries: Record<string, number> = {};
+    for (let i = 0; i < 50; i++) entries[`_reports/T/${i}-rep.json`] = NOW - 400 * DAY;
+    const bucket = makeR2(entries);
+    const dropped = await reapOldReports(bucket, async () => {}, { nowMs: NOW, ttlMs: TTL, cap: 10 });
+    expect(dropped.length).toBe(10);
+  });
+
+  it("deletes nothing, and calls nothing, when everything is fresh", async () => {
+    const bucket = makeR2({ "_reports/T/1-rep.json": NOW - DAY });
+    let called = false;
+    const dropped = await reapOldReports(
+      bucket,
+      async () => { called = true; },
+      { nowMs: NOW, ttlMs: TTL, cap: 500 },
+    );
+    expect(dropped).toEqual([]);
+    expect(called).toBe(false);
   });
 });

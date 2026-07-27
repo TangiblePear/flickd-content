@@ -432,6 +432,9 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // Both directions. A list you sent is as much your data as one you received, and
     // leaving the sender's copy behind would keep your content readable after erasure.
     env.DB.prepare("DELETE FROM shared_lists WHERE sender_id = ? OR recipient_id = ?").bind(id, id),
+    // Your activity feed. Erasing the account while leaving these would keep every
+    // title you watched readable by anyone still friends with the deleted row.
+    env.DB.prepare("DELETE FROM feed_events WHERE author_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),

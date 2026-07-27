@@ -166,6 +166,7 @@ class FakeStmt {
       ["DELETE FROM match_payloads", "match_payloads", null],
       ["DELETE FROM match_requests", "match_requests", null],
       ["DELETE FROM shared_lists", "shared_lists", null],
+      ["DELETE FROM feed_events", "feed_events", null],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
