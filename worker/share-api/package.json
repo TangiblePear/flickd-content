@@ -4,7 +4,11 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 migrations apply flickto-accounts --remote",
+    "migrations": "wrangler d1 migrations list flickto-accounts --remote",
+    "_comment_deploy": "Migrations run FIRST and gate the deploy: code that assumes a new column must never ship ahead of the column.",
+    "deploy": "npm run migrate && wrangler deploy",
+    "deploy:code-only": "wrangler deploy",
     "tail": "wrangler tail",
     "test": "vitest run"
   },

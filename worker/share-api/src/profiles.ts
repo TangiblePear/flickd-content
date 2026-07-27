@@ -81,7 +81,7 @@ function jsonColumn<T>(raw: string | null, fallback: T): T {
 }
 
 /** Row → wire. Absent columns become empty values, never null, so clients need no null-handling. */
-function toWire(row: ProfileRow) {
+export function toWire(row: ProfileRow) {
   return {
     userId: row.user_id,
     displayName: row.display_name ?? "",
@@ -103,7 +103,7 @@ function toWire(row: ProfileRow) {
   };
 }
 
-async function readProfileRow(env: ProfileEnv, userId: string): Promise<ProfileRow | null> {
+export async function readProfileRow(env: ProfileEnv, userId: string): Promise<ProfileRow | null> {
   return env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM profiles WHERE user_id = ?`)
     .bind(userId)
     .first<ProfileRow>();

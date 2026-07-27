@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { handleClearFeed, handleGetFeed, handlePublishFeed, loadFeed } from "./feed";
+import { FEED_FLOOR_MS, handleClearFeed, handleGetFeed, handlePublishFeed, loadFeed } from "./feed";
 
 const ME = "AAAAH73X7P55T48R4CFHDED9CW";
 const FRIEND = "BBBBJ84Y8Q66V59S5DGJEFEAX0";
@@ -43,12 +43,15 @@ class FakeStmt {
       return { results: this.db.friendships.filter((f) => f.user_a === this.args[0] || f.user_b === this.args[1]) as T[] };
     }
     if (s.startsWith("SELECT id, author_id, kind, tmdb_id, media_type, payload, created_at FROM feed_events")) {
+      // Bind order is [...authors, cutoff, from, limit] — `from` is the delta cursor
+      // (max of the caller's `since` and the 30-day floor).
       const limit = this.args[this.args.length - 1];
-      const cutoff = this.args[this.args.length - 2];
-      const authors = this.args.slice(0, this.args.length - 2);
+      const from = this.args[this.args.length - 2];
+      const cutoff = this.args[this.args.length - 3];
+      const authors = this.args.slice(0, this.args.length - 3);
       return {
         results: this.db.feed
-          .filter((e) => authors.includes(e.author_id) && e.created_at < cutoff)
+          .filter((e) => authors.includes(e.author_id) && e.created_at < cutoff && e.created_at > from)
           .sort((a, b) => b.created_at - a.created_at)
           .slice(0, limit) as T[],
       };
@@ -106,6 +109,14 @@ const publish = (token: string, events: unknown[]) =>
     headers: { Authorization: `Bearer ${token}` },
     body: JSON.stringify({ events }),
   });
+/**
+ * Fixtures sit just behind "now". `loadFeed` floors every read at 30 days
+ * (FEED_FLOOR_MS), so 1970-era timestamps would be filtered out before any test
+ * could see them — the relative ordering is all these tests ever cared about.
+ */
+const NOW = Date.now();
+const t = (n: number) => NOW - 10_000 + n;
+
 const ev = (id: string, at: number, over: Record<string, unknown> = {}) => ({
   id, kind: "watch", tmdbId: 603, mediaType: "movie", createdAt: at, ...over,
 });
@@ -113,19 +124,19 @@ const ev = (id: string, at: number, over: Record<string, unknown> = {}) => ({
 describe("publishing", () => {
   it("writes events and is idempotent on a retry", async () => {
     const env = await env0();
-    expect(((await (await handlePublishFeed(publish("tok-me", [ev("e1", 100)]), env)).json()) as any).written).toBe(1);
+    expect(((await (await handlePublishFeed(publish("tok-me", [ev("e1", t(100))]), env)).json()) as any).written).toBe(1);
     // Publishing is best-effort and retried on the next sync, so the same id must
     // not stack up a second row.
-    await handlePublishFeed(publish("tok-me", [ev("e1", 100)]), env);
+    await handlePublishFeed(publish("tok-me", [ev("e1", t(100))]), env);
     expect(env.DB.feed.length).toBe(1);
   });
 
   it("rejects unknown kinds and unusable ids", async () => {
     const env = await env0();
     await handlePublishFeed(publish("tok-me", [
-      ev("ok", 1),
-      ev("bad-kind", 2, { kind: "nonsense" }),
-      ev("", 3),
+      ev("ok", t(1)),
+      ev("bad-kind", t(2), { kind: "nonsense" }),
+      ev("", t(3)),
     ]), env);
     expect(env.DB.feed.map((e: any) => e.id)).toEqual(["ok"]);
   });
@@ -140,7 +151,7 @@ describe("publishing", () => {
 
   it("prunes the author back to the retention cap on write", async () => {
     const env = await env0();
-    const many = Array.from({ length: 130 }, (_, i) => ev(`e${i}`, 1000 + i));
+    const many = Array.from({ length: 130 }, (_, i) => ev(`e${i}`, t(1000 + i)));
     await handlePublishFeed(publish("tok-me", many), env);
     expect(env.DB.feed.length).toBe(100);
     // The NEWEST are what survive.
@@ -159,8 +170,8 @@ describe("reading", () => {
   it("returns friends' events, newest first", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
-    await handlePublishFeed(publish("tok-friend", [ev("older", 100)]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("theirs", t(200))]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("older", t(100))]), env);
 
     const feed = await loadFeed(env, ME, 50);
     expect(feed.map((e) => e.id)).toEqual(["theirs", "older"]);
@@ -171,21 +182,21 @@ describe("reading", () => {
   it("excludes the caller's OWN events", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-me", [ev("mine", 300)]), env);
-    await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
+    await handlePublishFeed(publish("tok-me", [ev("mine", t(300))]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("theirs", t(200))]), env);
 
     expect((await loadFeed(env, ME, 50)).map((e) => e.id)).toEqual(["theirs"]);
   });
 
   it("is empty with no friends rather than showing yourself", async () => {
     const env = await env0();
-    await handlePublishFeed(publish("tok-me", [ev("mine", 100)]), env);
+    await handlePublishFeed(publish("tok-me", [ev("mine", t(100))]), env);
     expect(await loadFeed(env, ME, 50)).toEqual([]);
   });
 
   it("never shows a stranger's events", async () => {
     const env = await env0();
-    env.DB.feed.push({ id: "x", author_id: STRANGER, kind: "watch", tmdb_id: 1, media_type: "movie", payload: null, created_at: 500 });
+    env.DB.feed.push({ id: "x", author_id: STRANGER, kind: "watch", tmdb_id: 1, media_type: "movie", payload: null, created_at: t(500) });
 
     expect(await loadFeed(env, ME, 50)).toEqual([]);
   });
@@ -194,7 +205,7 @@ describe("reading", () => {
   it("drops a blocked author because the friendship is gone", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("theirs", t(200))]), env);
     expect((await loadFeed(env, ME, 50)).length).toBe(1);
 
     env.DB.friendships = []; // what handleBlock does
@@ -204,16 +215,50 @@ describe("reading", () => {
   it("pages with `before`", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-friend", [ev("a", 100), ev("b", 200), ev("c", 300)]), env);
-    const page = await loadFeed(env, ME, 50, 300);
+    await handlePublishFeed(publish("tok-friend", [ev("a", t(100)), ev("b", t(200)), ev("c", t(300))]), env);
+    const page = await loadFeed(env, ME, 50, t(300));
     expect(page.map((e) => e.id)).toEqual(["b", "a"]);
+  });
+
+  /**
+   * The delta cursor is what stops D1 binding. Ordering across an `IN` list gathers
+   * every matching row before sorting, and D1 bills rows scanned — so a refresh that
+   * has nothing new must ask for nothing rather than re-reading the whole window.
+   */
+  it("returns only what is newer than `since`", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    await handlePublishFeed(publish("tok-friend", [ev("a", t(100)), ev("b", t(200)), ev("c", t(300))]), env);
+
+    expect((await loadFeed(env, ME, 50, undefined, t(200))).map((e) => e.id)).toEqual(["c"]);
+  });
+
+  it("returns nothing when the caller already holds the newest event", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    await handlePublishFeed(publish("tok-friend", [ev("a", t(100)), ev("b", t(200))]), env);
+
+    expect(await loadFeed(env, ME, 50, undefined, t(200))).toEqual([]);
+  });
+
+  /** A cold fetch is bounded by the window the client renders, not by retention. */
+  it("floors a cold fetch at 30 days", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    env.DB.feed.push({
+      id: "ancient", author_id: FRIEND, kind: "watch", tmdb_id: 1,
+      media_type: "movie", payload: null, created_at: Date.now() - FEED_FLOOR_MS - 1000,
+    });
+    await handlePublishFeed(publish("tok-friend", [ev("recent", t(100))]), env);
+
+    expect((await loadFeed(env, ME, 50)).map((e) => e.id)).toEqual(["recent"]);
   });
 
   it("clears everything this user published", async () => {
     const env = await env0();
     befriend(env, ME, FRIEND);
-    await handlePublishFeed(publish("tok-me", [ev("mine", 100)]), env);
-    await handlePublishFeed(publish("tok-friend", [ev("theirs", 200)]), env);
+    await handlePublishFeed(publish("tok-me", [ev("mine", t(100))]), env);
+    await handlePublishFeed(publish("tok-friend", [ev("theirs", t(200))]), env);
 
     const res = await handleClearFeed(
       new Request("https://flickto.app/api/me/feed", { method: "DELETE", headers: { Authorization: "Bearer tok-me" } }),

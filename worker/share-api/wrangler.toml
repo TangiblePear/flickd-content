@@ -37,7 +37,13 @@ routes = [
   # only form the client actually sends — fall through to the static site as a 404.
   # This is the same trap as `/api/friends` above, from the other direction, and it
   # is invisible to both the test suite and `wrangler deploy --dry-run`.
-  { pattern = "flickto.app/api/feed*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/feed*", zone_name = "flickto.app" },
+  # One chargeable request per refresh (src/sync.ts). Same wildcard trap as
+  # /api/feed above — routes match the FULL URL including the query string, so the
+  # trailing `*` is not optional even though the client POSTs a body. Verify with a
+  # live curl after deploy: an unauthenticated POST must answer 401 (Worker reached),
+  # never 404 (static site). `wrangler deploy --dry-run` proves nothing about this.
+  { pattern = "flickto.app/api/sync*", zone_name = "flickto.app" }
 ]
 
 
@@ -57,6 +63,14 @@ bucket_name = "flickto-social"
 binding = "DB"
 database_name = "flickto-accounts"
 database_id = "5ddfdff4-c818-4131-98aa-41350f164ce0"
+# The schema is no longer hand-applied. `migrations/0001_initial.sql` is the
+# recorded baseline; add `NNNN_description.sql` for every change after it.
+#   npx wrangler d1 migrations list  flickto-accounts --remote
+#   npx wrangler d1 migrations apply flickto-accounts --remote
+# WITHOUT --remote these hit the LOCAL dev database — the two are tracked
+# separately, and forgetting the flag is the usual way production drifts.
+# Nothing runs this on deploy, so `npm run deploy` does it first (package.json).
+migrations_dir = "migrations"
 
 
 

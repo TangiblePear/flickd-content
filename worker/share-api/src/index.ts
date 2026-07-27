@@ -38,6 +38,7 @@ import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout } from "./auth";
 import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
+import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
   handleClaimFriendId,
@@ -274,6 +275,13 @@ export default {
     }
 
     if (p === "/api/report" && req.method === "POST") return handleUserReport(req, env, ctx);
+
+    // ── One chargeable request per refresh (see src/sync.ts). ──
+    // The relay half is injected here because the R2 object layout and its crypto
+    // helpers live in this file; `sync.ts` stays D1-only and therefore testable.
+    if (p === "/api/sync" && req.method === "POST") {
+      return handleSync(req, env as unknown as SyncEnv, ctx, (_e, _uid, relayReq) => loadRelay(env, relayReq));
+    }
 
     // ── Activity feed (Phase 6). Replaces the E2EE feed blob; opinions stay E2EE. ──
     if (p === "/api/feed" && req.method === "GET") return handleGetFeed(req, env, ctx);
@@ -1054,6 +1062,41 @@ interface FreshnessQuery {
   keyEpoch?: unknown;
 }
 
+/**
+ * The R2 half of `POST /api/sync`: the batched freshness scan plus this device's
+ * inbox, in the same inbound request as the D1 reads.
+ *
+ * Authorization is unchanged and still per-object — the freshness scan checks each
+ * author's rotatable read token, and the inbox needs the owner's own secret. Holding
+ * a session grants nothing here; a caller who omits `feedSecret` simply gets no
+ * inbox back rather than an error, because the relay half is optional by design.
+ */
+async function loadRelay(env: Env, relay: RelayRequest): Promise<RelayResponse> {
+  const requesterId =
+    typeof relay.requesterId === "string" && new RegExp(`^${FRIEND_ID}$`).test(relay.requesterId)
+      ? relay.requesterId
+      : "";
+  const queries = (relay.friends ?? []) as FreshnessQuery[];
+
+  // Both halves in parallel: they touch different objects and neither depends on
+  // the other, so the request costs one round trip's worth of latency, not two.
+  const [freshness, inbox] = await Promise.all([
+    queries.length ? freshnessItems(env, queries, requesterId) : Promise.resolve([]),
+    relay.inbox && requesterId && relay.feedSecret
+      ? readOwnInbox(env, requesterId, relay.feedSecret)
+      : Promise.resolve(null),
+  ]);
+  return { freshness, inbox };
+}
+
+/** Owner-authenticated inbox read. Returns null rather than throwing on a bad secret. */
+async function readOwnInbox(env: Env, friendId: string, secret: string) {
+  const auth = await verifyOwner(env, friendId, secret);
+  if (!auth.ok) return null;
+  const rec = await readInbox(env, friendId);
+  return { ownerRecreated: auth.created, items: rec.items, acks: rec.acks };
+}
+
 /** Blind index of a friendId for access.json slots — matches the client's derivation. */
 async function accessSlotHash(friendId: string): Promise<string> {
   return sha256hex(`access-slot:${friendId}`);
@@ -1075,6 +1118,15 @@ async function handleFreshness(req: Request, env: Env): Promise<Response> {
     typeof body.requesterId === "string" && new RegExp(`^${FRIEND_ID}$`).test(body.requesterId)
       ? body.requesterId
       : "";
+  return json({ items: await freshnessItems(env, items, requesterId) });
+}
+
+/**
+ * The freshness scan itself, split out of [handleFreshness] so `POST /api/sync` can
+ * fold it into the same request as the D1 reads. Subrequests are free; the inbound
+ * request is what Cloudflare bills.
+ */
+async function freshnessItems(env: Env, items: FreshnessQuery[], requesterId: string) {
   const slotHash = requesterId ? await accessSlotHash(requesterId) : "";
 
   const out: Array<{ friendId: string; modifiedAt: number; profile?: unknown; slot?: unknown; keyEpoch?: number }> = [];
@@ -1122,7 +1174,7 @@ async function handleFreshness(req: Request, env: Env): Promise<Response> {
     if (!authed) continue;
     out.push({ friendId, modifiedAt: uploaded, profile: profile ?? undefined });
   }
-  return json({ items: out });
+  return out;
 }
 
 interface FcOwnerRecord {
