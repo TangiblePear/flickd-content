@@ -82,6 +82,16 @@ interface StoredShare {
   filters: unknown | null;
   createdAt: string;
   expiresAt: string;
+  /**
+   * **Inert — never incremented, and nothing reads it.** Kept only so objects
+   * written before 2026-07-27 still parse and the wire shape stays stable.
+   *
+   * `handleGet` used to read-modify-write this on every fetch: an R2 write on the
+   * public path, and a lost update whenever two people opened the same link at once,
+   * for a number no surface has ever displayed. **Do not reinstate the increment.**
+   * If view counts are ever actually wanted, they belong in D1 as an atomic
+   * `UPDATE … SET views = views + 1`, not as a read-modify-write against an object.
+   */
   views: number;
 }
 
@@ -1453,11 +1463,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
 async function handleGet(code: string, env: Env): Promise<Response> {
   const stored = await getJson<StoredShare>(env, `share/${code}.json`);
   if (!stored || isExpired(stored)) return notFound();
-
-  const normalized = normalizeStored(stored);
-  normalized.views = (normalized.views ?? 0) + 1;
-  await putJson(env, `share/${code}.json`, normalized);
-  return json(normalized);
+  return json(normalizeStored(stored));
 }
 
 async function handleLanding(code: string, env: Env): Promise<Response> {
