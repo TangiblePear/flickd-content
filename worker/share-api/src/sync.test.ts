@@ -242,7 +242,7 @@ describe("POST /api/sync", () => {
 
     const out = await sync(env, "tok-me", {}, async () => {
       called = true;
-      return { freshness: [], inbox: null };
+      return { freshness: [], inbox: null, self: null };
     });
 
     expect(called).toBe(false);
@@ -260,7 +260,7 @@ describe("POST /api/sync", () => {
 
     await sync(env, "tok-me", { relay: { friends } }, async (_e: any, _u: string, r: RelayRequest) => {
       seen = r;
-      return { freshness: [], inbox: null };
+      return { freshness: [], inbox: null, self: null };
     });
 
     expect(seen!.friends).toHaveLength(MAX_RELAY_FRIENDS);
@@ -273,10 +273,34 @@ describe("POST /api/sync", () => {
       env,
       "tok-me",
       { relay: { requesterId: "R", feedSecret: "s", inbox: true, friends: [{ friendId: "f", readToken: "t" }] } },
-      async () => ({ freshness: [{ friendId: "f" }], inbox: { items: [], acks: [], ownerRecreated: false } }),
+      async () => ({ freshness: [{ friendId: "f" }], inbox: { items: [], acks: [], ownerRecreated: false }, self: { ciphertext: "c", version: 3 } }),
     );
 
     expect(out.relay.freshness).toEqual([{ friendId: "f" }]);
     expect(out.relay.inbox.ownerRecreated).toBe(false);
+    expect(out.relay.self).toEqual({ ciphertext: "c", version: 3 });
+  });
+
+  /**
+   * The three relay reads a steady-state sync needs. Folding all of them in is what
+   * takes a full sync from ~4 requests to 1 — see `SocialSyncWorker.doWork`.
+   */
+  it("asks for freshness, the inbox and the friends record in one go", async () => {
+    const env = await env0();
+    let seen: RelayRequest | null = null;
+
+    await sync(
+      env,
+      "tok-me",
+      { relay: { requesterId: "R", feedSecret: "s", inbox: true, selfLookupKey: "k".repeat(32) } },
+      async (_e: any, _u: string, r: RelayRequest) => {
+        seen = r;
+        return { freshness: [], inbox: null, self: null };
+      },
+    );
+
+    expect(seen!.inbox).toBe(true);
+    expect(seen!.selfLookupKey).toBe("k".repeat(32));
+    expect(seen!.feedSecret).toBe("s");
   });
 });

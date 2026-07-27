@@ -1078,15 +1078,20 @@ async function loadRelay(env: Env, relay: RelayRequest): Promise<RelayResponse> 
       : "";
   const queries = (relay.friends ?? []) as FreshnessQuery[];
 
-  // Both halves in parallel: they touch different objects and neither depends on
-  // the other, so the request costs one round trip's worth of latency, not two.
-  const [freshness, inbox] = await Promise.all([
+  // All three in parallel: they touch different objects and none depends on the
+  // others, so the request costs one round trip's worth of latency, not three.
+  const [freshness, inbox, self] = await Promise.all([
     queries.length ? freshnessItems(env, queries, requesterId) : Promise.resolve([]),
     relay.inbox && requesterId && relay.feedSecret
       ? readOwnInbox(env, requesterId, relay.feedSecret)
       : Promise.resolve(null),
+    relay.selfLookupKey && new RegExp(`^${LOOKUP_KEY}$`).test(relay.selfLookupKey)
+      ? getJson<SelfRecord>(env, `self/${relay.selfLookupKey}.json`).then((r) =>
+          r ? { ciphertext: r.ciphertext, version: r.version } : null,
+        )
+      : Promise.resolve(null),
   ]);
-  return { freshness, inbox };
+  return { freshness, inbox, self };
 }
 
 /** Owner-authenticated inbox read. Returns null rather than throwing on a bad secret. */

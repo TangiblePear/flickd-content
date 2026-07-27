@@ -62,11 +62,19 @@ export interface RelayRequest {
   friends?: Array<{ friendId: string; readToken: string; since?: number; keyEpoch?: number }>;
   /** Present ⇒ read this device's inbox in the same request. */
   inbox?: boolean;
+  /**
+   * Blind-index key for the live friends+block record. Possession of the key IS the
+   * authorization here — it is derived from a secret only the owner's devices hold —
+   * so this needs no separate check, exactly as `GET /api/social/self/{key}` doesn't.
+   */
+  selfLookupKey?: string;
 }
 
 export interface RelayResponse {
   freshness: unknown[];
   inbox: { items: unknown[]; acks: unknown[]; ownerRecreated: boolean } | null;
+  /** Null when not asked for, or when nothing has been published yet (the 404 case). */
+  self: { ciphertext: string; version: number } | null;
 }
 
 /**
