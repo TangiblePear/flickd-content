@@ -36,7 +36,7 @@ import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
-import { handleAuthSession, handleAuthLogout } from "./auth";
+import { handleAuthSession, handleAuthLogout, resolveSession } from "./auth";
 import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
@@ -82,6 +82,21 @@ interface StoredShare {
   filters: unknown | null;
   createdAt: string;
   expiresAt: string;
+  /**
+   * Taken down — by an admin, or automatically once enough distinct signed-in
+   * reporters flagged it. Both read paths then answer **exactly** what an expired
+   * link answers. That identity is the point: a takedown a user can distinguish
+   * from an expiry is itself a signal, and tells an abuser their link was actioned.
+   */
+  hidden?: boolean;
+  /**
+   * The signed-in account that created this link, when there was one. `POST
+   * /api/share` stays unauthenticated — that is the whole point of the path — so
+   * this is null for anonymous shares and populated only when the caller happened
+   * to send a session. It buys the admin a repeat offender to act on rather than
+   * whack-a-mole with individual codes; it gates nothing.
+   */
+  creatorId?: string | null;
   /**
    * **Inert — never incremented, and nothing reads it.** Kept only so objects
    * written before 2026-07-27 still parse and the wire shape stays stable.
@@ -161,6 +176,11 @@ export default {
 
     const apiShare = p.match(/^\/api\/share\/([A-Z0-9]{6,12})$/);
     if (apiShare && req.method === "GET") return handleGet(apiShare[1], env);
+
+    // Report a public share link. Needs no new route pattern — `/api/share/*` is
+    // already bound in wrangler.toml. Unauthenticated by design; see the handler.
+    const shareReport = p.match(/^\/api\/share\/([A-Z0-9]{6,12})\/report$/);
+    if (shareReport && req.method === "POST") return handleShareReport(shareReport[1], req, env);
 
     const landing = p.match(/^\/share\/([A-Z0-9]{6,12})$/);
     if (landing && req.method === "GET") return handleLanding(landing[1], env);
@@ -710,6 +730,13 @@ const picKey = (friendId: string) => `${friendId}/pics/picture.jpg`;
 const picMetaKey = (friendId: string) => `${friendId}/pics/meta.json`;
 const tombstoneKey = (friendId: string) => `_moderation/${friendId}.json`;
 const REPORT_KINDS = new Set(["user", "feed_comment", "picture"]);
+/**
+ * Report kind for a public `share/{code}` link. Deliberately NOT in [REPORT_KINDS]:
+ * that set gates `/api/user/{friendId}/report`, whose target is a friendId, and a
+ * share code is not one. Share reports have their own route and their own target
+ * namespace under the same `_reports/` prefix.
+ */
+const KIND_SHARED_LIST = "shared_list";
 
 interface PictureMeta {
   version: number;
@@ -862,6 +889,107 @@ async function handleReport(targetFriendId: string, req: Request, env: Env): Pro
   }
 
   return json({ ok: true });
+}
+
+/**
+ * Resolve a session **without requiring one**. Returns the account id, or null for
+ * an absent, malformed or expired token — never throws and never 401s.
+ *
+ * Used by the two share-link paths that are open to the whole internet: creating a
+ * link (which stamps `creatorId` when it can) and reporting one (where a session
+ * upgrades the report from "queue for review" to "counts toward autohide").
+ */
+async function runOptionalSession(req: Request, env: Env): Promise<string | null> {
+  if (!req.headers.get("Authorization")) return null;
+  try {
+    const session = await resolveSession(req, env as any);
+    return session?.userId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Marker reporter id for a report filed with no session. Never counted (see below). */
+const ANON_REPORTER = "anon";
+
+/**
+ * `POST /api/share/{code}/report` — report a public share link.
+ *
+ * **Deliberately open to anonymous callers.** The landing page is served to anyone,
+ * and the people most likely to see an abusive link were sent it in a group chat and
+ * have no account at all. Gating on sign-in would leave the main audience with no
+ * route, so this answers 204 (or 429) and never 401.
+ *
+ * That makes it a spam target, so an anonymous report **cannot hide anything**:
+ *
+ * - every report lands in the admin queue (`_reports/`, the same prefix and record
+ *   shape the picture reports use, so the existing admin listing shows it unchanged);
+ * - only **distinct signed-in reporters** count toward [Env.REPORT_AUTOHIDE], so an
+ *   anonymous flood summons a human rather than performing a takedown;
+ * - anonymous callers are rate-limited per IP by the same helper `handleCreate` uses.
+ *
+ * A report against an unknown or already-expired code is a silent no-op, not a 404:
+ * answering differently would turn this into a probe for which codes exist.
+ */
+async function handleShareReport(code: string, req: Request, env: Env): Promise<Response> {
+  const reporter = await runOptionalSession(req, env);
+  if (!reporter) {
+    const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
+    const limit = Number(env.RATE_LIMIT_PER_HOUR ?? "10");
+    if (await rateLimited(env, "sharereport", ip, limit)) {
+      return json({ error: "rate_limited" }, { status: 429 });
+    }
+  }
+
+  let body: { reason?: unknown } = {};
+  try {
+    body = (await req.json()) as typeof body;
+  } catch {
+    // A bodyless report is fine — the reason is optional.
+  }
+
+  const stored = await getJson<StoredShare>(env, `share/${code}.json`);
+  if (!stored) return new Response(null, { status: 204, headers: CORS });
+
+  const at = Date.now();
+  const reporterId = reporter ?? ANON_REPORTER;
+  await putJson(env, `_reports/${code}/${at}-${reporterId}.json`, {
+    kind: KIND_SHARED_LIST,
+    targetFriendId: code,
+    reporterId,
+    reason: typeof body.reason === "string" ? body.reason.slice(0, 2000) : "",
+    context: stored.title,
+    at,
+    resolved: false,
+  });
+
+  // Only a signed-in reporter can move the counter. An unauthenticated POST that
+  // could hide a link would let anyone take down any link by volume — this is the
+  // property that stops the open endpoint becoming a takedown weapon.
+  if (reporter && !stored.hidden) {
+    const threshold = Number(env.REPORT_AUTOHIDE ?? "3");
+    if ((await distinctAuthenticatedReporters(env, code)) >= threshold) {
+      await putJson(env, `share/${code}.json`, { ...stored, hidden: true });
+    }
+  }
+
+  return new Response(null, { status: 204, headers: CORS });
+}
+
+/**
+ * Distinct signed-in reporters against one target, from the `_reports/` filenames —
+ * the same `{at}-{reporter}` layout and the same parse the picture autohide uses.
+ * [ANON_REPORTER] is excluded, which is what keeps anonymous reports advisory.
+ */
+async function distinctAuthenticatedReporters(env: Env, target: string): Promise<number> {
+  const listed = await env.BUCKET.list({ prefix: `_reports/${target}/` });
+  const reporters = new Set<string>();
+  for (const o of listed.objects) {
+    const name = o.key.split("/").pop() ?? "";
+    const who = name.replace(/\.json$/, "").split("-").slice(1).join("-");
+    if (who && who !== ANON_REPORTER) reporters.add(who);
+  }
+  return reporters.size;
 }
 
 /** sha256 hex over raw bytes (the string variant hashes UTF-8 text). */
@@ -1447,6 +1575,10 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
   const ttl = Number(env.SHARE_TTL_SECONDS ?? "2592000");
   const code = await generateUniqueCode(env);
   const now = new Date();
+  // Attribution when it happens to be available. This endpoint is and stays
+  // unauthenticated, so a missing/invalid session is the normal case and must not
+  // change the outcome — hence the resolve is best-effort and never gates.
+  const creator = await runOptionalSession(req, env);
   const stored: StoredShare = {
     kind,
     title,
@@ -1455,6 +1587,7 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + ttl * 1000).toISOString(),
     views: 0,
+    creatorId: creator,
   };
   await putJson(env, `share/${code}.json`, stored);
   return json({ code, expiresAt: stored.expiresAt });
@@ -1462,13 +1595,15 @@ async function handleCreate(req: Request, env: Env): Promise<Response> {
 
 async function handleGet(code: string, env: Env): Promise<Response> {
   const stored = await getJson<StoredShare>(env, `share/${code}.json`);
-  if (!stored || isExpired(stored)) return notFound();
+  if (!stored || isExpired(stored) || stored.hidden) return notFound();
   return json(normalizeStored(stored));
 }
 
 async function handleLanding(code: string, env: Env): Promise<Response> {
   const stored = await getJson<StoredShare>(env, `share/${code}.json`);
-  if (!stored || isExpired(stored)) return html(landingNotFound(), { status: 404 });
+  // A hidden link is indistinguishable from an expired one, deliberately and to
+  // the byte — same status, same body. See [StoredShare.hidden].
+  if (!stored || isExpired(stored) || stored.hidden) return html(landingNotFound(), { status: 404 });
   // Read-only render: does not increment views (that's the app's /api GET).
   return html(landingPage(code, normalizeStored(stored)));
 }
@@ -1497,6 +1632,11 @@ function normalizeStored(parsed: any): StoredShare {
     views: Number(parsed.views ?? 0),
   };
 }
+
+// Deliberately NOT normalized onto the wire: this builds the *public* shape, and
+// `creatorId` would hand the creator's account id to anyone holding the link.
+// Both `hidden` and `creatorId` are read straight off the stored object by the
+// handlers that need them.
 
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
@@ -1558,6 +1698,10 @@ function landingPage(code: string, stored: StoredShare): string {
       }
       .primary { background: #ffb547; color: #0e1014; }
       .secondary { background: #1b2030; color: #e8eaf0; }
+      .report {
+        background: none; border: 0; color: #8a93a6; text-decoration: underline;
+        font: inherit; cursor: pointer; margin-top: 1.25rem; padding: 0.5rem;
+      }
     </style>
   </head>
   <body>
@@ -1567,7 +1711,31 @@ function landingPage(code: string, stored: StoredShare): string {
       <a class="btn primary" id="open" href="${intentUrl}">Open in FlickTo</a>
       <a class="btn secondary" href="${PLAY_STORE_URL}">Get it on Google Play</a>
       <a class="btn secondary" href="${APP_STORE_URL}">Download on the App Store</a>
+      <!--
+        Whoever is reading this page is the person most likely to have been sent an
+        abusive link, and almost never has an account. Requiring one to report would
+        leave that audience with no route at all — so this posts anonymously. It
+        cannot take the link down on its own; see handleShareReport.
+      -->
+      <button class="report" id="report">Report this list</button>
     </div>
+    <script>
+      document.getElementById("report").addEventListener("click", async function () {
+        this.disabled = true;
+        this.textContent = "Thanks — this has been sent for review";
+        try {
+          await fetch("/api/share/${code}/report", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: "landing_page" }),
+          });
+        } catch (e) {
+          // The confirmation is deliberately unconditional: a failed POST is not
+          // the reporter's problem to solve, and re-enabling the button would only
+          // invite a retry loop against a rate limit.
+        }
+      });
+    </script>
     <!--
       No auto-redirect: Chrome blocks gesture-less navigation to an intent://
       URL and falls through to browser_fallback_url (the store). The user taps
