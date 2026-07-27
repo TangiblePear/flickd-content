@@ -47,6 +47,7 @@ import {
 import {
   handleDeleteMatch,
   handleGetMatchPayload,
+  handleGetMatches,
   handleMatchAccept,
   handleMatchRequest,
 } from "./match";
@@ -331,6 +332,7 @@ export default {
     const listTarget = p.match(/^\/api\/lists\/shared\/([0-9A-HJKMNP-TV-Z]{8,40})$/);
     if (listTarget && req.method === "DELETE") return handleDeleteSharedList(listTarget[1], req, env, ctx);
 
+    if (p === "/api/match" && req.method === "GET") return handleGetMatches(req, env, ctx);
     if (p === "/api/match/request" && req.method === "POST") {
       // The card resolver is injected because the friend card lives in R2 and
       // `match.ts` is deliberately D1-only — same reason `sync.ts` takes a RelayLoader.

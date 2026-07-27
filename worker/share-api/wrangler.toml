@@ -60,6 +60,10 @@ routes = [
   # `/api/share/{code}/report` needs NO new pattern: `/api/share/*` is already
   # bound on line 12, and a duplicate pattern is a deploy error.
   { pattern = "flickto.app/api/lists/*", zone_name = "flickto.app" },
+  # Bare pattern as WELL as the wildcard: `/api/match/*` does NOT match `/api/match`,
+  # so the list endpoint would fall through to the static site and answer 405 while
+  # every test and the dry-run stayed green. Same trap as `/api/friends` above.
+  { pattern = "flickto.app/api/match", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/match/*", zone_name = "flickto.app" }
 ]
 

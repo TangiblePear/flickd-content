@@ -159,6 +159,20 @@ function toWire(row: MatchRow) {
   };
 }
 
+/**
+ * `GET /api/match` — my handshakes, both directions.
+ *
+ * The same rows `POST /api/sync` folds in. It exists as its own endpoint so a pass
+ * that could not use the consolidated sync still has a real fallback, exactly as
+ * `GET /api/lists/shared` does — otherwise the only way to read a handshake would be
+ * the very request the client just failed to make.
+ */
+export async function handleGetMatches(req: Request, env: MatchEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  return json(await loadMatches(env, session.userId));
+}
+
 /** Per-requester hourly cap. Rate limiting a match request is an anti-harassment control. */
 async function requestRateLimited(env: MatchEnv, userId: string): Promise<boolean> {
   const limit = Number(env.MATCH_REQUESTS_PER_HOUR ?? DEFAULT_REQUESTS_PER_HOUR);

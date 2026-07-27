@@ -17,6 +17,7 @@ import {
 import {
   handleDeleteMatch,
   handleGetMatchPayload,
+  handleGetMatches,
   handleMatchAccept,
   handleMatchRequest,
   loadMatches,
@@ -439,10 +440,30 @@ describe("the match handshake", () => {
     expect(env.DB.match_requests.length).toBe(0);
   });
 
+  // The fallback read, for a pass that could not use the consolidated sync. Without
+  // it the only way to read a handshake would be the very request that just failed.
+  it("lists both directions, and never someone else's handshake", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env);
+
+    const mine = (await (await handleGetMatches(get("tok-a", "/api/match"), env)).json()) as any;
+    expect(mine.outgoing.map((m: any) => m.targetId)).toEqual([B]);
+    expect(mine.incoming).toEqual([]);
+
+    const theirs = (await (await handleGetMatches(get("tok-b", "/api/match"), env)).json()) as any;
+    expect(theirs.incoming.map((m: any) => m.requesterId)).toEqual([A]);
+
+    const bystander = (await (await handleGetMatches(get("tok-c", "/api/match"), env)).json()) as any;
+    expect(bystander.incoming).toEqual([]);
+    expect(bystander.outgoing).toEqual([]);
+  });
+
   it("401s every match endpoint without a session", async () => {
     const env = await env0();
     const anon = (method: string) => new Request("https://flickto.app/api/match/request", { method });
     expect((await handleMatchRequest(anon("POST"), env)).status).toBe(401);
+    expect((await handleGetMatches(new Request("https://flickto.app/api/match"), env)).status).toBe(401);
     expect((await handleMatchAccept("Z".repeat(26), anon("POST"), env)).status).toBe(401);
     expect((await handleGetMatchPayload("Z".repeat(26), anon("GET"), env)).status).toBe(401);
     expect((await handleDeleteMatch("Z".repeat(26), anon("DELETE"), env)).status).toBe(401);
