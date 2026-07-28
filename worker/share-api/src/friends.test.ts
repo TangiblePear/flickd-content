@@ -5,6 +5,7 @@ import {
   handleDeleteAccount,
   handleFriendAccept,
   handleFriendRemove,
+  handleFriendRemoveByFriendId,
   handleFriendRequest,
   handleGetBlocks,
   handleGetFriendCards,
@@ -282,12 +283,65 @@ describe("friend requests", () => {
   });
 });
 
+describe("removing by device friendId", () => {
+  const del = (token: string, friendId: string) =>
+    new Request(`https://flickto.app/api/friends/by-friend/${friendId}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+  /**
+   * The 2026-07-28 device bug: the client could not name B's account id, gave up
+   * silently, and the friendship outlived the unfriend on the server.
+   */
+  it("deletes the friendship without the caller knowing the account id", async () => {
+    const env = await env0();
+    env.DB.users.find((u: any) => u.id === B).friend_id = "FRIENDIDBBBB";
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    await handleFriendAccept(post("tok-b", "/api/friends/accept", { userId: A }), env);
+
+    expect((await handleFriendRemoveByFriendId("FRIENDIDBBBB", del("tok-a", "FRIENDIDBBBB"), env)).status).toBe(204);
+
+    const after = (await (await handleGetFriends(get("tok-a", "/api/friends"), env)).json()) as any;
+    expect(after.accepted).toEqual([]);
+    const theirs = (await (await handleGetFriends(get("tok-b", "/api/friends"), env)).json()) as any;
+    // Both sides must lose it, or a re-add resolves straight to accepted.
+    expect(theirs.accepted).toEqual([]);
+  });
+
+  it("answers 204 for an unknown friendId, revealing nothing", async () => {
+    const env = await env0();
+    expect((await handleFriendRemoveByFriendId("FRIENDIDZZZZ", del("tok-a", "FRIENDIDZZZZ"), env)).status).toBe(204);
+  });
+
+  it("still requires a session", async () => {
+    const env = await env0();
+    expect((await handleFriendRemoveByFriendId("FRIENDIDBBBB", del("nope", "FRIENDIDBBBB"), env)).status).toBe(401);
+  });
+
+  /** A removal must never resolve to the caller's own row. */
+  it("ignores my own friendId", async () => {
+    const env = await env0();
+    env.DB.users.find((u: any) => u.id === A).friend_id = "FRIENDIDAAAA";
+    expect((await handleFriendRemoveByFriendId("FRIENDIDAAAA", del("tok-a", "FRIENDIDAAAA"), env)).status).toBe(204);
+  });
+});
+
 describe("friend cards", () => {
   // Cards live in R2; the handler takes a loader so this module stays D1-only.
+  const card = (friendId: string, name: string, n: string) => ({
+    friendId,
+    displayName: name,
+    avatarId: `av${n}`,
+    borderId: `bo${n}`,
+    pictureUrl: "",
+    publicKeyset: `ks-${n}`,
+    feedReadToken: `rt-${n}`,
+  });
   const cards: Record<string, any> = {
-    "FRIENDIDAAAA": { friendId: "FRIENDIDAAAA", displayName: "Ada", avatarId: "av1", publicKeyset: "ks-a" },
-    "FRIENDIDBBBB": { friendId: "FRIENDIDBBBB", displayName: "Bo", avatarId: "av2", publicKeyset: "ks-b" },
-    "FRIENDIDCCCC": { friendId: "FRIENDIDCCCC", displayName: "Cy", avatarId: "av3", publicKeyset: "ks-c" },
+    "FRIENDIDAAAA": card("FRIENDIDAAAA", "Ada", "a"),
+    "FRIENDIDBBBB": card("FRIENDIDBBBB", "Bo", "b"),
+    "FRIENDIDCCCC": card("FRIENDIDCCCC", "Cy", "c"),
   };
   const loader = async (friendId: string) => cards[friendId] ?? null;
 
@@ -307,9 +361,8 @@ describe("friend cards", () => {
     await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
-    expect(res.cards).toEqual([
-      { userId: A, friendId: "FRIENDIDAAAA", displayName: "Ada", avatarId: "av1", publicKeyset: "ks-a" },
-    ]);
+    // feedReadToken must ride along: without it the new friend's feed is unreadable.
+    expect(res.cards).toEqual([{ userId: A, ...cards["FRIENDIDAAAA"] }]);
   });
 
   /** The security argument: a users.id is not a capability, a friend code is. */

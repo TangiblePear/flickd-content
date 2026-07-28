@@ -221,6 +221,41 @@ export async function handleFriendRemove(
   return noContent();
 }
 
+/**
+ * DELETE /api/friends/by-friend/{friendId} — the same removal, addressed by the
+ * **device friendId** the client actually holds.
+ *
+ * `DELETE /api/friends/{userId}` needs the caller to already know the other side's
+ * account id, which it learns from a cache populated by `link-legacy` and card
+ * lookups. On device 2026-07-28 that cache was cold at the moment of the unfriend,
+ * the client gave up silently, and the friendship survived on the server — which
+ * then resurrected it locally and made a later re-add resolve straight to
+ * `accepted`. Removal must not depend on a warm cache.
+ *
+ * Safe to expose: this only ever deletes an edge **the caller is part of**, and it
+ * answers `204` whether or not anything matched, so it reveals nothing about
+ * whether a given friendId has an account.
+ */
+export async function handleFriendRemoveByFriendId(
+  friendId: string,
+  req: Request,
+  env: FriendsEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await requireSession(req, env, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  if (!FRIEND_ID_RE.test(friendId)) return noContent();
+
+  const other = await env.DB.prepare("SELECT id FROM users WHERE friend_id = ?")
+    .bind(friendId)
+    .first<{ id: string }>();
+  if (!other || other.id === session.userId) return noContent();
+
+  const [a, b] = friendshipKey(session.userId, other.id);
+  await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  return noContent();
+}
+
 // ── Blocking ─────────────────────────────────────────────────────────────────
 
 /**
@@ -409,12 +444,23 @@ export async function handleLinkLegacyFriends(
  */
 export type CardLoader = (friendId: string) => Promise<PublicCard | null>;
 
-/** Only the fields needed to build a local friend row. Never anything secret. */
+/**
+ * Exactly the fields a local friend row needs, and nothing else.
+ *
+ * This is the same data `GET /api/friendcode/{code}` already hands to anyone
+ * holding the code, `feedReadToken` included — that token is the owner's
+ * rotatable feed-read capability and living in the published card is what makes
+ * pairing work at all. An explicit allow-list rather than a pass-through,
+ * because the stored card is client-written.
+ */
 export interface PublicCard {
   friendId: string;
   displayName: string;
   avatarId: string;
+  borderId: string;
+  pictureUrl: string;
   publicKeyset: string;
+  feedReadToken: string;
 }
 
 const MAX_CARD_LOOKUPS = 25;

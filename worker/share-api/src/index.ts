@@ -66,6 +66,7 @@ import {
   handleDeleteAccount,
   handleFriendAccept,
   handleFriendRemove,
+  handleFriendRemoveByFriendId,
   handleFriendRequest,
   handleGetBlocks,
   handleGetFriendCards,
@@ -322,6 +323,12 @@ export default {
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx);
+    // Its own path rather than an overload of the one above: a 26-character friendId
+    // is a legal `users.id` too, so one route could not tell the two id spaces apart.
+    const friendByDevice = p.match(/^\/api\/friends\/by-friend\/([A-Z0-9]{12,40})$/);
+    if (friendByDevice && req.method === "DELETE") {
+      return handleFriendRemoveByFriendId(friendByDevice[1], req, env, ctx);
+    }
 
     if (p === "/api/blocks" && req.method === "GET") return handleGetBlocks(req, env, ctx);
     const blockTarget = p.match(/^\/api\/blocks\/([0-9A-HJKMNP-TV-Z]{26})$/);
@@ -1460,11 +1467,15 @@ async function loadPublicCard(env: Env, friendId: string): Promise<PublicCard | 
   if (!owner?.c) return null;
   const card = await getJson<Record<string, unknown>>(env, `fc/${owner.c}.json`);
   if (!card || typeof card.friendId !== "string" || typeof card.publicKeyset !== "string") return null;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
   return {
     friendId: card.friendId,
     publicKeyset: card.publicKeyset,
-    displayName: typeof card.displayName === "string" ? card.displayName : "",
-    avatarId: typeof card.avatarId === "string" ? card.avatarId : "",
+    feedReadToken: str(card.feedReadToken),
+    displayName: str(card.displayName),
+    avatarId: str(card.avatarId),
+    borderId: str(card.borderId),
+    pictureUrl: str(card.pictureUrl),
   };
 }
 
