@@ -212,12 +212,14 @@ export async function handleFriendRemove(
   req: Request,
   env: FriendsEnv,
   ctx?: ExecutionContext,
+  notify?: (userId: string) => void,
 ): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
   if (!USER_ID_RE.test(target)) return noContent();
   const [a, b] = friendshipKey(session.userId, target);
-  await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  const res = await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  if (res.meta?.changes) notify?.(target);
   return noContent();
 }
 
@@ -241,6 +243,7 @@ export async function handleFriendRemoveByFriendId(
   req: Request,
   env: FriendsEnv,
   ctx?: ExecutionContext,
+  notify?: (userId: string) => void,
 ): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -252,7 +255,13 @@ export async function handleFriendRemoveByFriendId(
   if (!other || other.id === session.userId) return noContent();
 
   const [a, b] = friendshipKey(session.userId, other.id);
-  await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  const res = await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
+  // Tell the other side, or they keep showing a friend who has removed them until
+  // some unrelated sync happens -- up to 24h, since the client only converges the
+  // graph inside SocialSyncWorker and nothing else was waking it. Measured on device
+  // 2026-07-28: the removal was correct server-side and simply never arrived.
+  // Only on an actual delete, so a repeated DELETE cannot be used to spam someone.
+  if (res.meta?.changes) notify?.(other.id);
   return noContent();
 }
 

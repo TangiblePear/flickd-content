@@ -310,6 +310,17 @@ export default {
     const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
 
+    // `wake` is fire-and-forget: ctx.waitUntil keeps the push alive past the response
+    // without ever delaying or failing it.
+    //
+    // Declared HERE, above every consumer, not beside the lists/match routes it was
+    // written for. `const` is not hoisted, so the friend-removal routes below --
+    // added later and further up -- hit the temporal dead zone and threw
+    // ReferenceError, which the catch-all turned into a 500. Every unfriend failed
+    // server-side for ~40 minutes on 2026-07-28 while the client dutifully reported
+    // "server delete failed: HTTP 500" into its own health log.
+    const wake = (userId: string) => ctx.waitUntil(notifyAccount(env, userId));
+
     // ── Friendships, blocks, reports (Phase 3/4). Session-authenticated. ──
     if (p === "/api/me/friend-id" && req.method === "PUT") return handleClaimFriendId(req, env, ctx);
     if (p === "/api/me/account" && req.method === "DELETE") return handleDeleteAccount(req, env, ctx);
@@ -322,12 +333,12 @@ export default {
     }
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
-    if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx);
+    if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx, wake);
     // Its own path rather than an overload of the one above: a 26-character friendId
     // is a legal `users.id` too, so one route could not tell the two id spaces apart.
     const friendByDevice = p.match(/^\/api\/friends\/by-friend\/([A-Z0-9]{12,40})$/);
     if (friendByDevice && req.method === "DELETE") {
-      return handleFriendRemoveByFriendId(friendByDevice[1], req, env, ctx);
+      return handleFriendRemoveByFriendId(friendByDevice[1], req, env, ctx, wake);
     }
 
     if (p === "/api/blocks" && req.method === "GET") return handleGetBlocks(req, env, ctx);
@@ -343,9 +354,6 @@ export default {
     // These replace the last two directed-message types on the E2EE inbox. Both
     // live in the D1 half deliberately — folding them into the relay would keep
     // alive the thing this work exists to retire.
-    // `wake` is fire-and-forget: ctx.waitUntil keeps the push alive past the response
-    // without ever delaying or failing it.
-    const wake = (userId: string) => ctx.waitUntil(notifyAccount(env, userId));
 
     if (p === "/api/lists/share" && req.method === "POST") return handleShareList(req, env, ctx, wake);
     if (p === "/api/lists/shared" && req.method === "GET") return handleGetSharedLists(req, env, ctx);
