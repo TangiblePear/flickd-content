@@ -136,6 +136,18 @@ migrations_dir = "migrations"
 
 
 
+# Inline comment translation (src/comments.ts, tier 2). Free allowance is 10,000
+# Neurons/day on Free *and* Paid — roughly 320,000 tokens, so ~650–1,300 NEW
+# translations a day once caching is counted. Beyond that the per-comment catch
+# flags the comment and the client falls back to on-device ML Kit.
+#
+# Costs no extra Worker REQUESTS: inference inside an invocation is a subrequest.
+# Subrequests are what bind — 50 per invocation on Free — which is why the comment
+# page is capped at 20.
+[ai]
+binding = "AI"
+
+
 [vars]
 SHARE_TTL_SECONDS = "2592000"
 MAX_ITEMS = "100"

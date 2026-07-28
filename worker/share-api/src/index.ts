@@ -31,6 +31,10 @@ interface Env {
   ACCOUNT_PEPPER?: string;
   // Accounts/profiles/friendships/blocks. Bound in wrangler.toml as `DB`.
   DB: D1Database;
+  // Workers AI, for inline comment translation. Optional: with no binding every
+  // comment comes back flagged untranslated and the client falls back to
+  // on-device ML Kit — the same path an exhausted daily allowance takes.
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
   // Firebase project **id** (not the project number) — a Firebase ID token's
   // `aud`. Absent → /api/auth/* reports not_configured.
   FIREBASE_PROJECT_ID?: string;

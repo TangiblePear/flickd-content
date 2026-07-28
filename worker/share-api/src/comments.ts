@@ -39,6 +39,13 @@ export interface CommentsEnv {
   FIREBASE_PROJECT_ID?: string;
   /** Per-author hourly cap. Config, not a constant, so it tunes without a deploy. */
   COMMENTS_PER_HOUR?: string;
+  /**
+   * Workers AI, for the inline translation tier. **Optional on purpose**: with no
+   * binding every comment comes back flagged untranslated and the client falls
+   * back to on-device ML Kit, which is exactly the behaviour when the daily
+   * allowance runs out. One code path, two causes.
+   */
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
 }
 
 const CORS = {
@@ -184,9 +191,18 @@ export interface CommentRow {
  * caller's own reaction is the one reader-specific bit, and it rides
  * `myReactions` on the authenticated path instead.
  */
-function toWire(r: CommentRow, reactions: Record<string, number> = {}) {
+function toWire(r: CommentRow, reactions: Record<string, number> = {}, translation?: Translated) {
   return {
     reactions,
+    /** Server-side translation, when one was asked for and succeeded. */
+    translated: translation?.text ?? null,
+    /**
+     * The cue for tier 3. True means "we tried and could not" — an exhausted
+     * daily allowance, a model error, or no AI binding at all — and the client
+     * should offer "Translate on this device". False on a comment already in the
+     * reader's language, where there is nothing to offer.
+     */
+    translationFailed: translation?.failed ?? false,
     id: r.id,
     authorId: r.author_id,
     authorName: r.display_name ?? null,
@@ -333,6 +349,131 @@ export async function loadReactionCounts(
   return out;
 }
 
+// ── Translation ─────────────────────────────────────────────────────────────
+//
+// Three tiers, and most readers never leave the first:
+//
+//   1. **filter by `lang`** — a WHERE clause on a query already being made. Free,
+//      instant, no downloads, no AI. Fragmentation is one line of UI: "14 comments
+//      in other languages — show all", which is also where the affordance lives.
+//   2. **"show all": translate inline, here.** The request is already paid for, so
+//      AI inference and D1 queries inside it are subrequests, not billed
+//      invocations — translation costs ZERO extra requests. The response becomes
+//      per-*language*, not per-*user*, so it still edge-caches: one entry per
+//      language rather than one per reader.
+//   3. **allowance exhausted: on-device.** The failure is caught PER COMMENT and
+//      the comment comes back flagged rather than failing the whole fetch. The
+//      client then offers ML Kit on Android; the PWA has no fallback tier yet.
+//
+// ⚠️ **Never accept a client-generated translation back into this cache.** It is
+// tempting — a device that translated something could warm the cache for everyone
+// — and it is an injection vector: a user could upload an arbitrary "translation"
+// of someone else's comment and the server would serve it as authoritative.
+
+const TRANSLATION_MODEL = "@cf/meta/m2m100-1.2b";
+
+/**
+ * ⚠️ Bounds the AI calls one request can make. **Subrequests are the constraint**
+ * — 50 per invocation on the free plan — and the budget is roughly: session +
+ * friendships + comments ~3, translation cache lookup 1, one AI call per
+ * untranslated comment up to 20, batched writeback 1. About 25. A 50-comment page
+ * would blow the limit outright, which is why [PAGE_LIMIT] is 20.
+ */
+const MAX_TRANSLATIONS_PER_REQUEST = PAGE_LIMIT;
+
+/** m2m100 wants a bare language code; our locales carry regions (`pt-BR`, `pt-PT`). */
+const baseLang = (tag: string) => tag.split(/[-_]/)[0].toLowerCase();
+
+interface Translated {
+  /** The translated text, or null when this comment could not be translated. */
+  text: string | null;
+  /** True when translation was attempted and failed — the client's cue to try on-device. */
+  failed: boolean;
+}
+
+/**
+ * Translate [rows] into [target], reading the cache first and writing new results
+ * back in one batch.
+ *
+ * **Top-down, and it STOPS at the first failure.** If the allowance runs out
+ * mid-page, the comments at the top — the ones actually being read — are the
+ * translated ones, and the remaining twenty subrequests are not spent discovering
+ * the same failure nineteen more times. That is what "ordered degradation" buys.
+ */
+async function translateRows(
+  env: CommentsEnv,
+  rows: CommentRow[],
+  target: string,
+  ctx?: ExecutionContext,
+): Promise<Record<string, Translated>> {
+  const out: Record<string, Translated> = {};
+  const needed = rows.filter((r) => r.body !== "" && r.lang != null && baseLang(r.lang) !== baseLang(target));
+  if (needed.length === 0) return out;
+
+  const placeholders = needed.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT comment_id, text, src_updated_at FROM comment_translations
+      WHERE lang = ? AND comment_id IN (${placeholders})`,
+  )
+    .bind(target, ...needed.map((r) => r.id))
+    .all<{ comment_id: string; text: string; src_updated_at: number }>();
+
+  const cached = new Map((results ?? []).map((r) => [r.comment_id, r]));
+  const writes: D1PreparedStatement[] = [];
+  let exhausted = !env.AI;
+  let spent = 0;
+
+  for (const row of needed) {
+    const hit = cached.get(row.id);
+    // `src_updated_at` is what makes editing safe: a stale translation would
+    // otherwise stay cached forever while readers see text that no longer
+    // matches the original.
+    if (hit && hit.src_updated_at === row.updated_at) {
+      out[row.id] = { text: hit.text, failed: false };
+      continue;
+    }
+    if (exhausted || spent >= MAX_TRANSLATIONS_PER_REQUEST) {
+      out[row.id] = { text: null, failed: true };
+      continue;
+    }
+
+    try {
+      spent++;
+      const result = (await env.AI!.run(TRANSLATION_MODEL, {
+        text: row.body,
+        source_lang: baseLang(row.lang!),
+        target_lang: baseLang(target),
+      })) as { translated_text?: string } | null;
+      const text = result?.translated_text ?? "";
+      if (!text) throw new Error("empty translation");
+      out[row.id] = { text, failed: false };
+      writes.push(
+        env.DB
+          .prepare(
+            `INSERT INTO comment_translations (comment_id, lang, text, src_updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(comment_id, lang) DO UPDATE
+               SET text = excluded.text, src_updated_at = excluded.src_updated_at`,
+          )
+          .bind(row.id, target, text, row.updated_at),
+      );
+    } catch {
+      // Per comment, never per fetch. One model hiccup must not empty the page.
+      out[row.id] = { text: null, failed: true };
+      exhausted = true;
+    }
+  }
+
+  // Batched, because each write would otherwise be its own subrequest against the
+  // same 50-per-invocation budget the AI calls are already spending.
+  if (writes.length > 0) {
+    const put = env.DB.batch(writes);
+    if (ctx) ctx.waitUntil(put);
+    else await put;
+  }
+  return out;
+}
+
 // ── Path 1: the public list (unauthenticated, edge-cached) ──────────────────
 
 /**
@@ -340,9 +481,10 @@ export async function loadReactionCounts(
  * `?episode=2&season=1` and `?season=1&episode=2` are one cache entry, not two —
  * `caches.default` keys on the URL byte-for-byte and would otherwise fork.
  */
-function publicCacheKey(s: Subject, lang: string, cursor: number): Request {
+function publicCacheKey(s: Subject, lang: string, all: boolean, cursor: number): Request {
   return new Request(
-    `https://comments.invalid/${s.mediaType}/${s.tmdbId}/${s.season}/${s.episode}?lang=${lang}&cursor=${cursor}`,
+    `https://comments.invalid/${s.mediaType}/${s.tmdbId}/${s.season}/${s.episode}` +
+      `?lang=${lang}&all=${all ? 1 : 0}&cursor=${cursor}`,
   );
 }
 
@@ -425,18 +567,22 @@ async function otherLanguageCount(env: CommentsEnv, s: Subject, lang: string): P
 export async function handleGetComments(req: Request, env: CommentsEnv, s: Subject, ctx?: ExecutionContext) {
   const url = new URL(req.url);
   const lang = (url.searchParams.get("lang") ?? "").slice(0, MAX_LANG);
+  // "Show all": stop filtering by language and translate what comes back. The
+  // response is still per-language rather than per-reader, so it still caches.
+  const all = url.searchParams.get("all") === "1";
   const cursor = Number(url.searchParams.get("cursor")) || Number.MAX_SAFE_INTEGER;
 
   const cache = edgeCache();
-  const key = publicCacheKey(s, lang, cursor);
+  const key = publicCacheKey(s, lang, all, cursor);
   const hit = await cache?.match(key);
   if (hit) return hit;
 
-  const rows = await loadPublicComments(env, s, lang, cursor);
+  const rows = await loadPublicComments(env, s, all ? "" : lang, cursor);
   const counts = await loadReactionCounts(env, rows.map((r) => r.id));
+  const translations = all && lang ? await translateRows(env, rows, lang, ctx) : {};
   const res = json({
-    comments: rows.map((r) => toWire(r, counts[r.id])),
-    otherLanguages: await otherLanguageCount(env, s, lang),
+    comments: rows.map((r) => toWire(r, counts[r.id], translations[r.id])),
+    otherLanguages: all ? 0 : await otherLanguageCount(env, s, lang),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
   res.headers.set("Cache-Control", `public, max-age=${PUBLIC_CACHE_SECONDS}`);

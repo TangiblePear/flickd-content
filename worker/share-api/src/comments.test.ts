@@ -40,6 +40,7 @@ class FakeD1 {
   blocks: any[] = [];
   profiles: any[] = [];
   reports: any[] = [];
+  comment_translations: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -167,6 +168,10 @@ class FakeStmt {
         .map((c) => ({ ...c, ...(this.db.profiles.find((p) => p.user_id === c.author_id) ?? {}) }));
       return { results: rows as T[] };
     }
+    if (s.startsWith("SELECT comment_id, text, src_updated_at FROM comment_translations")) {
+      const ids = new Set(a.slice(1));
+      return { results: this.db.comment_translations.filter((t) => t.lang === a[0] && ids.has(t.comment_id)) as T[] };
+    }
     if (s.startsWith("SELECT comment_id, emoji, n FROM comment_reaction_counts")) {
       const ids = new Set(a);
       return { results: this.db.comment_reaction_counts.filter((r) => ids.has(r.comment_id) && r.n > 0) as T[] };
@@ -208,6 +213,12 @@ class FakeStmt {
       const r = this.db.comments.find((c) => c.id === a[2] && c.author_id === a[3]);
       if (r) Object.assign(r, { deleted_at: a[0], updated_at: a[1] });
       return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("INSERT INTO comment_translations")) {
+      const row = this.db.comment_translations.find((t) => t.comment_id === a[0] && t.lang === a[1]);
+      if (row) Object.assign(row, { text: a[2], src_updated_at: a[3] });
+      else this.db.comment_translations.push({ comment_id: a[0], lang: a[1], text: a[2], src_updated_at: a[3] });
+      return { success: true, meta: { changes: 1 } };
     }
     if (s.startsWith("INSERT INTO reports")) {
       this.db.reports.push({
@@ -390,6 +401,115 @@ describe("the public list", () => {
     const body = await res.json();
     expect(body.comments.map((c: any) => c.id).sort()).toEqual(["C1", "C3"]);
     expect(body.otherLanguages).toBe(1);
+  });
+});
+
+describe("translation", () => {
+  /** Records every call so the tests can assert how many subrequests were spent. */
+  const fakeAi = (impl: (text: string) => string) => {
+    const calls: string[] = [];
+    return {
+      calls,
+      run: async (_model: string, input: any) => {
+        calls.push(input.text);
+        return { translated_text: impl(input.text) };
+      },
+    };
+  };
+
+  it("does nothing without ?all=1 — tier 1 is a WHERE clause, not an AI call", async () => {
+    const e = env();
+    e.AI = fakeAi((t) => `EN(${t})`);
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
+    await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    expect(e.AI.calls).toEqual([]);
+  });
+
+  it("translates the other-language comments when asked, and caches the result", async () => {
+    const e = env();
+    e.AI = fakeAi((t) => `EN(${t})`);
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika", updated_at: 500 });
+    seed(e.DB, { id: "C2", lang: "en", body: "already english" });
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const byId = Object.fromEntries((await res.json()).comments.map((c: any) => [c.id, c]));
+    expect(byId.C1.translated).toBe("EN(harika)");
+    // A comment already in the reader's language costs nothing and offers nothing.
+    expect(byId.C2.translated).toBeNull();
+    expect(byId.C2.translationFailed).toBe(false);
+    expect(e.AI.calls).toEqual(["harika"]);
+    expect(e.DB.comment_translations).toEqual([
+      { comment_id: "C1", lang: "en", text: "EN(harika)", src_updated_at: 500 },
+    ]);
+  });
+
+  it("serves the cache without calling the model again", async () => {
+    const e = env();
+    e.AI = fakeAi((t) => `EN(${t})`);
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika", updated_at: 500 });
+    e.DB.comment_translations.push({ comment_id: "C1", lang: "en", text: "cached", src_updated_at: 500 });
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    expect((await res.json()).comments[0].translated).toBe("cached");
+    expect(e.AI.calls).toEqual([]);
+  });
+
+  it("⚠️ re-translates after an edit, because a stale translation is worse than none", async () => {
+    const e = env();
+    e.AI = fakeAi(() => "fresh");
+    seed(e.DB, { id: "C1", lang: "tr", body: "değişti", updated_at: 900 });
+    // Written against the pre-edit body. `src_updated_at` is what catches it —
+    // without the column this text would stay cached forever while readers see
+    // something that no longer matches the original.
+    e.DB.comment_translations.push({ comment_id: "C1", lang: "en", text: "stale", src_updated_at: 500 });
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    expect((await res.json()).comments[0].translated).toBe("fresh");
+  });
+
+  it("flags a failing comment instead of failing the whole fetch, and stops trying", async () => {
+    const e = env();
+    let n = 0;
+    e.AI = {
+      calls: [] as string[],
+      run: async (_m: string, input: any) => {
+        (e.AI.calls as string[]).push(input.text);
+        n++;
+        throw new Error("allowance exhausted");
+      },
+    };
+    for (const id of ["C1", "C2", "C3"]) {
+      seed(e.DB, { id, lang: "tr", body: `t-${id}`, created_at: Date.now() - Number(id[1]) });
+    }
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const body = await res.json();
+
+    // The page still renders — the whole point of catching per comment.
+    expect(body.comments).toHaveLength(3);
+    expect(body.comments.every((c: any) => c.translationFailed)).toBe(true);
+    // …and the remaining subrequests are not spent rediscovering the same failure.
+    expect(n).toBe(1);
+  });
+
+  it("flags everything untranslated when there is no AI binding at all", async () => {
+    const e = env();
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    // One code path for "no binding" and "allowance gone": both mean the client
+    // should offer to translate on the device.
+    expect((await res.json()).comments[0].translationFailed).toBe(true);
+  });
+
+  it("keys the cache on `all`, so the filtered and translated pages never collide", async () => {
+    // Both are per-language rather than per-reader, so both are cacheable — but
+    // they are different responses and must not share an entry.
+    const e = env();
+    e.AI = fakeAi((t) => `EN(${t})`);
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
+    const filtered = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    const shown = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    expect((await filtered.json()).comments).toHaveLength(0);
+    expect((await shown.json()).comments).toHaveLength(1);
   });
 });
 
