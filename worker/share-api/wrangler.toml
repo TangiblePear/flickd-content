@@ -83,7 +83,12 @@ routes = [
   # Comment moderation, called by the /admin Pages functions with X-Admin-Key.
   # Not user-facing; gated by the ADMIN_KEY secret, which when unset closes these
   # routes rather than opening them.
-  { pattern = "flickto.app/api/admin/*", zone_name = "flickto.app" },
+  #
+  # ⚠️ NOT `/api/admin/*` — that pattern is already assigned to flickto-scoring-api,
+  # and Cloudflare gives a route to exactly one worker, so the deploy is REJECTED
+  # rather than the routes being merged. Found on the first real deploy, 2026-07-28;
+  # `wrangler deploy --dry-run` cannot see it because it never contacts the zone.
+  { pattern = "flickto.app/api/moderation/*", zone_name = "flickto.app" },
   # GIF picker (src/giphy.ts). Trailing `*` is load-bearing as always — routes
   # match the full URL including the query string, and every call carries `?q=`
   # or `?limit=`.

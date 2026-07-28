@@ -120,8 +120,8 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", "/api/comments/AAAAAAAA/report", { reason: "spoiler" }],
   ["GET", "/api/giphy/trending"],
   ["GET", "/api/giphy/search?q=cat"],
-  ["GET", "/api/admin/comment-reports"],
-  ["POST", "/api/admin/comments/AAAAAAAA/restore"],
+  ["GET", "/api/moderation/comment-reports"],
+  ["POST", "/api/moderation/comments/AAAAAAAA/restore"],
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],

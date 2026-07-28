@@ -127,6 +127,10 @@ class FakeStmt {
       const r = this.db.comment_reactions.find((x) => x.comment_id === a[0] && x.user_id === a[1]);
       return r ? ({ emoji: r.emoji } as T) : null;
     }
+    if (s.startsWith("SELECT display_name FROM profiles")) {
+      const p = this.db.profiles.find((x) => x.user_id === a[0]);
+      return p ? ({ display_name: p.display_name } as T) : null;
+    }
     if (s.startsWith("SELECT COALESCE(SUM(n), 0) AS n FROM comment_reaction_counts")) {
       const n = this.db.comment_reaction_counts
         .filter((r) => r.comment_id === a[0])
@@ -617,6 +621,49 @@ describe("writing", () => {
       ctx,
     );
     expect(res.status).toBe(200);
+  });
+
+  it("tells every accepted friend about a NEW comment, with a renderable name", async () => {
+    const e = await withSessions(env());
+    e.DB.friendships.push({ user_a: A, user_b: B, state: "accepted", requested_by: A, updated_at: 0 });
+    e.DB.friendships.push({ user_a: A, user_b: C, state: "accepted", requested_by: A, updated_at: 0 });
+    e.DB.profiles.push({ user_id: A, display_name: "Alex" });
+    const calls: Array<{ userId: string; data: Record<string, string> }> = [];
+
+    await handlePostComment(post("/api/comments", body(), "tok-a"), e, ctx, (userId, data) =>
+      calls.push({ userId, data }),
+    );
+    await flush();
+
+    expect(calls.map((c) => c.userId).sort()).toEqual([B, C].sort());
+    // The client cannot render "Alex commented" from an opaque id, and making each
+    // recipient look it up would turn one push into one request per friend.
+    expect(calls[0].data.authorName).toBe("Alex");
+    expect(calls[0].data.kind).toBe("friend_comment");
+  });
+
+  it("⚠️ does NOT re-notify on an edit", async () => {
+    const e = await withSessions(env());
+    e.DB.friendships.push({ user_a: A, user_b: B, state: "accepted", requested_by: A, updated_at: 0 });
+    const calls: string[] = [];
+    const notify = (userId: string) => calls.push(userId);
+
+    await handlePostComment(post("/api/comments", body(), "tok-a"), e, ctx, notify);
+    await flush();
+    await handlePostComment(post("/api/comments", body({ body: "corrected" }), "tok-a"), e, ctx, notify);
+    await flush();
+
+    // Editing is allowed forever, so notifying on every write would let one person
+    // re-notify all their friends by retyping a word.
+    expect(calls).toEqual([B]);
+  });
+
+  it("notifies nobody when the author has no friends", async () => {
+    const e = await withSessions(env());
+    const calls: string[] = [];
+    await handlePostComment(post("/api/comments", body(), "tok-a"), e, ctx, (userId) => calls.push(userId));
+    await flush();
+    expect(calls).toEqual([]);
   });
 
   it("refuses a comment with no text, no media and no reaction", async () => {

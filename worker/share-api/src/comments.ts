@@ -138,6 +138,13 @@ export type CommentNotifier = (userId: string, data: Record<string, string>) => 
  */
 const REACTION_NOTIFY_COOLDOWN_MS = 15 * 60 * 1000;
 
+/**
+ * Friends told about one new comment. Bounded so a single comment can never become
+ * an unbounded fan-out inside one request — friend counts are tens, so this is a
+ * belt rather than a real limit.
+ */
+const MAX_COMMENT_NOTIFY_FANOUT = 50;
+
 // ── Subject ─────────────────────────────────────────────────────────────────
 
 /**
@@ -812,6 +819,7 @@ export async function handlePostComment(
   req: Request,
   env: CommentsEnv,
   ctx?: ExecutionContext,
+  notify?: CommentNotifier,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -940,7 +948,64 @@ export async function handlePostComment(
   if (count) statements.push(count);
   await env.DB.batch(statements);
 
+  // ⚠️ **Only on a NEW comment.** Editing is allowed forever, so notifying on every
+  // write would let one person re-notify all their friends by retyping a word — and
+  // "Alex commented" arriving twice about the same comment is indistinguishable from
+  // Alex commenting twice.
+  if (!existing) {
+    ctx?.waitUntil(notifyFriendsOfComment(env, session.userId, id, subject, notify));
+  }
+
   return json({ id: existing?.id ?? id, createdAt: existing?.created_at ?? now, updatedAt: now });
+}
+
+/**
+ * Tell the author's friends that they commented.
+ *
+ * Fan-out on **write** here, unlike the feed, and that asymmetry is deliberate: a
+ * notification has to be *pushed* to be a notification, so there is no read-side
+ * equivalent. It stays affordable because it is bounded by friend count (tens) and
+ * fires once per comment rather than once per view.
+ *
+ * **Every accepted friend is notified regardless of visibility.** A friends-only
+ * comment is readable by exactly this set, and a public one is readable by more —
+ * so there is no visibility under which a friend may not open what they were told
+ * about. Blocking needs no separate check either: `handleBlock` deletes the
+ * friendship row, so a blocked user simply stops appearing in `accepted`.
+ *
+ * The display name rides the payload because the client cannot render "Alex
+ * commented" from an opaque user id, and making each recipient look it up would
+ * turn one push into one Worker request per friend.
+ */
+async function notifyFriendsOfComment(
+  env: CommentsEnv,
+  authorId: string,
+  commentId: string,
+  subject: Subject,
+  notify?: CommentNotifier,
+): Promise<void> {
+  if (!notify) return;
+
+  const { accepted } = await loadFriendships(env as any, authorId);
+  if (accepted.length === 0) return;
+
+  const profile = await env.DB.prepare("SELECT display_name FROM profiles WHERE user_id = ?")
+    .bind(authorId)
+    .first<{ display_name: string | null }>();
+
+  const data = {
+    kind: "friend_comment",
+    commentId,
+    authorId,
+    authorName: profile?.display_name ?? "",
+    tmdbId: String(subject.tmdbId),
+    mediaType: subject.mediaType,
+    season: String(subject.season),
+    episode: String(subject.episode),
+  };
+  // Bounded so one account with an enormous friend list cannot turn a single
+  // comment into an unbounded fan-out inside one request.
+  for (const friendId of accepted.slice(0, MAX_COMMENT_NOTIFY_FANOUT)) notify(friendId, data);
 }
 
 /**

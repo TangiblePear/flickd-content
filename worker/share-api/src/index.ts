@@ -434,7 +434,14 @@ export default {
         : handleGetComments(req, env, subject, ctx);
     }
 
-    if (p === "/api/comments" && req.method === "POST") return handlePostComment(req, env, ctx);
+    // One notifier for both comment paths. The collapse key is derived from the
+    // KIND as well as the comment, so a "friend commented" notification and a
+    // "people reacted" one about the same comment replace their own predecessors
+    // rather than each other.
+    const notifyComment = (userId: string, data: Record<string, string>) =>
+      ctx.waitUntil(notifyAccount(env, userId, data, `${data.kind}:${data.commentId}`));
+
+    if (p === "/api/comments" && req.method === "POST") return handlePostComment(req, env, ctx, notifyComment);
 
     const commentTarget = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})$/);
     if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
@@ -444,9 +451,7 @@ export default {
       // The collapse key is the COMMENT, not the event: a later "12 people reacted"
       // must replace the earlier "8 people reacted" in the tray rather than sit
       // beside it saying a different number about the same thing.
-      return handleReactToComment(commentReaction[1], req, env, ctx, (userId, data) =>
-        ctx.waitUntil(notifyAccount(env, userId, data, `comment:${data.commentId}`)),
-      );
+      return handleReactToComment(commentReaction[1], req, env, ctx, notifyComment);
     }
 
     const commentReport = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/report$/);
@@ -459,9 +464,9 @@ export default {
     // Comment moderation, proxied here by the admin panel rather than reading D1
     // itself: `n_public` moves with `hidden_at`, and that invariant has exactly one
     // implementation. Authorized by a shared key, never a user session.
-    if (p === "/api/admin/comment-reports" && req.method === "GET") return handleAdminCommentReports(req, env);
+    if (p === "/api/moderation/comment-reports" && req.method === "GET") return handleAdminCommentReports(req, env);
 
-    const adminComment = p.match(/^\/api\/admin\/comments\/([0-9A-Z:]{8,80})\/([a-z]+)$/);
+    const adminComment = p.match(/^\/api\/moderation\/comments\/([0-9A-Z:]{8,80})\/([a-z]+)$/);
     if (adminComment && req.method === "POST") {
       return handleAdminCommentAction(adminComment[1], adminComment[2], req, env);
     }
