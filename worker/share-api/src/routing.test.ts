@@ -115,6 +115,8 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/titles/movie/603/comments/friends"],
   ["POST", "/api/comments", { id: "AAAAAAAA", tmdbId: 603, mediaType: "movie", body: "hi" }],
   ["DELETE", "/api/comments/AAAAAAAA"],
+  ["POST", "/api/comments/AAAAAAAA/reaction", { emoji: "🔥" }],
+  ["DELETE", "/api/comments/AAAAAAAA/reaction"],
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],
@@ -157,6 +159,7 @@ describe("route wiring", () => {
       ["GET", "/api/titles/movie/603/comments/friends"],
       ["POST", "/api/comments"],
       ["DELETE", "/api/comments/AAAAAAAA"],
+      ["POST", "/api/comments/AAAAAAAA/reaction"],
     ];
     for (const [method, path] of authed) {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);

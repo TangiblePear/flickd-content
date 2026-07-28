@@ -67,6 +67,7 @@ import {
   handleGetComments,
   handleGetFriendComments,
   handlePostComment,
+  handleReactToComment,
   parseSubject,
 } from "./comments";
 import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
@@ -421,6 +422,11 @@ export default {
 
     const commentTarget = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})$/);
     if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
+
+    const commentReaction = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/reaction$/);
+    if (commentReaction && (req.method === "POST" || req.method === "DELETE")) {
+      return handleReactToComment(commentReaction[1], req, env, ctx);
+    }
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

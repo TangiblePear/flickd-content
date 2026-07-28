@@ -12,6 +12,7 @@ import {
   handleGetComments,
   handleGetFriendComments,
   handlePostComment,
+  handleReactToComment,
   parseSubject,
   PAGE_LIMIT,
 } from "./comments";
@@ -116,6 +117,13 @@ class FakeStmt {
     if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at")) {
       return (this.db.comments.find((c) => c.id === a[0] && c.author_id === a[1]) as T) ?? null;
     }
+    if (s.startsWith("SELECT id, author_id, visibility, hidden_at, deleted_at FROM comments")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    if (s.startsWith("SELECT emoji FROM comment_reactions")) {
+      const r = this.db.comment_reactions.find((x) => x.comment_id === a[0] && x.user_id === a[1]);
+      return r ? ({ emoji: r.emoji } as T) : null;
+    }
     throw new Error(`FakeD1: unhandled first() ${s}`);
   }
 
@@ -140,6 +148,10 @@ class FakeStmt {
         .slice(0, PAGE_LIMIT)
         .map((c) => ({ ...c, ...(this.db.profiles.find((p) => p.user_id === c.author_id) ?? {}) }));
       return { results: rows as T[] };
+    }
+    if (s.startsWith("SELECT comment_id, emoji, n FROM comment_reaction_counts")) {
+      const ids = new Set(a);
+      return { results: this.db.comment_reaction_counts.filter((r) => ids.has(r.comment_id) && r.n > 0) as T[] };
     }
     if (s.startsWith("SELECT r.comment_id, r.emoji")) {
       const ids = new Set(this.db.comments.filter(this.onSubject(a.slice(1))).map((c) => c.id));
@@ -178,6 +190,29 @@ class FakeStmt {
       const r = this.db.comments.find((c) => c.id === a[2] && c.author_id === a[3]);
       if (r) Object.assign(r, { deleted_at: a[0], updated_at: a[1] });
       return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("INSERT INTO comment_reactions")) {
+      const found = this.db.comment_reactions.find((r) => r.comment_id === a[0] && r.user_id === a[1]);
+      if (found) Object.assign(found, { emoji: a[2], created_at: a[3] });
+      else this.db.comment_reactions.push({ comment_id: a[0], user_id: a[1], emoji: a[2], created_at: a[3] });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("INSERT INTO comment_reaction_counts")) {
+      const row = this.db.comment_reaction_counts.find((r) => r.comment_id === a[0] && r.emoji === a[1]);
+      if (row) row.n += 1;
+      else this.db.comment_reaction_counts.push({ comment_id: a[0], emoji: a[1], n: 1 });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE comment_reaction_counts SET n = MAX(n - 1, 0)")) {
+      const row = this.db.comment_reaction_counts.find((r) => r.comment_id === a[0] && r.emoji === a[1]);
+      if (row) row.n = Math.max(row.n - 1, 0);
+      return { success: true, meta: { changes: row ? 1 : 0 } };
+    }
+    if (s.startsWith("DELETE FROM comment_reactions WHERE comment_id = ? AND user_id")) {
+      this.db.comment_reactions = this.db.comment_reactions.filter(
+        (r) => !(r.comment_id === a[0] && r.user_id === a[1]),
+      );
+      return { success: true, meta: { changes: 1 } };
     }
     if (s.startsWith("DELETE FROM comment_reactions")) {
       this.db.comment_reactions = this.db.comment_reactions.filter((r) => r.comment_id !== a[0]);
@@ -414,6 +449,83 @@ describe("writing", () => {
     seed(e.DB, { id: "C1", author_id: A, hidden_at: 123 });
     await handlePostComment(post("/api/comments", body({ body: "rewritten" }), "tok-a"), e, ctx);
     expect(e.DB.comments[0].hidden_at).toBe(123);
+  });
+});
+
+describe("reacting", () => {
+  const react = (e: any, id: string, emoji: string, token: string) =>
+    handleReactToComment(id, post(`/api/comments/${id}/reaction`, { emoji }, token), e, ctx);
+  const unreact = (e: any, id: string, token: string) =>
+    handleReactToComment(
+      id,
+      new Request(`https://flickto.app/api/comments/${id}/reaction`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      }),
+      e,
+      ctx,
+    );
+  const countOf = (e: any, emoji: string) =>
+    e.DB.comment_reaction_counts.find((r: any) => r.emoji === emoji)?.n ?? 0;
+
+  it("records the reaction and its count together", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    expect((await react(e, "C1", "🔥", "tok-a")).status).toBe(204);
+    expect(e.DB.comment_reactions).toHaveLength(1);
+    expect(e.DB.comment_reaction_counts).toEqual([{ comment_id: "C1", emoji: "🔥", n: 1 }]);
+  });
+
+  it("moves the count when the reaction CHANGES, rather than adding a second row", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    await react(e, "C1", "🔥", "tok-a");
+    await react(e, "C1", "😂", "tok-a");
+    expect(e.DB.comment_reactions).toHaveLength(1);
+    expect(countOf(e, "🔥")).toBe(0);
+    expect(countOf(e, "😂")).toBe(1);
+  });
+
+  it("is idempotent on a re-tap of the same emoji", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    await react(e, "C1", "🔥", "tok-a");
+    await react(e, "C1", "🔥", "tok-a");
+    expect(countOf(e, "🔥")).toBe(1);
+  });
+
+  it("removes the reaction and decrements on DELETE", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    await react(e, "C1", "🔥", "tok-a");
+    expect((await unreact(e, "C1", "tok-a")).status).toBe(204);
+    expect(e.DB.comment_reactions).toEqual([]);
+    expect(countOf(e, "🔥")).toBe(0);
+  });
+
+  it("rejects an emoji outside the fixed six", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    // 💩 in particular: a picker creates a reaction-moderation surface that the
+    // fixed set simply does not have.
+    expect((await react(e, "C1", "💩", "tok-a")).status).toBe(400);
+  });
+
+  it("answers 404 for a friends-only comment by a stranger, exactly as for a missing one", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: C, visibility: "friends" });
+    expect((await react(e, "C1", "🔥", "tok-a")).status).toBe(404);
+    expect((await react(e, "NOPE0000", "🔥", "tok-a")).status).toBe(404);
+  });
+
+  it("surfaces counts on the public list without revealing who reacted", async () => {
+    const e = env();
+    seed(e.DB, { id: "C1" });
+    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "❤️", n: 3 });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const [c] = (await res.json()).comments;
+    expect(c.reactions).toEqual({ "❤️": 3 });
+    expect(c).not.toHaveProperty("reactors");
   });
 });
 

@@ -52,6 +52,7 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
     headers: { "Content-Type": "application/json", ...CORS, ...headers },
   });
 const noContent = () => new Response(null, { status: 204, headers: CORS });
+const notFound = () => json({ error: "not_found" }, 404);
 
 const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 /** Author-minted comment id. Same alphabet as `users.id`; length is the client's business. */
@@ -80,6 +81,22 @@ export const PUBLIC_CACHE_SECONDS = 60;
 
 const MEDIA_KINDS = new Set(["gif", "image"]);
 const MEDIA_PROVIDERS = new Set(["giphy", "r2"]);
+
+/**
+ * The six. Fixed, not a picker.
+ *
+ * No 😡 deliberately: it is a known amplifier of hostile engagement (Facebook's
+ * own finding) and has no constructive use on a comment about an episode. 😮
+ * earns its place in a TV app specifically — twists, deaths, cliffhangers.
+ *
+ * ⚠️ This set may be **grown** safely; shrinking it strands existing rows in
+ * `comment_reactions`, which then have to be rendered anyway or migrated. Adding
+ * is free, removing is not — and the same asymmetry runs the other way for the
+ * fixed-set decision itself: fixed → picker later is additive, picker → fixed
+ * discards reactions people actually made.
+ */
+export const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+const REACTIONS = new Set(REACTION_EMOJI);
 
 // ── Subject ─────────────────────────────────────────────────────────────────
 
@@ -161,9 +178,15 @@ export interface CommentRow {
  *
  * `edited` rather than exposing `updated_at` on its own: the UI shows a marker,
  * and the raw timestamp invites a client to sort by it and reorder the list.
+ *
+ * `reactions` is **counts only** — there is no "who reacted" list, which would
+ * cost a per-tap query plus display-name resolution for every reactor. The
+ * caller's own reaction is the one reader-specific bit, and it rides
+ * `myReactions` on the authenticated path instead.
  */
-function toWire(r: CommentRow) {
+function toWire(r: CommentRow, reactions: Record<string, number> = {}) {
   return {
+    reactions,
     id: r.id,
     authorId: r.author_id,
     authorName: r.display_name ?? null,
@@ -207,6 +230,35 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
  * matching the list.
  */
 const RENDERABLE = `c.hidden_at IS NULL AND c.deleted_at IS NULL AND (c.body <> '' OR c.media_id IS NOT NULL)`;
+
+// ── Reaction counts ─────────────────────────────────────────────────────────
+
+/**
+ * Reaction counts for a page of comments — one extra query per page, not per
+ * comment, and reader-independent so it caches with the public list.
+ *
+ * Rows with `n = 0` are skipped rather than deleted when a reaction is removed:
+ * deleting would need a second statement in the batch to establish that the row
+ * hit zero, and an emoji at zero is indistinguishable from an absent one here.
+ */
+export async function loadReactionCounts(
+  env: CommentsEnv,
+  ids: string[],
+): Promise<Record<string, Record<string, number>>> {
+  const out: Record<string, Record<string, number>> = {};
+  if (ids.length === 0) return out;
+  const placeholders = ids.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT comment_id, emoji, n FROM comment_reaction_counts WHERE comment_id IN (${placeholders}) AND n > 0`,
+  )
+    .bind(...ids)
+    .all<{ comment_id: string; emoji: string; n: number }>();
+
+  for (const r of results ?? []) {
+    (out[r.comment_id] ??= {})[r.emoji] = r.n;
+  }
+  return out;
+}
 
 // ── Path 1: the public list (unauthenticated, edge-cached) ──────────────────
 
@@ -308,8 +360,9 @@ export async function handleGetComments(req: Request, env: CommentsEnv, s: Subje
   if (hit) return hit;
 
   const rows = await loadPublicComments(env, s, lang, cursor);
+  const counts = await loadReactionCounts(env, rows.map((r) => r.id));
   const res = json({
-    comments: rows.map(toWire),
+    comments: rows.map((r) => toWire(r, counts[r.id])),
     otherLanguages: await otherLanguageCount(env, s, lang),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
@@ -374,8 +427,9 @@ export async function handleGetFriendComments(
     .all<CommentRow>();
 
   const rows = results ?? [];
+  const counts = await loadReactionCounts(env, rows.map((r) => r.id));
   return json({
-    comments: rows.map(toWire),
+    comments: rows.map((r) => toWire(r, counts[r.id])),
     myReactions: await loadMyReactions(env, s, session.userId),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
@@ -685,6 +739,95 @@ export async function handleDeleteComment(
   ];
   const count = countStatement(env, subject, countable(row) ? -1 : 0);
   if (count) statements.push(count);
+  await env.DB.batch(statements);
+  return noContent();
+}
+
+// ── Reacting ────────────────────────────────────────────────────────────────
+
+/**
+ * `POST /api/comments/{id}/reaction` `{ emoji }` — set or change the caller's
+ * reaction. `DELETE` on the same path removes it.
+ *
+ * One reaction per user per comment, changeable, which is why the PK is
+ * `(comment_id, user_id)` and a change is a decrement plus an increment rather
+ * than a second row.
+ *
+ * **Counts move by atomic upsert, never a JSON blob.** `ON CONFLICT DO UPDATE SET
+ * n = n + 1` is atomic; a `reactions_json` column on `comments` would be a
+ * read-modify-write and WILL lose reactions under concurrency.
+ *
+ * You may only react to a comment you may read — otherwise reacting becomes an
+ * oracle for the existence and id of friends-only comments.
+ */
+export async function handleReactToComment(
+  id: string,
+  req: Request,
+  env: CommentsEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  const removing = req.method === "DELETE";
+  let emoji = "";
+  if (!removing) {
+    let payload: Record<string, unknown>;
+    try {
+      payload = (await req.json()) as Record<string, unknown>;
+    } catch {
+      return json({ error: "invalid_json" }, 400);
+    }
+    emoji = typeof payload.emoji === "string" ? payload.emoji : "";
+    if (!REACTIONS.has(emoji)) return json({ error: "invalid_payload" }, 400);
+  }
+
+  const comment = await env.DB.prepare(
+    "SELECT id, author_id, visibility, hidden_at, deleted_at FROM comments WHERE id = ?",
+  )
+    .bind(id)
+    .first<CommentRow>();
+  // Identical answer for "does not exist" and "you may not see it": any other
+  // behaviour makes this endpoint a probe for which comments exist.
+  if (!comment || !(await mayReadComment(env, session.userId, comment))) return notFound();
+
+  const mine = await env.DB.prepare("SELECT emoji FROM comment_reactions WHERE comment_id = ? AND user_id = ?")
+    .bind(id, session.userId)
+    .first<{ emoji: string }>();
+  if (mine?.emoji === emoji) return noContent(); // idempotent re-tap
+
+  const statements: D1PreparedStatement[] = [];
+  // The old count comes down first. Doing it after the insert would be fine
+  // inside a transaction, but reading it in this order keeps the no-change case
+  // (handled above) from ever emitting a statement pair that nets to zero.
+  if (mine) {
+    statements.push(
+      env.DB
+        .prepare("UPDATE comment_reaction_counts SET n = MAX(n - 1, 0) WHERE comment_id = ? AND emoji = ?")
+        .bind(id, mine.emoji),
+    );
+  }
+  if (removing) {
+    statements.push(
+      env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ?").bind(id, session.userId),
+    );
+  } else {
+    statements.push(
+      env.DB
+        .prepare(
+          `INSERT INTO comment_reactions (comment_id, user_id, emoji, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(comment_id, user_id) DO UPDATE SET emoji = excluded.emoji, created_at = excluded.created_at`,
+        )
+        .bind(id, session.userId, emoji, Date.now()),
+      env.DB
+        .prepare(
+          `INSERT INTO comment_reaction_counts (comment_id, emoji, n) VALUES (?, ?, 1)
+           ON CONFLICT(comment_id, emoji) DO UPDATE SET n = n + 1`,
+        )
+        .bind(id, emoji),
+    );
+  }
   await env.DB.batch(statements);
   return noContent();
 }
