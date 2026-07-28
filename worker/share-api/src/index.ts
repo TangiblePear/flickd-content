@@ -436,15 +436,15 @@ export default {
 
     if (p === "/api/comments" && req.method === "POST") return handlePostComment(req, env, ctx);
 
-    const commentTarget = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})$/);
+    const commentTarget = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})$/);
     if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
 
-    const commentReaction = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/reaction$/);
+    const commentReaction = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/reaction$/);
     if (commentReaction && (req.method === "POST" || req.method === "DELETE")) {
       return handleReactToComment(commentReaction[1], req, env, ctx);
     }
 
-    const commentReport = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/report$/);
+    const commentReport = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/report$/);
     if (commentReport && req.method === "POST") return handleReportComment(commentReport[1], req, env, ctx);
 
     // ── GIF picker, proxied so the key never ships in the APK ──
@@ -456,7 +456,7 @@ export default {
     // implementation. Authorized by a shared key, never a user session.
     if (p === "/api/admin/comment-reports" && req.method === "GET") return handleAdminCommentReports(req, env);
 
-    const adminComment = p.match(/^\/api\/admin\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/([a-z]+)$/);
+    const adminComment = p.match(/^\/api\/admin\/comments\/([0-9A-Z:]{8,80})\/([a-z]+)$/);
     if (adminComment && req.method === "POST") {
       return handleAdminCommentAction(adminComment[1], adminComment[2], req, env);
     }

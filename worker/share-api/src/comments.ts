@@ -62,8 +62,17 @@ const noContent = () => new Response(null, { status: 204, headers: CORS });
 const notFound = () => json({ error: "not_found" }, 404);
 
 const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
-/** Author-minted comment id. Same alphabet as `users.id`; length is the client's business. */
-const COMMENT_ID_RE = /^[0-9A-HJKMNP-TV-Z:]{8,80}$/;
+/**
+ * Author-minted comment id.
+ *
+ * ⚠️ **The full A-Z, not Crockford base32.** New ids are `{userId}:{subject}` and
+ * would fit the narrower alphabet, but the `social_opinions` migration reuses the
+ * existing `{friendId}:{tmdbId}` ids so a re-run and a second device are idempotent
+ * — and a **device friendId is `[A-Z0-9]{12,40}`**, which includes I, L, O and U.
+ * Crockford excludes exactly those four, so a narrower regex would 400 every
+ * migrated comment from any friendId containing one, silently, forever.
+ */
+const COMMENT_ID_RE = /^[0-9A-Z:]{8,80}$/;
 
 export const MAX_BODY = 500;
 const MAX_REACTION = 32;

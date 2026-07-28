@@ -582,6 +582,20 @@ describe("writing", () => {
     expect(e.DB.count(603, "movie")).toBe(1);
   });
 
+  it("⚠️ accepts a LEGACY friendId-shaped id, which Crockford base32 would reject", async () => {
+    const e = await withSessions(env());
+    // The social_opinions migration reuses `{friendId}:{tmdbId}` ids so a re-run
+    // and a second device are idempotent — and a device friendId is [A-Z0-9],
+    // which includes I, L, O and U. Crockford excludes exactly those four, so a
+    // narrower regex would 400 every migrated comment containing one, silently.
+    const res = await handlePostComment(
+      post("/api/comments", body({ id: "QUILLOU12345:603" }), "tok-a"),
+      e,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("refuses a comment with no text, no media and no reaction", async () => {
     const e = await withSessions(env());
     const res = await handlePostComment(post("/api/comments", body({ body: "  " }), "tok-a"), e, ctx);
