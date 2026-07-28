@@ -34,6 +34,9 @@ interface Env {
   // Firebase project **id** (not the project number) — a Firebase ID token's
   // `aud`. Absent → /api/auth/* reports not_configured.
   FIREBASE_PROJECT_ID?: string;
+  // Per-author hourly comment cap. Config rather than a constant so it tunes
+  // without a deploy, the same shape as RATE_LIMIT_PER_HOUR.
+  COMMENTS_PER_HOUR?: string;
   // Epoch ms after which the E2EE **inbox** stops being served. Unset ⇒ never, which
   // is the default and changes nothing. Scoped to the inbox: `freshness` and the
   // friends record ride the same relay and do NOT retire here.
@@ -59,6 +62,13 @@ import {
   handleMatchAccept,
   handleMatchRequest,
 } from "./match";
+import {
+  handleDeleteComment,
+  handleGetComments,
+  handleGetFriendComments,
+  handlePostComment,
+  parseSubject,
+} from "./comments";
 import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
@@ -393,6 +403,24 @@ export default {
       if (req.method === "POST") return handlePublishFeed(req, env, ctx);
       if (req.method === "DELETE") return handleClearFeed(req, env, ctx);
     }
+
+    // ── Comments (D1). Two read paths, deliberately not one query. ──
+    // Path 1 is unauthenticated and edge-cached; path 2 is authenticated and must
+    // NEVER be cached, because `caches.default` keys on URL and would hand one
+    // user's friends-only comments to the next reader of the same URL.
+    const commentsSubject = p.match(/^\/api\/titles\/([a-z]+)\/(\d+)\/comments(\/friends)?$/);
+    if (commentsSubject && req.method === "GET") {
+      const subject = parseSubject(commentsSubject[1], commentsSubject[2], url.searchParams);
+      if (!subject) return json({ error: "invalid_subject" }, { status: 400 });
+      return commentsSubject[3]
+        ? handleGetFriendComments(req, env, subject, ctx)
+        : handleGetComments(req, env, subject, ctx);
+    }
+
+    if (p === "/api/comments" && req.method === "POST") return handlePostComment(req, env, ctx);
+
+    const commentTarget = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})$/);
+    if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

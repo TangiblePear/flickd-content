@@ -108,6 +108,13 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", "/api/match/request", { targetId: USER_ID, sealed: "s", keyset: "k" }],
   ["POST", "/api/match/AAAAAAAA/accept", { sealed: "s" }],
   ["DELETE", "/api/match/AAAAAAAA"],
+  // Comments — both read paths, plus the write pair whose bare/wildcard split is
+  // the pattern trap this file exists to backstop.
+  ["GET", "/api/titles/movie/603/comments"],
+  ["GET", "/api/titles/show/1399/comments?season=2&episode=5"],
+  ["GET", "/api/titles/movie/603/comments/friends"],
+  ["POST", "/api/comments", { id: "AAAAAAAA", tmdbId: 603, mediaType: "movie", body: "hi" }],
+  ["DELETE", "/api/comments/AAAAAAAA"],
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],
@@ -145,6 +152,11 @@ describe("route wiring", () => {
       ["GET", "/api/lists/shared"],
       ["GET", "/api/match"],
       ["POST", "/api/sync"],
+      // The comment write paths. The PUBLIC comment list is deliberately absent:
+      // it answers 200 unauthenticated, which is the whole point of it.
+      ["GET", "/api/titles/movie/603/comments/friends"],
+      ["POST", "/api/comments"],
+      ["DELETE", "/api/comments/AAAAAAAA"],
     ];
     for (const [method, path] of authed) {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);

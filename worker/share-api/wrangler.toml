@@ -64,7 +64,22 @@ routes = [
   # so the list endpoint would fall through to the static site and answer 405 while
   # every test and the dry-run stayed green. Same trap as `/api/friends` above.
   { pattern = "flickto.app/api/match", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/match/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/match/*", zone_name = "flickto.app" },
+  # Comments (src/comments.ts). `/api/titles/*` covers both read paths — the public
+  # list and the `/friends` slice — because every comment URL has a `{type}/{id}`
+  # segment after `/api/titles`, so there is no bare path to miss here. The
+  # trailing `*` still matters for a different reason: routes match the FULL URL
+  # including the query string, and every comment read carries `?season=…&lang=…`.
+  #
+  # `/api/comments` needs BOTH forms. The bare pattern answers the POST; the
+  # wildcard answers `DELETE /api/comments/{id}`. `/api/comments/*` does NOT match
+  # `/api/comments`, which is the trap that has now bitten five times — and both
+  # `wrangler deploy --dry-run` and the whole vitest suite stay green while the
+  # route 404s to the static site. src/routing.test.ts is the thing that catches
+  # the handler half; only a live curl catches the pattern half.
+  { pattern = "flickto.app/api/titles/*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/comments", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/comments/*", zone_name = "flickto.app" }
 ]
 
 
@@ -134,6 +149,10 @@ REAP_INTERVAL_SECONDS = "86400"
 REPORT_TTL_SECONDS = "31536000"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
+# Per-author hourly cap on NEW comments (edits are free — charging for a typo fix
+# would cost the same as a new comment). The real anti-spam control is one comment
+# per user per subject; this is the belt.
+COMMENTS_PER_HOUR = "30"
 # Image moderation. Set to "true" and add the VISION_API_KEY secret to enable the
 # paid Cloud Vision SafeSearch scan (wrangler secret put VISION_API_KEY).
 MODERATION_ENABLED = "true"

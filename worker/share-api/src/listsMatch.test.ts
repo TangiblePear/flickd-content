@@ -48,6 +48,7 @@ class FakeD1 {
   match_requests: any[] = [];
   match_payloads: any[] = [];
   feed_events: any[] = [];
+  comments: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -242,6 +243,14 @@ class FakeStmt {
     // behaviour under test, but the batch runs as one unit so they must not throw.
     for (const [prefix, table, col] of [
       ["DELETE FROM feed_events", "feed_events", "author_id"],
+      // Comments and the three tables hanging off them, plus the two counter
+      // corrections that ride the same batch.
+      ["UPDATE comment_reaction_counts", "comment_reaction_counts", null],
+      ["DELETE FROM comment_reactions", "comment_reactions", null],
+      ["DELETE FROM comment_reaction_counts", "comment_reaction_counts", null],
+      ["DELETE FROM comment_translations", "comment_translations", null],
+      ["UPDATE comment_counts", "comment_counts", null],
+      ["DELETE FROM comments WHERE author_id", "comments", "author_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],
@@ -665,6 +674,10 @@ describe("account erasure reaches these tables", () => {
     // Activity feed events, which were missing from the batch for a different reason:
     // they predate this branch entirely and nobody had noticed.
     env.DB.feed_events.push({ id: "e1", author_id: A }, { id: "e2", author_id: B });
+    // Comments, added in 0003 and therefore the newest way this batch could have a
+    // hole in it. `comments` is the parent of three other tables, so a gap here is
+    // not one table's worth of data — it strands the reactions and translations too.
+    env.DB.comments.push({ id: "c1", author_id: A }, { id: "c2", author_id: B });
     expect(env.DB.shared_lists.length).toBe(2);
     expect(env.DB.match_payloads.length).toBe(2);
 
@@ -685,6 +698,7 @@ describe("account erasure reaches these tables", () => {
     expect(env.DB.match_payloads.length).toBe(0);
     // Only the deleted account's events — B's feed is none of A's business.
     expect(env.DB.feed_events.map((e: any) => e.author_id)).toEqual([B]);
+    expect(env.DB.comments.map((c: any) => c.author_id)).toEqual([B]);
   });
 });
 

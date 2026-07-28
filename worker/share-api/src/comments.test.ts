@@ -1,0 +1,449 @@
+// Comments in D1 — the surface that retires E2EE `social_opinions`.
+//
+// The properties pinned here are the ones that are silently wrong rather than
+// visibly broken: the renderable predicate (a media-only comment has an empty
+// body and must still count), the counter delta on a visibility change, the
+// safe-direction visibility parse, and the rule that an edit keeps the existing
+// row's id so reactions are not orphaned.
+
+import { describe, it, expect } from "vitest";
+import {
+  handleDeleteComment,
+  handleGetComments,
+  handleGetFriendComments,
+  handlePostComment,
+  parseSubject,
+  PAGE_LIMIT,
+} from "./comments";
+
+const A = "AAAAH73X7P55T48R4CFHDED9CW";
+const B = "BBBBJ84Y8Q66V59S5DGJEFEAX0";
+const C = "CCCCK95Z9R77W60T6EHKFGFBY1";
+const TOKENS: Record<string, string> = { "tok-a": A, "tok-b": B, "tok-c": C };
+
+const MOVIE = { tmdbId: 603, mediaType: "movie" as const, season: -1, episode: -1 };
+
+/**
+ * Hand-rolled D1 stand-in, the shape `listsMatch.test.ts` established: every SQL
+ * prefix the handlers issue gets an explicit branch, and anything unrecognised
+ * throws. A fake that quietly answers "no rows" turns a broken query into a
+ * passing test.
+ */
+class FakeD1 {
+  comments: any[] = [];
+  comment_counts: any[] = [];
+  comment_reactions: any[] = [];
+  comment_reaction_counts: any[] = [];
+  friendships: any[] = [];
+  blocks: any[] = [];
+  profiles: any[] = [];
+  sessions = new Map<string, string>();
+  prepare(sql: string) {
+    return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
+  }
+  async batch(stmts: FakeStmt[]) {
+    const out = [];
+    for (const s of stmts) out.push(await s.run());
+    return out;
+  }
+  count(tmdbId: number, mediaType: string, season = -1, episode = -1) {
+    return (
+      this.comment_counts.find(
+        (c) => c.tmdb_id === tmdbId && c.media_type === mediaType && c.season === season && c.episode === episode,
+      )?.n_public ?? 0
+    );
+  }
+}
+
+class FakeStmt {
+  private args: any[] = [];
+  constructor(
+    private db: FakeD1,
+    private sql: string,
+  ) {}
+  bind(...args: unknown[]) {
+    this.args = args as any[];
+    return this;
+  }
+
+  /** Subject predicate shared by every comment query; binds are always [tmdb, type, season, episode]. */
+  private onSubject(a: any[]) {
+    return (c: any) => c.tmdb_id === a[0] && c.media_type === a[1] && c.season === a[2] && c.episode === a[3];
+  }
+
+  private renderable(c: any) {
+    return c.hidden_at == null && c.deleted_at == null && (c.body !== "" || c.media_id != null);
+  }
+
+  async first<T>(): Promise<T | null> {
+    const s = this.sql;
+    const a = this.args;
+    if (s.startsWith("SELECT user_id, expires_at, revoked_at FROM sessions")) {
+      const u = this.db.sessions.get(a[0]);
+      return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
+    }
+    if (s.startsWith("SELECT 1 AS hit FROM blocks")) {
+      const hit = this.db.blocks.some(
+        (b) => (b.blocker_id === a[0] && b.blocked_id === a[1]) || (b.blocker_id === a[2] && b.blocked_id === a[3]),
+      );
+      return hit ? ({ hit: 1 } as T) : null;
+    }
+    if (s.startsWith("SELECT state FROM friendships")) {
+      const r = this.db.friendships.find((f) => f.user_a === a[0] && f.user_b === a[1] && f.state === "accepted");
+      return r ? ({ state: r.state } as T) : null;
+    }
+    if (s.startsWith("SELECT COUNT(*) AS n FROM comments WHERE author_id")) {
+      return { n: this.db.comments.filter((c) => c.author_id === a[0] && c.created_at > a[1]).length } as T;
+    }
+    if (s.startsWith("SELECT COUNT(*) AS n FROM ( SELECT 1 FROM comments")) {
+      const n = this.db.comments.filter(
+        (c) =>
+          this.onSubject(a)(c) &&
+          c.visibility === "public" &&
+          this.renderable(c) &&
+          c.lang != null &&
+          c.lang !== a[4],
+      ).length;
+      return { n } as T;
+    }
+    if (s.startsWith("SELECT id, visibility, hidden_at, deleted_at, body, media_id, created_at FROM comments")) {
+      const r = this.db.comments.find(
+        (c) =>
+          c.author_id === a[0] && c.tmdb_id === a[1] && c.media_type === a[2] && c.season === a[3] && c.episode === a[4],
+      );
+      return (r as T) ?? null;
+    }
+    if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at")) {
+      return (this.db.comments.find((c) => c.id === a[0] && c.author_id === a[1]) as T) ?? null;
+    }
+    throw new Error(`FakeD1: unhandled first() ${s}`);
+  }
+
+  async all<T>(): Promise<{ results: T[] }> {
+    const s = this.sql;
+    const a = this.args;
+    if (s.startsWith("SELECT user_a, user_b, state, requested_by, updated_at FROM friendships")) {
+      return { results: this.db.friendships.filter((f) => f.user_a === a[0] || f.user_b === a[1]) as T[] };
+    }
+    if (s.startsWith("SELECT c.id, c.tmdb_id, c.media_type")) {
+      const isPublic = s.includes("c.visibility = 'public'");
+      const cursor = isPublic ? a[4] : a[a.length - 2];
+      const authors = isPublic ? null : new Set(a.slice(4, a.length - 2));
+      const lang = isPublic && a.length > 6 ? a[5] : null;
+      const rows = this.db.comments
+        .filter(this.onSubject(a))
+        .filter((c) => c.visibility === (isPublic ? "public" : "friends"))
+        .filter((c) => (authors ? authors.has(c.author_id) : true))
+        .filter((c) => c.created_at < cursor && this.renderable(c))
+        .filter((c) => (lang ? c.lang == null || c.lang === lang : true))
+        .sort((x, y) => y.created_at - x.created_at)
+        .slice(0, PAGE_LIMIT)
+        .map((c) => ({ ...c, ...(this.db.profiles.find((p) => p.user_id === c.author_id) ?? {}) }));
+      return { results: rows as T[] };
+    }
+    if (s.startsWith("SELECT r.comment_id, r.emoji")) {
+      const ids = new Set(this.db.comments.filter(this.onSubject(a.slice(1))).map((c) => c.id));
+      return {
+        results: this.db.comment_reactions.filter((r) => r.user_id === a[0] && ids.has(r.comment_id)) as T[],
+      };
+    }
+    throw new Error(`FakeD1: unhandled all() ${s}`);
+  }
+
+  async run() {
+    const s = this.sql;
+    const a = this.args;
+    if (s.startsWith("INSERT INTO comments")) {
+      this.db.comments.push({
+        id: a[0], tmdb_id: a[1], media_type: a[2], season: a[3], episode: a[4], author_id: a[5],
+        body: a[6], reaction: a[7], visibility: a[8], spoiler: a[9], lang: a[10],
+        media_kind: a[11], media_provider: a[12], media_id: a[13], media_url: a[14],
+        media_w: a[15], media_h: a[16], hidden_at: null, deleted_at: null,
+        created_at: a[17], updated_at: a[18],
+      });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE comments SET body =")) {
+      const r = this.db.comments.find((c) => c.id === a[12] && c.author_id === a[13]);
+      if (r) {
+        Object.assign(r, {
+          body: a[0], reaction: a[1], visibility: a[2], spoiler: a[3], lang: a[4],
+          media_kind: a[5], media_provider: a[6], media_id: a[7], media_url: a[8],
+          media_w: a[9], media_h: a[10], deleted_at: null, updated_at: a[11],
+        });
+      }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE comments SET deleted_at")) {
+      const r = this.db.comments.find((c) => c.id === a[2] && c.author_id === a[3]);
+      if (r) Object.assign(r, { deleted_at: a[0], updated_at: a[1] });
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("DELETE FROM comment_reactions")) {
+      this.db.comment_reactions = this.db.comment_reactions.filter((r) => r.comment_id !== a[0]);
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM comment_reaction_counts")) {
+      this.db.comment_reaction_counts = this.db.comment_reaction_counts.filter((r) => r.comment_id !== a[0]);
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("INSERT INTO comment_counts")) {
+      const row = this.db.comment_counts.find(
+        (c) => c.tmdb_id === a[0] && c.media_type === a[1] && c.season === a[2] && c.episode === a[3],
+      );
+      if (row) row.n_public += a[5];
+      else this.db.comment_counts.push({ tmdb_id: a[0], media_type: a[1], season: a[2], episode: a[3], n_public: a[4] });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE comment_counts SET n_public")) {
+      const row = this.db.comment_counts.find(
+        (c) => c.tmdb_id === a[1] && c.media_type === a[2] && c.season === a[3] && c.episode === a[4],
+      );
+      if (row) row.n_public = Math.max(row.n_public + a[0], 0);
+      return { success: true, meta: { changes: row ? 1 : 0 } };
+    }
+    throw new Error(`FakeD1: unhandled run() ${s}`);
+  }
+}
+
+const ctx = { waitUntil: () => {} } as any;
+
+function env() {
+  const db = new FakeD1();
+  for (const [tok, uid] of Object.entries(TOKENS)) db.sessions.set(tok, uid);
+  return { DB: db, FIREBASE_PROJECT_ID: "flickto-cf7b6" } as any;
+}
+
+/** The session cache hashes the token, so the fake keys on the hash the same way. */
+async function withSessions(e: any) {
+  const enc = new TextEncoder();
+  for (const [tok, uid] of Object.entries(TOKENS)) {
+    const digest = await crypto.subtle.digest("SHA-256", enc.encode(tok));
+    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    e.DB.sessions.set(hex, uid);
+  }
+  return e;
+}
+
+const get = (path: string, token?: string) =>
+  new Request(`https://flickto.app${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+
+const post = (path: string, body: unknown, token?: string) =>
+  new Request(`https://flickto.app${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: JSON.stringify(body),
+  });
+
+function seed(db: FakeD1, over: Partial<any> = {}) {
+  const now = Date.now();
+  const row = {
+    id: "C1", tmdb_id: 603, media_type: "movie", season: -1, episode: -1, author_id: A,
+    body: "hello", reaction: null, visibility: "public", spoiler: 0, lang: "en",
+    media_kind: null, media_provider: null, media_id: null, media_url: null,
+    media_w: null, media_h: null, hidden_at: null, deleted_at: null,
+    created_at: now, updated_at: now, ...over,
+  };
+  db.comments.push(row);
+  return row;
+}
+
+describe("subject parsing", () => {
+  it("defaults to the title level with -1 sentinels, never null", () => {
+    const s = parseSubject("movie", "603", new URLSearchParams());
+    expect(s).toEqual({ tmdbId: 603, mediaType: "movie", season: -1, episode: -1 });
+  });
+
+  it("takes an episode subject only when both season and episode are present", () => {
+    expect(parseSubject("show", "1399", new URLSearchParams("season=2&episode=5"))).toEqual({
+      tmdbId: 1399, mediaType: "show", season: 2, episode: 5,
+    });
+    // A season with no episode is not a subject — it falls back to title level
+    // rather than forking the counter into a row nothing ever reads.
+    expect(parseSubject("show", "1399", new URLSearchParams("season=2"))?.season).toBe(-1);
+  });
+
+  it("rejects an episode subject on a movie, and anything malformed", () => {
+    expect(parseSubject("movie", "603", new URLSearchParams("season=1&episode=1"))).toBeNull();
+    expect(parseSubject("person", "603", new URLSearchParams())).toBeNull();
+    expect(parseSubject("movie", "0", new URLSearchParams())).toBeNull();
+  });
+});
+
+describe("the public list", () => {
+  it("returns public comments to an unauthenticated reader", async () => {
+    const e = env();
+    seed(e.DB);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    expect(res.status).toBe(200);
+    expect((await res.json()).comments).toHaveLength(1);
+  });
+
+  it("carries Cache-Control, because a Worker response is never cached implicitly", async () => {
+    const e = env();
+    seed(e.DB);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=60");
+  });
+
+  it("never leaks a friends-only, hidden or deleted comment", async () => {
+    const e = env();
+    seed(e.DB, { id: "C1", visibility: "friends" });
+    seed(e.DB, { id: "C2", hidden_at: Date.now() });
+    seed(e.DB, { id: "C3", deleted_at: Date.now() });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    expect((await res.json()).comments).toEqual([]);
+  });
+
+  it("hides a reaction-only comment but SHOWS a media-only one", async () => {
+    const e = env();
+    // The media reaction lives as a column on `comments`, so "react without
+    // commenting" is a row with an empty body. It must not render as a comment.
+    seed(e.DB, { id: "C1", body: "", reaction: "loved" });
+    // …but `body <> ''` alone would then also hide a GIF-only comment, which is
+    // the trap: the predicate is `body <> '' OR media_id IS NOT NULL`.
+    seed(e.DB, { id: "C2", body: "", media_id: "gif123", media_kind: "gif", media_provider: "giphy", media_url: "u" });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const ids = (await res.json()).comments.map((c: any) => c.id);
+    expect(ids).toEqual(["C2"]);
+  });
+
+  it("filters by language and reports how many are in others", async () => {
+    const e = env();
+    seed(e.DB, { id: "C1", lang: "en" });
+    seed(e.DB, { id: "C2", lang: "tr" });
+    // Detection failing must never hide content, so a null lang always shows.
+    seed(e.DB, { id: "C3", lang: null });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    const body = await res.json();
+    expect(body.comments.map((c: any) => c.id).sort()).toEqual(["C1", "C3"]);
+    expect(body.otherLanguages).toBe(1);
+  });
+});
+
+describe("the friends slice", () => {
+  it("is 401 unauthenticated — it is the one path that must never be cached or public", async () => {
+    const e = env();
+    const res = await handleGetFriendComments(get("/api/titles/movie/603/comments/friends"), e, MOVIE, ctx);
+    expect(res.status).toBe(401);
+  });
+
+  it("shows a friend's friends-only comment and the caller's own, but not a stranger's", async () => {
+    const e = await withSessions(env());
+    e.DB.friendships.push({ user_a: A, user_b: B, state: "accepted", requested_by: A, updated_at: 0 });
+    seed(e.DB, { id: "MINE", author_id: A, visibility: "friends" });
+    seed(e.DB, { id: "FRIEND", author_id: B, visibility: "friends" });
+    seed(e.DB, { id: "STRANGER", author_id: C, visibility: "friends" });
+    const res = await handleGetFriendComments(get("/api/titles/movie/603/comments/friends", "tok-a"), e, MOVIE, ctx);
+    const ids = (await res.json()).comments.map((c: any) => c.id).sort();
+    expect(ids).toEqual(["FRIEND", "MINE"]);
+  });
+
+  it("carries the caller's own reactions, which the cached path can never do", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1" });
+    e.DB.comment_reactions.push({ comment_id: "C1", user_id: A, emoji: "🔥", created_at: 0 });
+    const res = await handleGetFriendComments(get("/api/titles/movie/603/comments/friends", "tok-a"), e, MOVIE, ctx);
+    expect((await res.json()).myReactions).toEqual({ C1: "🔥" });
+  });
+});
+
+describe("writing", () => {
+  const body = (over: Partial<any> = {}) => ({
+    id: "0123456789ABCDEF", tmdbId: 603, mediaType: "movie", body: "nice", visibility: "public", ...over,
+  });
+
+  it("writes a public comment and increments the public counter in the same batch", async () => {
+    const e = await withSessions(env());
+    const res = await handlePostComment(post("/api/comments", body(), "tok-a"), e, ctx);
+    expect(res.status).toBe(200);
+    expect(e.DB.comments).toHaveLength(1);
+    expect(e.DB.count(603, "movie")).toBe(1);
+  });
+
+  it("parses visibility in the SAFE direction — anything unrecognised is friends-only", async () => {
+    const e = await withSessions(env());
+    await handlePostComment(post("/api/comments", body({ visibility: "everyone" }), "tok-a"), e, ctx);
+    expect(e.DB.comments[0].visibility).toBe("friends");
+    // …and a friends-only comment must not touch the PUBLIC counter, which would
+    // otherwise show a number the reader cannot reconcile with what they see.
+    expect(e.DB.count(603, "movie")).toBe(0);
+  });
+
+  it("keeps the EXISTING row's id on an edit, so reactions are not orphaned", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "ORIGINAL", author_id: A });
+    const res = await handlePostComment(post("/api/comments", body({ id: "0123456789ABCDEF" }), "tok-a"), e, ctx);
+    expect((await res.json()).id).toBe("ORIGINAL");
+    expect(e.DB.comments).toHaveLength(1);
+  });
+
+  it("moves the counter when an edit changes visibility, in both directions", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, visibility: "public" });
+    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
+
+    await handlePostComment(post("/api/comments", body({ visibility: "friends" }), "tok-a"), e, ctx);
+    expect(e.DB.count(603, "movie")).toBe(0);
+
+    await handlePostComment(post("/api/comments", body({ visibility: "public" }), "tok-a"), e, ctx);
+    expect(e.DB.count(603, "movie")).toBe(1);
+  });
+
+  it("refuses a comment with no text, no media and no reaction", async () => {
+    const e = await withSessions(env());
+    const res = await handlePostComment(post("/api/comments", body({ body: "  " }), "tok-a"), e, ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("rate-limits NEW comments but never edits", async () => {
+    const e = await withSessions(env());
+    e.COMMENTS_PER_HOUR = "1";
+    await handlePostComment(post("/api/comments", body({ tmdbId: 1 }), "tok-a"), e, ctx);
+    const blocked = await handlePostComment(post("/api/comments", body({ tmdbId: 2 }), "tok-a"), e, ctx);
+    expect(blocked.status).toBe(429);
+    // The same author editing what they already wrote is not spending budget.
+    const edit = await handlePostComment(post("/api/comments", body({ tmdbId: 1, body: "fixed" }), "tok-a"), e, ctx);
+    expect(edit.status).toBe(200);
+  });
+
+  it("keeps a hidden comment hidden through an edit", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, hidden_at: 123 });
+    await handlePostComment(post("/api/comments", body({ body: "rewritten" }), "tok-a"), e, ctx);
+    expect(e.DB.comments[0].hidden_at).toBe(123);
+  });
+});
+
+describe("deleting", () => {
+  it("tombstones rather than removing, so moderation history survives", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, body: "the reported text" });
+    await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+    expect(e.DB.comments[0].deleted_at).toBeGreaterThan(0);
+    expect(e.DB.comments[0].body).toBe("the reported text");
+  });
+
+  it("decrements the counter and drops the comment's reactions", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A });
+    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
+    e.DB.comment_reactions.push({ comment_id: "C1", user_id: B, emoji: "👍", created_at: 0 });
+    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "👍", n: 1 });
+
+    await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+    expect(e.DB.count(603, "movie")).toBe(0);
+    expect(e.DB.comment_reactions).toEqual([]);
+    expect(e.DB.comment_reaction_counts).toEqual([]);
+  });
+
+  it("answers 204 for someone else's comment, so ids cannot be probed", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    const res = await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+    expect(res.status).toBe(204);
+    expect(e.DB.comments[0].deleted_at).toBeNull();
+  });
+});
