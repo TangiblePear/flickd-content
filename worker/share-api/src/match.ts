@@ -61,6 +61,19 @@ const DEFAULT_REQUESTS_PER_HOUR = 20;
  */
 const ONCE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How long a finished handshake stays as a tombstone before it is swept.
+ *
+ * A revoke/decline sets a terminal state rather than deleting the row, because that
+ * row is the ONLY thing that tells the other side the match ended — the client's
+ * "row vanished" sweep clears pending requests but never the stored roster, so a
+ * deleted row leaves the other device showing "Matched" forever. The tombstone has
+ * to outlive every device's next sync, and 30 days is far past that for anything
+ * still installed. Nothing else prunes this table: without a sweep, every match ever
+ * declined or revoked is kept for the life of the account.
+ */
+const TERMINAL_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
 export const MATCH_ORIGIN_SCAN = "scan";
 export const RETENTION_ONCE = "once";
 export const RETENTION_KEEP = "keep";
@@ -467,6 +480,26 @@ async function hasPayloads(env: MatchEnv, requestId: string): Promise<boolean> {
     .bind(requestId)
     .first<{ n: number }>();
   return (row?.n ?? 0) > 0;
+}
+
+/**
+ * Lazy TTL sweep for handshakes that ended long ago.
+ *
+ * Same shape and the same reason as [sweepOnceMatchPayloads]: not a cron, because the
+ * account is at its 5-cron limit, so it rides ambient sync traffic instead. Bounded by
+ * the age predicate, and only ever touches rows both parties finished with.
+ *
+ * Deliberately keyed on `updated_at`, which is when the row went terminal, not
+ * `created_at` — a handshake declined yesterday after sitting pending for a year is one
+ * day old for this purpose, and sweeping it early would drop the tombstone before the
+ * other device ever saw it.
+ */
+export async function sweepTerminalMatches(env: MatchEnv, nowMs = Date.now()): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM match_requests WHERE state IN ('declined', 'revoked') AND updated_at < ?",
+  )
+    .bind(nowMs - TERMINAL_TTL_MS)
+    .run();
 }
 
 /** Both directions collected on a `once` match ⇒ drop both blobs. */

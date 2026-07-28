@@ -23,6 +23,7 @@ import {
   handleMatchRequest,
   loadMatches,
   sweepOnceMatchPayloads,
+  sweepTerminalMatches,
 } from "./match";
 
 const A = "AAAAH73X7P55T48R4CFHDED9CW";
@@ -217,6 +218,12 @@ class FakeStmt {
     if (s.startsWith("DELETE FROM match_payloads WHERE created_at <")) {
       const once = new Set(this.db.match_requests.filter((x) => x.retention === "once").map((x) => x.id));
       this.db.match_payloads = this.db.match_payloads.filter((x) => !(x.created_at < a[0] && once.has(x.request_id)));
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM match_requests WHERE state IN ('declined', 'revoked')")) {
+      this.db.match_requests = this.db.match_requests.filter(
+        (x) => !(["declined", "revoked"].includes(x.state) && x.updated_at < a[0]),
+      );
       return { success: true, meta: { changes: 1 } };
     }
     // Erasure cascade: every blob whose handshake touches this user.
@@ -777,5 +784,50 @@ describe("retention = once", () => {
     await sweepOnceMatchPayloads(env, Date.now() + 8 * 24 * 60 * 60 * 1000);
     expect(env.DB.match_payloads.map((p: any) => p.request_id)).not.toContain(once.id);
     expect(env.DB.match_payloads.length).toBe(1);
+  });
+
+  /**
+   * A revoke/decline leaves a tombstone rather than deleting the row, because that row
+   * is the only thing that tells the other side the handshake ended. Nothing else
+   * prunes `match_requests`, so without this sweep every match ever declined is kept
+   * for the life of the account.
+   */
+  it("sweeps terminal handshakes past the TTL", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const dead = (await (
+      await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)
+    ).json()) as any;
+    await handleDeleteMatch(dead.id, del("tok-a", `/api/match/${dead.id}`), env);
+    expect(env.DB.match_requests.length).toBe(1);
+
+    await sweepTerminalMatches(env, Date.now() + 31 * 24 * 60 * 60 * 1000);
+
+    expect(env.DB.match_requests.length).toBe(0);
+  });
+
+  /** The tombstone has to outlive every device's next sync, or it converges nothing. */
+  it("leaves a recently ended handshake alone", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    const dead = (await (
+      await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env)
+    ).json()) as any;
+    await handleDeleteMatch(dead.id, del("tok-a", `/api/match/${dead.id}`), env);
+
+    await sweepTerminalMatches(env, Date.now() + 2 * 24 * 60 * 60 * 1000);
+
+    expect(env.DB.match_requests.length).toBe(1);
+  });
+
+  /** A live handshake is not a tombstone, however old it is. */
+  it("never sweeps a pending or accepted handshake", async () => {
+    const env = await env0();
+    befriend(env, A, B);
+    await handleMatchRequest(post("tok-a", "/api/match/request", requestBody(B)), env);
+
+    await sweepTerminalMatches(env, Date.now() + 365 * 24 * 60 * 60 * 1000);
+
+    expect(env.DB.match_requests.length).toBe(1);
   });
 });

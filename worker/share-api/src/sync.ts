@@ -16,7 +16,7 @@ import { resolveSession } from "./auth";
 import { loadFeed, publishEvents, type FeedEnv } from "./feed";
 import { loadFriendships } from "./friends";
 import { loadSharedLists, type ListsEnv } from "./lists";
-import { loadMatches, sweepOnceMatchPayloads, type MatchEnv } from "./match";
+import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEnv } from "./match";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
 
 export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv;
@@ -197,10 +197,18 @@ export async function handleSync(
     });
   }
 
-  // Backstop delete for `once` match payloads nobody collected. Rides ambient sync
-  // traffic because this account has no cron budget left — same reason the
-  // orphan-profile reaper is opportunistic. Never blocks the response.
-  if (body.match) ctx?.waitUntil(sweepOnceMatchPayloads(env).catch(() => {}));
+  // Backstop deletes riding ambient sync traffic, because this account has no cron
+  // budget left — same reason the orphan-profile reaper is opportunistic. Neither
+  // blocks the response.
+  //
+  // The payload sweep catches `once` blobs nobody collected; the terminal sweep drops
+  // handshake tombstones once every device has long since converged on them. Without
+  // the second one, `match_requests` grows for the life of an account — nothing else
+  // prunes it but account deletion.
+  if (body.match) {
+    ctx?.waitUntil(sweepOnceMatchPayloads(env).catch(() => {}));
+    ctx?.waitUntil(sweepTerminalMatches(env).catch(() => {}));
+  }
 
   return json({
     written,
