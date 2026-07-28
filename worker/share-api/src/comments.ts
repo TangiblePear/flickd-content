@@ -832,6 +832,165 @@ export async function handleReactToComment(
   return noContent();
 }
 
+// ── Reporting ───────────────────────────────────────────────────────────────
+
+/**
+ * The two report kinds a comment can attract, and the reason they are two.
+ *
+ * ⚠️ **Spoiler reports must NOT count toward `REPORT_AUTOHIDE`.** If they did,
+ * "report as spoiler" becomes a censorship lever: three people who dislike an
+ * opinion tag it and it vanishes. So the counts are kept entirely separate by
+ * `kind` — abuse reports hide, spoiler reports blur.
+ */
+const KIND_ABUSE = "comment";
+const KIND_SPOILER = "comment_spoiler";
+
+/**
+ * **Threshold 2, not 3.** A spoiler is a mislabelling rather than a rules
+ * violation: the comment is fine, its state is wrong. The consequence is mild and
+ * reversible, so acting sooner is cheap.
+ */
+const SPOILER_AUTOFLAG = 2;
+const DEFAULT_REPORT_AUTOHIDE = 3;
+const MAX_REPORT_CONTEXT = 1000;
+const REPORT_REASONS = new Set(["spoiler", "abuse", "harassment", "hate", "sexual", "spam", "other"]);
+
+/** 128-bit opaque id, Crockford base32 — same shape as `users.id`. */
+function newId(): string {
+  const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+/**
+ * `POST /api/comments/{id}/report` `{ reason, context? }`.
+ *
+ * `reason: "spoiler"` blurs at [SPOILER_AUTOFLAG] distinct open reports; every
+ * other reason hides at `REPORT_AUTOHIDE`. The two never mix — see above.
+ *
+ * ⚠️ **The body is snapshotted into the report row.** Editing is allowed forever,
+ * so an author can rewrite a comment after it is flagged; without the snapshot the
+ * admin decides on text that is no longer what was reported. The live row is kept
+ * too: when the two diverge, that divergence is itself a signal, because editing
+ * straight after a report is usually damage control.
+ *
+ * **Auto-hide is provisional, never terminal.** It hides *pending review* and an
+ * admin can restore. Without that the threshold is a brigading tool — three
+ * coordinated accounts could silently delete anyone's comment permanently.
+ */
+export async function handleReportComment(
+  id: string,
+  req: Request,
+  env: CommentsEnv & { REPORT_AUTOHIDE?: string },
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  const reason = typeof payload.reason === "string" ? payload.reason : "";
+  if (!REPORT_REASONS.has(reason)) return json({ error: "invalid_payload" }, 400);
+  const note = typeof payload.context === "string" ? payload.context.trim().slice(0, MAX_REPORT_CONTEXT) : "";
+  const context = note ? `${reason} — ${note}` : reason;
+  const kind = reason === "spoiler" ? KIND_SPOILER : KIND_ABUSE;
+
+  const comment = await env.DB.prepare(
+    `SELECT id, tmdb_id, media_type, season, episode, author_id, body, visibility,
+            spoiler, hidden_at, deleted_at, media_id
+       FROM comments WHERE id = ?`,
+  )
+    .bind(id)
+    .first<CommentRow>();
+  if (!comment || !(await mayReadComment(env, session.userId, comment))) return notFound();
+  // Reporting your own comment is a no-op that would otherwise let an author
+  // self-brigade to a hidden state and blame the system.
+  if (comment.author_id === session.userId) return noContent();
+
+  // One open report per reporter per target **per kind**: the two thresholds are
+  // independent, so someone who flagged a spoiler must still be able to report
+  // abuse on the same comment.
+  const existing = await env.DB.prepare(
+    "SELECT id FROM reports WHERE reporter_id = ? AND target_id = ? AND kind = ? AND state = 'open'",
+  )
+    .bind(session.userId, id, kind)
+    .first<{ id: string }>();
+  if (existing) return noContent();
+
+  await env.DB.prepare(
+    `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at, body_snapshot)
+     VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
+  )
+    .bind(newId(), session.userId, id, kind, context, Date.now(), comment.body)
+    .run();
+
+  // ⚠️ **Only `open` reports count.** Dismissing marks them `dismissed`, so a
+  // restored comment needs a fresh set rather than being re-tripped by the next
+  // single report — which would let one person overturn a moderator.
+  const tally = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT reporter_id) AS n FROM reports WHERE target_id = ? AND kind = ? AND state = 'open'",
+  )
+    .bind(id, kind)
+    .first<{ n: number }>();
+  const n = tally?.n ?? 0;
+
+  if (kind === KIND_SPOILER) {
+    // A spoiler report BLURS, it does not hide: the action is `spoiler`, never
+    // `hidden_at`. Once community-flagged only an admin can clear it — otherwise
+    // the author simply unticks it.
+    if (n >= SPOILER_AUTOFLAG && comment.spoiler !== 1) {
+      await env.DB.prepare("UPDATE comments SET spoiler = 1 WHERE id = ?").bind(id).run();
+    }
+    return noContent();
+  }
+
+  const threshold = Number(env.REPORT_AUTOHIDE ?? DEFAULT_REPORT_AUTOHIDE);
+  if (n >= threshold && comment.hidden_at == null) {
+    await setHidden(env, comment, true);
+  }
+  return noContent();
+}
+
+/**
+ * Hide or restore a comment, moving `n_public` with it in the same batch.
+ *
+ * Shared by the auto-hide threshold and the admin action, because getting the
+ * counter right in one of those two places and not the other is exactly how a
+ * counter drifts.
+ */
+export async function setHidden(env: CommentsEnv, row: CommentRow, hidden: boolean): Promise<void> {
+  const subject: Subject = {
+    tmdbId: row.tmdb_id,
+    mediaType: row.media_type as "movie" | "show",
+    season: row.season,
+    episode: row.episode,
+  };
+  const was = countable(row);
+  const now = countable({ ...row, hidden_at: hidden ? Date.now() : null });
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare("UPDATE comments SET hidden_at = ? WHERE id = ?").bind(hidden ? Date.now() : null, row.id),
+  ];
+  const count = countStatement(env, subject, (now ? 1 : 0) - (was ? 1 : 0));
+  if (count) statements.push(count);
+  await env.DB.batch(statements);
+}
+
 /**
  * Whether [viewerId] may read [authorId]'s friends-only comment.
  *

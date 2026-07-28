@@ -117,6 +117,9 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["DELETE", "/api/comments/AAAAAAAA"],
   ["POST", "/api/comments/AAAAAAAA/reaction", { emoji: "🔥" }],
   ["DELETE", "/api/comments/AAAAAAAA/reaction"],
+  ["POST", "/api/comments/AAAAAAAA/report", { reason: "spoiler" }],
+  ["GET", "/api/admin/comment-reports"],
+  ["POST", "/api/admin/comments/AAAAAAAA/restore"],
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],

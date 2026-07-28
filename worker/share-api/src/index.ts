@@ -37,6 +37,11 @@ interface Env {
   // Per-author hourly comment cap. Config rather than a constant so it tunes
   // without a deploy, the same shape as RATE_LIMIT_PER_HOUR.
   COMMENTS_PER_HOUR?: string;
+  // Shared with the Pages admin panel, which proxies comment moderation here
+  // rather than reaching into D1 itself. A SECRET:
+  //   wrangler secret put ADMIN_KEY
+  // Unset ⇒ /api/admin/* answers 403. Closed rather than open when unconfigured.
+  ADMIN_KEY?: string;
   // Epoch ms after which the E2EE **inbox** stops being served. Unset ⇒ never, which
   // is the default and changes nothing. Scoped to the inbox: `freshness` and the
   // friends record ride the same relay and do NOT retire here.
@@ -68,8 +73,10 @@ import {
   handleGetFriendComments,
   handlePostComment,
   handleReactToComment,
+  handleReportComment,
   parseSubject,
 } from "./comments";
+import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
@@ -426,6 +433,19 @@ export default {
     const commentReaction = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/reaction$/);
     if (commentReaction && (req.method === "POST" || req.method === "DELETE")) {
       return handleReactToComment(commentReaction[1], req, env, ctx);
+    }
+
+    const commentReport = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/report$/);
+    if (commentReport && req.method === "POST") return handleReportComment(commentReport[1], req, env, ctx);
+
+    // Comment moderation, proxied here by the admin panel rather than reading D1
+    // itself: `n_public` moves with `hidden_at`, and that invariant has exactly one
+    // implementation. Authorized by a shared key, never a user session.
+    if (p === "/api/admin/comment-reports" && req.method === "GET") return handleAdminCommentReports(req, env);
+
+    const adminComment = p.match(/^\/api\/admin\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/([a-z]+)$/);
+    if (adminComment && req.method === "POST") {
+      return handleAdminCommentAction(adminComment[1], adminComment[2], req, env);
     }
 
     // ── Account / data deletion (Google Play deletion policy) ──

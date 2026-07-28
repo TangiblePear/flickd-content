@@ -79,7 +79,11 @@ routes = [
   # the handler half; only a live curl catches the pattern half.
   { pattern = "flickto.app/api/titles/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/comments", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/comments/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/comments/*", zone_name = "flickto.app" },
+  # Comment moderation, called by the /admin Pages functions with X-Admin-Key.
+  # Not user-facing; gated by the ADMIN_KEY secret, which when unset closes these
+  # routes rather than opening them.
+  { pattern = "flickto.app/api/admin/*", zone_name = "flickto.app" }
 ]
 
 

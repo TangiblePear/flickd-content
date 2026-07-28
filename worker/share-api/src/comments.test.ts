@@ -13,6 +13,7 @@ import {
   handleGetFriendComments,
   handlePostComment,
   handleReactToComment,
+  handleReportComment,
   parseSubject,
   PAGE_LIMIT,
 } from "./comments";
@@ -38,6 +39,7 @@ class FakeD1 {
   friendships: any[] = [];
   blocks: any[] = [];
   profiles: any[] = [];
+  reports: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -124,6 +126,22 @@ class FakeStmt {
       const r = this.db.comment_reactions.find((x) => x.comment_id === a[0] && x.user_id === a[1]);
       return r ? ({ emoji: r.emoji } as T) : null;
     }
+    if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, author_id, body")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    if (s.startsWith("SELECT id FROM reports")) {
+      const r = this.db.reports.find(
+        (x) => x.reporter_id === a[0] && x.target_id === a[1] && x.kind === a[2] && x.state === "open",
+      );
+      return r ? ({ id: r.id } as T) : null;
+    }
+    if (s.startsWith("SELECT COUNT(DISTINCT reporter_id) AS n FROM reports")) {
+      const reporters = new Set(
+        this.db.reports.filter((x) => x.target_id === a[0] && x.kind === a[1] && x.state === "open")
+          .map((x) => x.reporter_id),
+      );
+      return { n: reporters.size } as T;
+    }
     throw new Error(`FakeD1: unhandled first() ${s}`);
   }
 
@@ -191,6 +209,23 @@ class FakeStmt {
       if (r) Object.assign(r, { deleted_at: a[0], updated_at: a[1] });
       return { success: true, meta: { changes: r ? 1 : 0 } };
     }
+    if (s.startsWith("INSERT INTO reports")) {
+      this.db.reports.push({
+        id: a[0], reporter_id: a[1], target_id: a[2], kind: a[3], context: a[4],
+        state: "open", created_at: a[5], body_snapshot: a[6],
+      });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE comments SET spoiler = 1")) {
+      const r = this.db.comments.find((c) => c.id === a[0]);
+      if (r) r.spoiler = 1;
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE comments SET hidden_at")) {
+      const r = this.db.comments.find((c) => c.id === a[1]);
+      if (r) r.hidden_at = a[0];
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
     if (s.startsWith("INSERT INTO comment_reactions")) {
       const found = this.db.comment_reactions.find((r) => r.comment_id === a[0] && r.user_id === a[1]);
       if (found) Object.assign(found, { emoji: a[2], created_at: a[3] });
@@ -249,14 +284,14 @@ function env() {
   return { DB: db, FIREBASE_PROJECT_ID: "flickto-cf7b6" } as any;
 }
 
-/** The session cache hashes the token, so the fake keys on the hash the same way. */
+/** `resolveSession` looks a session up by sha256(token), so the fake keys the same way. */
+async function hash(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 async function withSessions(e: any) {
-  const enc = new TextEncoder();
-  for (const [tok, uid] of Object.entries(TOKENS)) {
-    const digest = await crypto.subtle.digest("SHA-256", enc.encode(tok));
-    const hex = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    e.DB.sessions.set(hex, uid);
-  }
+  for (const [tok, uid] of Object.entries(TOKENS)) e.DB.sessions.set(await hash(tok), uid);
   return e;
 }
 
@@ -526,6 +561,105 @@ describe("reacting", () => {
     const [c] = (await res.json()).comments;
     expect(c.reactions).toEqual({ "❤️": 3 });
     expect(c).not.toHaveProperty("reactors");
+  });
+});
+
+describe("reporting", () => {
+  const report = (e: any, id: string, reason: string, token: string) =>
+    handleReportComment(id, post(`/api/comments/${id}/report`, { reason }, e && token), e, ctx);
+
+  it("snapshots the body, because editing forever is otherwise a way to escape a report", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B, body: "the original text" });
+    await report(e, "C1", "abuse", "tok-a");
+    expect(e.DB.reports[0].body_snapshot).toBe("the original text");
+
+    // The author rewrites it. The live row changes; the snapshot does not, and the
+    // divergence is itself the signal the admin needs.
+    await handlePostComment(
+      post(
+        "/api/comments",
+        { id: "0123456789ABCDEF", tmdbId: 603, mediaType: "movie", body: "something innocuous" },
+        "tok-b",
+      ),
+      e,
+      ctx,
+    );
+    expect(e.DB.comments[0].body).toBe("something innocuous");
+    expect(e.DB.reports[0].body_snapshot).toBe("the original text");
+  });
+
+  it("hides at three DISTINCT reporters, and not before", async () => {
+    const e = await withSessions(env());
+    e.REPORT_AUTOHIDE = "3";
+    seed(e.DB, { id: "C1", author_id: B });
+    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
+
+    await report(e, "C1", "abuse", "tok-a");
+    // The same reporter again is a no-op, not a second vote.
+    await report(e, "C1", "abuse", "tok-a");
+    expect(e.DB.comments[0].hidden_at).toBeNull();
+
+    await report(e, "C1", "abuse", "tok-c");
+    expect(e.DB.comments[0].hidden_at).toBeNull();
+
+    e.DB.sessions.set(await hash("tok-d"), "DDDDM06Z0S88X71U7FJLGHGCZ2");
+    await report(e, "C1", "abuse", "tok-d");
+    expect(e.DB.comments[0].hidden_at).toBeGreaterThan(0);
+    // Hiding takes the comment out of the public count in the same batch.
+    expect(e.DB.count(603, "movie")).toBe(0);
+  });
+
+  it("BLURS at two spoiler reports instead of hiding — the counts never mix", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
+
+    await report(e, "C1", "spoiler", "tok-a");
+    expect(e.DB.comments[0].spoiler).toBe(0);
+    await report(e, "C1", "spoiler", "tok-c");
+
+    expect(e.DB.comments[0].spoiler).toBe(1);
+    // ⚠️ The point of the separation: two spoiler reports must NOT move the comment
+    // one step closer to being hidden, or "report as spoiler" is a censorship lever.
+    expect(e.DB.comments[0].hidden_at).toBeNull();
+    expect(e.DB.count(603, "movie")).toBe(1);
+  });
+
+  it("lets one person file both a spoiler and an abuse report on the same comment", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    await report(e, "C1", "spoiler", "tok-a");
+    await report(e, "C1", "abuse", "tok-a");
+    expect(e.DB.reports.map((r: any) => r.kind).sort()).toEqual(["comment", "comment_spoiler"]);
+  });
+
+  it("counts only OPEN reports, so a dismissed set cannot be re-tripped by one person", async () => {
+    const e = await withSessions(env());
+    e.REPORT_AUTOHIDE = "3";
+    seed(e.DB, { id: "C1", author_id: B });
+    // An admin restored this comment and dismissed the three reports that hid it.
+    for (const r of [A, C, "DDDDM06Z0S88X71U7FJLGHGCZ2"]) {
+      e.DB.reports.push({ id: r, reporter_id: r, target_id: "C1", kind: "comment", state: "dismissed" });
+    }
+    e.DB.sessions.set(await hash("tok-e"), "EEEEN17Z1T99Y82V8GKMHJHD03");
+    await report(e, "C1", "abuse", "tok-e");
+    // One new report against three dismissed ones must not re-hide it — otherwise
+    // a single person overturns the moderator.
+    expect(e.DB.comments[0].hidden_at).toBeNull();
+  });
+
+  it("ignores an author reporting their own comment", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A });
+    expect((await report(e, "C1", "abuse", "tok-a")).status).toBe(204);
+    expect(e.DB.reports).toEqual([]);
+  });
+
+  it("rejects an unknown reason", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    expect((await report(e, "C1", "i just dislike it", "tok-a")).status).toBe(400);
   });
 });
 
