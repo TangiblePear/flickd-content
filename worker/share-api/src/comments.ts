@@ -215,6 +215,7 @@ export interface CommentRow {
   created_at: number;
   updated_at: number;
   display_name?: string | null;
+  border_id?: string | null;
   avatar_id?: string | null;
   picture_url?: string | null;
 }
@@ -247,6 +248,7 @@ function toWire(r: CommentRow, reactions: Record<string, number> = {}, translati
     authorId: r.author_id,
     authorName: r.display_name ?? null,
     authorAvatarId: r.avatar_id ?? null,
+    authorBorderId: r.border_id ?? null,
     authorPictureUrl: r.picture_url ?? null,
     body: r.body,
     reaction: r.reaction,
@@ -274,7 +276,7 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
        c.reaction, c.visibility, c.spoiler, c.lang, c.media_kind, c.media_provider,
        c.media_id, c.media_url, c.media_w, c.media_h, c.hidden_at, c.deleted_at,
        c.created_at, c.updated_at,
-       p.display_name, p.avatar_id, p.picture_url`;
+       p.display_name, p.avatar_id, p.border_id, p.picture_url`;
 
 /**
  * A comment is only rendered — and only counted — when it has something to show.
