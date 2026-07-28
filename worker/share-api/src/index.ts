@@ -325,8 +325,8 @@ export default {
     if (p === "/api/me/friend-id" && req.method === "PUT") return handleClaimFriendId(req, env, ctx);
     if (p === "/api/me/account" && req.method === "DELETE") return handleDeleteAccount(req, env, ctx);
     if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
-    if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx);
-    if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx);
+    if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx, wake);
+    if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);
     if (p === "/api/friends/link-legacy" && req.method === "POST") return handleLinkLegacyFriends(req, env, ctx);
     if (p === "/api/friends/cards" && req.method === "POST") {
       return handleGetFriendCards(req, env, (friendId) => loadPublicCard(env, friendId), ctx);

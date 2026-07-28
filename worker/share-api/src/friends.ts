@@ -136,7 +136,12 @@ async function requestRateLimited(env: FriendsEnv, userId: string): Promise<bool
  * **A request to someone who has blocked you reports success and does nothing** —
  * anything else turns this endpoint into a block detector.
  */
-export async function handleFriendRequest(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
+export async function handleFriendRequest(
+  req: Request,
+  env: FriendsEnv,
+  ctx?: ExecutionContext,
+  notify?: (userId: string) => void,
+): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
   const payload = await body(req);
@@ -169,6 +174,8 @@ export async function handleFriendRequest(req: Request, env: FriendsEnv, ctx?: E
     )
       .bind(now, a, b)
       .run();
+    // They have been waiting on an answer since they asked.
+    notify?.(target);
     return json({ state: "accepted" });
   }
 
@@ -179,6 +186,13 @@ export async function handleFriendRequest(req: Request, env: FriendsEnv, ctx?: E
   )
     .bind(a, b, session.userId, now, now)
     .run();
+  // **Wake the target, or nothing tells them a request exists.** Until pairing left the
+  // E2EE inbox (2026-07-28) the sealed FRIEND_REQUEST did this as a side effect of
+  // `handlePostInbox`. Deleting that send took the wake-up with it, and the request sat
+  // in D1, correct and invisible, until the recipient's next scheduled sync — measured
+  // on device the same day. The identical mistake was made with shared lists on
+  // 2026-07-27; see the FCM note in `docs/agent-map/android/16-feature-social.md`.
+  notify?.(target);
   return json({ state: "pending" });
 }
 
@@ -187,7 +201,12 @@ export async function handleFriendRequest(req: Request, env: FriendsEnv, ctx?: E
  * 404 unless a pending request from that user actually exists, so this cannot be
  * used to force a friendship or to probe for one.
  */
-export async function handleFriendAccept(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
+export async function handleFriendAccept(
+  req: Request,
+  env: FriendsEnv,
+  ctx?: ExecutionContext,
+  notify?: (userId: string) => void,
+): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
   const payload = await body(req);
@@ -203,6 +222,9 @@ export async function handleFriendAccept(req: Request, env: FriendsEnv, ctx?: Ex
     .bind(Date.now(), a, b, target)
     .run();
   if (!result.meta?.changes) return json({ error: "not_found" }, 404);
+  // Only on a real transition — `changes` is 0 for a repeat accept, and notifying then
+  // would re-wake the requester on every retry.
+  notify?.(target);
   return json({ state: "accepted" });
 }
 

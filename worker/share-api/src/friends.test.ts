@@ -229,6 +229,64 @@ describe("friend requests", () => {
     expect(after.outgoing).toEqual([]);
   });
 
+  /**
+   * **Nothing else tells the recipient a request exists.** Until pairing left the E2EE
+   * inbox (2026-07-28) the sealed FRIEND_REQUEST woke them as a side effect of the
+   * inbox POST; deleting that send took the wake-up with it and the request sat in D1,
+   * correct and invisible, until their next scheduled sync — measured on device the
+   * same day, with the row present and the tablet showing nothing.
+   */
+  it("wakes the target when a request is created", async () => {
+    const env = await env0();
+    const woke: string[] = [];
+
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env, undefined, (id) =>
+      woke.push(id),
+    );
+
+    expect(woke).toEqual([B]);
+  });
+
+  /** The requester has been waiting since they asked. */
+  it("wakes the requester when their request is accepted", async () => {
+    const env = await env0();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    const woke: string[] = [];
+
+    await handleFriendAccept(post("tok-b", "/api/friends/accept", { userId: A }), env, undefined, (id) =>
+      woke.push(id),
+    );
+
+    expect(woke).toEqual([A]);
+  });
+
+  /** A repeat accept changes nothing, so it must not re-wake anyone. */
+  it("does not wake on a repeat accept", async () => {
+    const env = await env0();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    await handleFriendAccept(post("tok-b", "/api/friends/accept", { userId: A }), env);
+    const woke: string[] = [];
+
+    await handleFriendAccept(post("tok-b", "/api/friends/accept", { userId: A }), env, undefined, (id) =>
+      woke.push(id),
+    );
+
+    expect(woke).toEqual([]);
+  });
+
+  /** The request endpoint doubles as an accept; that path owes a wake-up too. */
+  it("wakes the original asker when a mutual request lands as an accept", async () => {
+    const env = await env0();
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+    const woke: string[] = [];
+
+    await handleFriendRequest(post("tok-b", "/api/friends/request", { userId: A }), env, undefined, (id) =>
+      woke.push(id),
+    );
+
+    expect(woke).toEqual([A]);
+  });
+
   it("treats requesting someone who already asked you as an accept", async () => {
     const env = await env0();
     await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
