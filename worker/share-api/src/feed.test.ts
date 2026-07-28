@@ -8,6 +8,7 @@ const TOKENS: Record<string, string> = { "tok-me": ME, "tok-friend": FRIEND };
 
 class FakeD1 {
   feed: any[] = [];
+  comments: any[] = [];
   friendships: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
@@ -52,6 +53,22 @@ class FakeStmt {
       return {
         results: this.db.feed
           .filter((e) => authors.includes(e.author_id) && e.created_at < cutoff && e.created_at > from)
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, limit) as T[],
+      };
+    }
+    // Comments are merged into the feed on READ rather than written as
+    // feed_events rows, so a feed read now issues a second query. Same bind
+    // order as above.
+    if (s.startsWith("SELECT c.id, c.author_id, c.tmdb_id, c.media_type, c.season, c.episode")) {
+      const limit = this.args[this.args.length - 1];
+      const from = this.args[this.args.length - 2];
+      const cutoff = this.args[this.args.length - 3];
+      const authors = this.args.slice(0, this.args.length - 3);
+      return {
+        results: this.db.comments
+          .filter((c) => authors.includes(c.author_id) && c.created_at < cutoff && c.created_at > from)
+          .filter((c) => c.hidden_at == null && c.deleted_at == null && (c.body !== "" || c.media_id != null))
           .sort((a, b) => b.created_at - a.created_at)
           .slice(0, limit) as T[],
       };
@@ -186,6 +203,57 @@ describe("reading", () => {
     await handlePublishFeed(publish("tok-friend", [ev("theirs", t(200))]), env);
 
     expect((await loadFeed(env, ME, 50)).map((e) => e.id)).toEqual(["theirs"]);
+  });
+
+  /**
+   * Comments reach the feed by being READ out of `comments`, not by anyone
+   * writing a `feed_events` row. If that ever regresses to a write, this test
+   * still passes — which is why `publishEvents` refuses the `comment` kind.
+   */
+  it("merges a friend's comments into the feed, interleaved by time", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    await handlePublishFeed(publish("tok-friend", [ev("watched", t(100))]), env);
+    env.DB.comments.push({
+      id: "C1", author_id: FRIEND, tmdb_id: 603, media_type: "movie", season: -1, episode: -1,
+      body: "loved it", spoiler: 0, hidden_at: null, deleted_at: null, media_id: null, created_at: t(200),
+    });
+
+    const feed = await loadFeed(env, ME, 50);
+    expect(feed.map((e) => e.id)).toEqual(["comment:C1", "watched"]);
+    expect(feed[0].kind).toBe("comment");
+    // The comment id rides the payload so a notification tap can deep-link into
+    // the sheet scrolled to it.
+    expect(JSON.parse(feed[0].payload).commentId).toBe("C1");
+  });
+
+  it("carries a friends-only comment to the feed, exactly like a public one", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    // Visibility governs who may READ a comment, not whether your friends learn
+    // you commented — and everyone reaching this query is already an accepted
+    // friend. Excluding public ones would be backwards anyway.
+    env.DB.comments.push({
+      id: "C1", author_id: FRIEND, tmdb_id: 603, media_type: "movie", season: -1, episode: -1,
+      body: "private thought", visibility: "friends", spoiler: 0,
+      hidden_at: null, deleted_at: null, media_id: null, created_at: t(200),
+    });
+    expect((await loadFeed(env, ME, 50)).map((e) => e.id)).toEqual(["comment:C1"]);
+  });
+
+  it("never advertises a hidden or deleted comment", async () => {
+    const env = await env0();
+    befriend(env, ME, FRIEND);
+    const base = {
+      author_id: FRIEND, tmdb_id: 603, media_type: "movie", season: -1, episode: -1,
+      body: "text", spoiler: 0, media_id: null, created_at: t(200),
+    };
+    env.DB.comments.push(
+      { ...base, id: "HIDDEN", hidden_at: t(210), deleted_at: null },
+      { ...base, id: "GONE", hidden_at: null, deleted_at: t(210) },
+    );
+    // A feed entry the reader cannot open is worse than no entry.
+    expect(await loadFeed(env, ME, 50)).toEqual([]);
   });
 
   it("is empty with no friends rather than showing yourself", async () => {

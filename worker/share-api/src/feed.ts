@@ -14,6 +14,7 @@
 // author simply stops matching), and neither does visibility.
 
 import { loadFriendships } from "./friends";
+import { loadFriendCommentEvents } from "./comments";
 import { resolveSession } from "./auth";
 
 export interface FeedEnv {
@@ -43,6 +44,11 @@ const MAX_AUTHORS_PER_QUERY = 200;
  * window, so a cold first fetch has no reason to be bounded by retention instead.
  */
 export const FEED_FLOOR_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Publishable kinds. `comment` is deliberately NOT here: comments reach the feed
+ * by being read out of `comments`, and accepting a client-published `comment`
+ * event would duplicate every one of them.
+ */
 const KINDS = new Set(["watch", "achievement", "personality"]);
 
 export interface FeedEventRow {
@@ -106,7 +112,17 @@ export async function loadFeed(env: FeedEnv, userId: string, limit: number, befo
     .bind(...authors, cutoff, from, limit)
     .all<FeedEventRow>();
 
-  return (results ?? []).map(toWire);
+  // Comments are merged in on READ rather than written here as `feed_events`
+  // rows. Same reasoning that made this whole table fan-out-on-read: reads have a
+  // 5M/day budget against 100k writes, and this is a second indexed query inside
+  // a request that is already happening, not a second chargeable request.
+  //
+  // Both queries take the same `limit`, so the merge can always fill a page even
+  // when one source dominates the window; the slice below trims the surplus.
+  const comments = await loadFriendCommentEvents(env, authors, limit, cutoff, from);
+  return [...(results ?? []).map(toWire), ...comments]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit);
 }
 
 /**

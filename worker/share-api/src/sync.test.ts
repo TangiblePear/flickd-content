@@ -12,6 +12,7 @@ const TOKENS: Record<string, string> = { "tok-me": ME, "tok-friend": FRIEND };
  */
 class FakeD1 {
   feed: any[] = [];
+  comments: any[] = [];
   friendships: any[] = [];
   profiles: any[] = [];
   sessions = new Map<string, string>();
@@ -74,6 +75,23 @@ class FakeStmt {
       );
       this.db.feedReads.push(rows);
       return { results: rows.sort((a, b) => b.created_at - a.created_at).slice(0, limit) as T[] };
+    }
+    // Comments merge into the feed on read, so a sync now issues this second
+    // query too. Deliberately NOT recorded in `feedReads`: those assertions are
+    // about how many feed_events rows a no-op refresh touches, and folding a
+    // different table's reads into that number would make them meaningless.
+    if (s.startsWith("SELECT c.id, c.author_id, c.tmdb_id, c.media_type, c.season, c.episode")) {
+      const limit = this.args[this.args.length - 1];
+      const from = this.args[this.args.length - 2];
+      const cutoff = this.args[this.args.length - 3];
+      const authors = this.args.slice(0, this.args.length - 3);
+      return {
+        results: this.db.comments
+          .filter((c) => authors.includes(c.author_id) && c.created_at < cutoff && c.created_at > from)
+          .filter((c) => c.hidden_at == null && c.deleted_at == null && (c.body !== "" || c.media_id != null))
+          .sort((a, b) => b.created_at - a.created_at)
+          .slice(0, limit) as T[],
+      };
     }
     throw new Error(`unhandled all(): ${s}`);
   }

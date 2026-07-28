@@ -231,6 +231,79 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
  */
 const RENDERABLE = `c.hidden_at IS NULL AND c.deleted_at IS NULL AND (c.body <> '' OR c.media_id IS NOT NULL)`;
 
+// ── The friend feed ─────────────────────────────────────────────────────────
+
+/**
+ * Recent comments by [authors], shaped as feed events.
+ *
+ * **Comments reach the friend feed with NO extra write.** There is deliberately
+ * no `feed_events` row for a comment: `schema.sql` commits to fan-out on READ
+ * precisely because reads have a 5M/day budget against 100k writes, so the feed
+ * query asks `comments` as well and merges. The cost is one extra index —
+ * `idx_comments_author_time` — and a second indexed query inside a Worker request
+ * that is already happening, so not a second *chargeable* request.
+ *
+ * **Public and friends-only alike.** Visibility governs who may *read* a comment,
+ * not whether your friends learn that you commented — and excluding public ones
+ * would be backwards, since public is the *more* visible setting. Every author
+ * here is already an accepted friend of the reader, which is also what makes
+ * blocking need no separate check: `handleBlock` deletes the friendship row, so a
+ * blocked author simply stops matching.
+ *
+ * Hidden, deleted and empty rows are excluded by the same predicate the comment
+ * lists use, so the feed can never advertise a comment the reader cannot open.
+ */
+export async function loadFriendCommentEvents(
+  env: CommentsEnv,
+  authors: string[],
+  limit: number,
+  before: number,
+  since: number,
+) {
+  if (authors.length === 0) return [];
+  const placeholders = authors.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT c.id, c.author_id, c.tmdb_id, c.media_type, c.season, c.episode,
+            c.body, c.spoiler, c.created_at
+       FROM comments c
+      WHERE c.author_id IN (${placeholders}) AND c.created_at < ? AND c.created_at > ?
+        AND ${RENDERABLE}
+      ORDER BY c.created_at DESC
+      LIMIT ?`,
+  )
+    .bind(...authors, before, since, limit)
+    .all<{
+      id: string;
+      author_id: string;
+      tmdb_id: number;
+      media_type: string;
+      season: number;
+      episode: number;
+      body: string;
+      spoiler: number;
+      created_at: number;
+    }>();
+
+  return (results ?? []).map((r) => ({
+    id: `comment:${r.id}`,
+    userId: r.author_id,
+    kind: "comment",
+    tmdbId: r.tmdb_id,
+    mediaType: r.media_type,
+    // The client needs the comment id to deep-link into the sheet scrolled to it,
+    // and `spoiler` so it can blur in the feed as well as in the list — a feed
+    // that reveals what the comment page hides would defeat the flag entirely.
+    payload: JSON.stringify({
+      commentId: r.id,
+      season: r.season,
+      episode: r.episode,
+      body: r.body,
+      spoiler: r.spoiler === 1,
+    }),
+    createdAt: r.created_at,
+  }));
+}
+
 // ── Reaction counts ─────────────────────────────────────────────────────────
 
 /**
