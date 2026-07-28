@@ -41,6 +41,10 @@ interface Env {
   // Per-author hourly comment cap. Config rather than a constant so it tunes
   // without a deploy, the same shape as RATE_LIMIT_PER_HOUR.
   COMMENTS_PER_HOUR?: string;
+  // GIF picker upstream. A SECRET (`wrangler secret put GIPHY_API_KEY`), never a
+  // var, and never in the APK: the key is attached to a paid negotiated tier and
+  // an APK key is trivially extractable. Unset ⇒ /api/giphy/* answers 503.
+  GIPHY_API_KEY?: string;
   // Shared with the Pages admin panel, which proxies comment moderation here
   // rather than reaching into D1 itself. A SECRET:
   //   wrangler secret put ADMIN_KEY
@@ -81,6 +85,7 @@ import {
   parseSubject,
 } from "./comments";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
+import { handleGiphy } from "./giphy";
 import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
@@ -441,6 +446,10 @@ export default {
 
     const commentReport = p.match(/^\/api\/comments\/([0-9A-HJKMNP-TV-Z:]{8,80})\/report$/);
     if (commentReport && req.method === "POST") return handleReportComment(commentReport[1], req, env, ctx);
+
+    // ── GIF picker, proxied so the key never ships in the APK ──
+    if (p === "/api/giphy/trending" && req.method === "GET") return handleGiphy("trending", req, env, ctx);
+    if (p === "/api/giphy/search" && req.method === "GET") return handleGiphy("search", req, env, ctx);
 
     // Comment moderation, proxied here by the admin panel rather than reading D1
     // itself: `n_public` moves with `hidden_at`, and that invariant has exactly one
