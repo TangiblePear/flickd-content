@@ -103,19 +103,41 @@ export function pickFcmTarget(
   return null;
 }
 
-export async function sendFcmMessage(config: FcmConfig, target: FcmTarget, friendId: string, type: string = "social_update") {
+/**
+ * @param extra additional `data` fields. **Values must be strings** — FCM rejects a
+ *   `data` map containing anything else, and the failure is a 400 logged in a place
+ *   nobody reads rather than a thrown error.
+ * @param collapseKey ⚠️ Not an optimisation. Without it a repeated digest ("12
+ *   people reacted") STACKS in the tray, so a cooldown that fires four times a day
+ *   leaves four notifications saying different numbers about the same comment. With
+ *   it, the newer one replaces the older and the tray always shows the current
+ *   count. Use a key that identifies the *subject*, not the event.
+ */
+export async function sendFcmMessage(
+  config: FcmConfig,
+  target: FcmTarget,
+  friendId: string,
+  type: string = "social_update",
+  extra: Record<string, string> = {},
+  collapseKey?: string,
+) {
   const accessToken = await getGoogleAccessToken(config);
   if (!accessToken) return;
 
   const message = {
     message: {
       ...target,
+      // Data-only, deliberately: no title or body, so no user content ever transits
+      // Google's servers as a visible payload and the client composes the
+      // notification itself. Keep it that way.
       data: {
         type,
         friendId,
+        ...extra,
       },
       android: {
-        priority: "high"
+        priority: "high",
+        ...(collapseKey ? { collapse_key: collapseKey } : {}),
       }
     }
   };

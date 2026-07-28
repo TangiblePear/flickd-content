@@ -114,6 +114,30 @@ const MEDIA_PROVIDERS = new Set(["giphy", "r2"]);
 export const REACTION_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
 const REACTIONS = new Set(REACTION_EMOJI);
 
+/**
+ * Wake a user's devices with a payload they can render without asking us anything.
+ *
+ * Injected rather than imported for the same reason `lists.ts` takes one: the push
+ * record lives in R2 and is keyed by the device friendId, neither of which belongs
+ * in a D1-only module.
+ *
+ * ⚠️ **This is the side effect that gets forgotten.** Shared lists (2026-07-27) and
+ * friend requests (2026-07-28) both shipped correct server state that no client was
+ * ever told about, because the relay POST they replaced had been firing the FCM as a
+ * side effect. Fire-and-forget by contract: a reaction must never fail because a
+ * push did.
+ */
+export type CommentNotifier = (userId: string, data: Record<string, string>) => void;
+
+/**
+ * How long a comment stays quiet after notifying its author.
+ *
+ * Volume here is unbounded and attacker-controllable — a stranger can react to
+ * anything you have written — and there is **no cron budget** for a scheduled
+ * digest, so the write path throttles itself.
+ */
+const REACTION_NOTIFY_COOLDOWN_MS = 15 * 60 * 1000;
+
 // ── Subject ─────────────────────────────────────────────────────────────────
 
 /**
@@ -993,6 +1017,7 @@ export async function handleReactToComment(
   req: Request,
   env: CommentsEnv,
   ctx?: ExecutionContext,
+  notify?: CommentNotifier,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -1057,7 +1082,67 @@ export async function handleReactToComment(
     );
   }
   await env.DB.batch(statements);
+
+  // Removing a reaction never notifies: "someone un-reacted" is not news, and it
+  // would double the volume of the noisiest event in the app.
+  if (!removing) ctx?.waitUntil(notifyReaction(env, comment, session.userId, notify));
   return noContent();
+}
+
+/**
+ * Tell the author that people are reacting — **bundled, cooled down, and anonymous**.
+ *
+ * This is the one notification a *stranger* can trigger, so its volume is
+ * attacker-controllable by definition and every guard below is load-bearing:
+ *
+ * - **never notify yourself** — reacting to your own comment is not news;
+ * - **never notify across a block**, checked in both directions;
+ * - **one push per [REACTION_NOTIFY_COOLDOWN_MS]**, carrying the *current total*
+ *   rather than one push per reaction. A comment that does well can draw hundreds;
+ * - **the reactors are not named.** Reaction display is counts-only, so naming them
+ *   would be inconsistent *and* would expose non-friend identities that stay hidden
+ *   everywhere else in the app;
+ * - the payload carries the count, so the client composes the notification with **no
+ *   sync round trip**. Otherwise every reaction would cost the *recipient* a Worker
+ *   request, which is the exact cost model this whole feature is shaped around.
+ *
+ * `last_notified_at` is claimed with a **conditional UPDATE**, never a read-then-write:
+ * two reactions landing together would both see a stale timestamp and both notify.
+ * `meta.changes === 0` means another request won the race, and this one stays quiet.
+ */
+async function notifyReaction(
+  env: CommentsEnv,
+  comment: CommentRow,
+  reactorId: string,
+  notify?: CommentNotifier,
+): Promise<void> {
+  if (!notify) return;
+  if (comment.author_id === reactorId) return;
+  if (await isBlockedEitherWay(env as any, reactorId, comment.author_id)) return;
+
+  const now = Date.now();
+  const claimed = await env.DB.prepare(
+    "UPDATE comments SET last_notified_at = ? WHERE id = ? AND last_notified_at < ?",
+  )
+    .bind(now, comment.id, now - REACTION_NOTIFY_COOLDOWN_MS)
+    .run();
+  if (!claimed.meta?.changes) return;
+
+  const tally = await env.DB.prepare(
+    "SELECT COALESCE(SUM(n), 0) AS n FROM comment_reaction_counts WHERE comment_id = ?",
+  )
+    .bind(comment.id)
+    .first<{ n: number }>();
+
+  notify(comment.author_id, {
+    kind: "comment_reaction",
+    commentId: comment.id,
+    tmdbId: String(comment.tmdb_id),
+    mediaType: comment.media_type,
+    season: String(comment.season),
+    episode: String(comment.episode),
+    count: String(tally?.n ?? 1),
+  });
 }
 
 // ── Reporting ───────────────────────────────────────────────────────────────

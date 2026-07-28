@@ -441,7 +441,12 @@ export default {
 
     const commentReaction = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/reaction$/);
     if (commentReaction && (req.method === "POST" || req.method === "DELETE")) {
-      return handleReactToComment(commentReaction[1], req, env, ctx);
+      // The collapse key is the COMMENT, not the event: a later "12 people reacted"
+      // must replace the earlier "8 people reacted" in the tray rather than sit
+      // beside it saying a different number about the same thing.
+      return handleReactToComment(commentReaction[1], req, env, ctx, (userId, data) =>
+        ctx.waitUntil(notifyAccount(env, userId, data, `comment:${data.commentId}`)),
+      );
     }
 
     const commentReport = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/report$/);
@@ -1581,7 +1586,31 @@ async function loadPublicCard(env: Env, friendId: string): Promise<PublicCard | 
  *
  * Best-effort throughout: a share that was delivered must not fail because a push did.
  */
-async function notifyAccount(env: Env, userId: string): Promise<void> {
+/**
+ * Wake a user's own devices.
+ *
+ * ⚠️ **Addressing a user has never required a friendship.** `users.friend_id` maps
+ * the account to its device folder and the record's `selfTopic` is subscribed to by
+ * that user's own devices, so this reaches anyone — friend or stranger's target
+ * alike. That is why comment-reaction notifications needed no new addressing
+ * mechanism, only a caller.
+ *
+ * The push record itself still lives in **R2**, which is the last relay dependency
+ * on this path. When the relay is retired it has to move to a D1 `device_tokens`
+ * table keyed by **token** (not by user+device: a token migrates between users on a
+ * shared device, and keying on the device eventually delivers one person's
+ * notifications to another). Nothing above this line changes when it does.
+ *
+ * @param data extra `data` fields for the client to render without a round trip.
+ * @param collapseKey replaces an earlier notification about the same subject rather
+ *   than stacking beside it — see [sendFcmMessage].
+ */
+async function notifyAccount(
+  env: Env,
+  userId: string,
+  data: Record<string, string> = {},
+  collapseKey?: string,
+): Promise<void> {
   try {
     const row = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
       .bind(userId)
@@ -1593,7 +1622,11 @@ async function notifyAccount(env: Env, userId: string): Promise<void> {
     const config = fcmConfig(env);
     if (!config) return;
     const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
-    if (target) await sendFcmMessage(config, target, friendId, "inbox_update");
+    if (!target) return;
+    // `kind` distinguishes a rendered notification from the bare "sync now" wake
+    // every other caller sends; the client switches on it.
+    const type = data.kind ? data.kind : "inbox_update";
+    await sendFcmMessage(config, target, friendId, type, data, collapseKey);
   } catch (e) {
     console.error("notifyAccount failed", e);
   }

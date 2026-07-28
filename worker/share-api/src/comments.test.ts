@@ -127,6 +127,12 @@ class FakeStmt {
       const r = this.db.comment_reactions.find((x) => x.comment_id === a[0] && x.user_id === a[1]);
       return r ? ({ emoji: r.emoji } as T) : null;
     }
+    if (s.startsWith("SELECT COALESCE(SUM(n), 0) AS n FROM comment_reaction_counts")) {
+      const n = this.db.comment_reaction_counts
+        .filter((r) => r.comment_id === a[0])
+        .reduce((sum, r) => sum + r.n, 0);
+      return { n } as T;
+    }
     if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, author_id, body")) {
       return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
     }
@@ -232,6 +238,12 @@ class FakeStmt {
       if (r) r.spoiler = 1;
       return { success: true, meta: { changes: r ? 1 : 0 } };
     }
+    if (s.startsWith("UPDATE comments SET last_notified_at")) {
+      // Conditional claim: only the caller that finds a stale timestamp wins.
+      const r = this.db.comments.find((c) => c.id === a[1] && (c.last_notified_at ?? 0) < a[2]);
+      if (r) r.last_notified_at = a[0];
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
     if (s.startsWith("UPDATE comments SET hidden_at")) {
       const r = this.db.comments.find((c) => c.id === a[1]);
       if (r) r.hidden_at = a[0];
@@ -287,7 +299,18 @@ class FakeStmt {
   }
 }
 
-const ctx = { waitUntil: () => {} } as any;
+/**
+ * `waitUntil` must actually retain the promise here.
+ *
+ * A `() => {}` stub silently discards it, so anything the handler defers — the
+ * cache put, and the reaction notification — has not run by the time the assertion
+ * does, and the test reads as "it never notified" rather than "we did not wait".
+ */
+const pending: Promise<unknown>[] = [];
+const ctx = { waitUntil: (p: Promise<unknown>) => pending.push(p) } as any;
+const flush = async () => {
+  while (pending.length) await pending.shift();
+};
 
 function env() {
   const db = new FakeD1();
@@ -624,16 +647,13 @@ describe("writing", () => {
 describe("reacting", () => {
   const react = (e: any, id: string, emoji: string, token: string) =>
     handleReactToComment(id, post(`/api/comments/${id}/reaction`, { emoji }, token), e, ctx);
+  const unreactRequest = (id: string, token: string) =>
+    new Request(`https://flickto.app/api/comments/${id}/reaction`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
   const unreact = (e: any, id: string, token: string) =>
-    handleReactToComment(
-      id,
-      new Request(`https://flickto.app/api/comments/${id}/reaction`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      }),
-      e,
-      ctx,
-    );
+    handleReactToComment(id, unreactRequest(id, token), e, ctx);
   const countOf = (e: any, emoji: string) =>
     e.DB.comment_reaction_counts.find((r: any) => r.emoji === emoji)?.n ?? 0;
 
@@ -685,6 +705,92 @@ describe("reacting", () => {
     seed(e.DB, { id: "C1", author_id: C, visibility: "friends" });
     expect((await react(e, "C1", "🔥", "tok-a")).status).toBe(404);
     expect((await react(e, "NOPE0000", "🔥", "tok-a")).status).toBe(404);
+  });
+
+  // ── Notifying the author ────────────────────────────────────────────────
+  // The one notification a STRANGER can trigger, so its volume is
+  // attacker-controllable and every guard below is load-bearing.
+
+  /** Captures `notify(userId, data)` calls so the guards can be asserted. */
+  const spy = () => {
+    const calls: Array<{ userId: string; data: Record<string, string> }> = [];
+    return { calls, notify: (userId: string, data: Record<string, string>) => calls.push({ userId, data }) };
+  };
+
+  it("notifies the author with a COUNT and no reactor identity", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "🔥", n: 7 });
+    const n = spy();
+
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "🔥" }, "tok-a"), e, ctx, n.notify);
+
+    await flush();
+
+    expect(n.calls).toHaveLength(1);
+    expect(n.calls[0].userId).toBe(B);
+    expect(n.calls[0].data.kind).toBe("comment_reaction");
+    expect(n.calls[0].data.commentId).toBe("C1");
+    // The count rides the payload so the client renders without a sync round
+    // trip — otherwise every reaction costs the RECIPIENT a Worker request.
+    expect(n.calls[0].data.count).toBe("8");
+    // ⚠️ Naming the reactor would be inconsistent with counts-only reactions AND
+    // would expose a non-friend identity that is hidden everywhere else.
+    expect(JSON.stringify(n.calls[0].data)).not.toContain(A);
+  });
+
+  it("stays quiet inside the cooldown, then notifies again once it lapses", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    const n = spy();
+
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "🔥" }, "tok-a"), e, ctx, n.notify);
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "❤️" }, "tok-c"), e, ctx, n.notify);
+    await flush();
+    // A comment that does well can draw hundreds; one push per reaction is the
+    // failure mode this exists to prevent.
+    expect(n.calls).toHaveLength(1);
+
+    // 16 minutes later the cooldown has lapsed.
+    e.DB.comments[0].last_notified_at = Date.now() - 16 * 60 * 1000;
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "😂" }, "tok-a"), e, ctx, n.notify);
+    await flush();
+    expect(n.calls).toHaveLength(2);
+  });
+
+  it("never notifies you about your own reaction", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A });
+    const n = spy();
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "🔥" }, "tok-a"), e, ctx, n.notify);
+    await flush();
+    expect(n.calls).toEqual([]);
+  });
+
+  it("never notifies across a block, in either direction", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    // A public comment stays readable and reactable — the block only silences the
+    // notification, which is what stops it being a way to poke someone.
+    e.DB.blocks.push({ blocker_id: B, blocked_id: A });
+    const n = spy();
+    await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "🔥" }, "tok-a"), e, ctx, n.notify);
+    await flush();
+    expect(n.calls).toEqual([]);
+  });
+
+  it("does not notify when a reaction is REMOVED", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: B });
+    await react(e, "C1", "🔥", "tok-a");
+    e.DB.comments[0].last_notified_at = 0;
+    const n = spy();
+
+    await handleReactToComment("C1", unreactRequest("C1", "tok-a"), e, ctx, n.notify);
+    await flush();
+    // "Someone un-reacted" is not news, and notifying would double the volume of
+    // the noisiest event in the app.
+    expect(n.calls).toEqual([]);
   });
 
   it("surfaces counts on the public list without revealing who reacted", async () => {
