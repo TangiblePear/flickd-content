@@ -81,12 +81,8 @@ import {
   parseSubject,
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
-import {
-  handleAdminCommentAction,
-  handleAdminCommentReports,
-  handleAdminUserAction,
-  handleAdminUserReports,
-} from "./commentsAdmin";
+import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
+import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleGiphy } from "./giphy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
@@ -495,17 +491,11 @@ export default {
       return handleAdminCommentAction(adminComment[1], adminComment[2], req, env);
     }
 
-    // Reports about PEOPLE rather than comments. These had no reader at all: the
-    // picture auto-hide threshold fired, but no human ever saw the report behind it
-    // and no other kind produced any outcome. Same shared-key auth as above.
-    if (p === "/api/moderation/user-reports" && req.method === "GET") return handleAdminUserReports(req, env);
-
-    // `[a-z-]` not `[a-z]`: the actions here are hyphenated (hide-picture), and the
-    // comment pattern above would have silently 404'd them.
-    const adminUser = p.match(/^\/api\/moderation\/users\/([0-9A-HJKMNP-TV-Z]{26})\/([a-z-]+)$/);
-    if (adminUser && req.method === "POST") {
-      return handleAdminUserAction(adminUser[1], adminUser[2], req, env);
-    }
+    // The unified queue: every report kind, both backends, one shape. Replaces the
+    // two stopgap person-report endpoints that shipped with the report consolidation
+    // — those were the temporary reader, not a second surface to keep alive.
+    if (p === "/api/moderation/reports" && req.method === "GET") return handleModerationQueue(req, env);
+    if (p === "/api/moderation/act" && req.method === "POST") return handleModerationAct(req, env);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

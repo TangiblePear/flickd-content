@@ -125,6 +125,8 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/giphy/search?q=cat"],
   ["GET", "/api/moderation/comment-reports"],
   ["POST", "/api/moderation/comments/AAAAAAAA/restore"],
+  ["GET", "/api/moderation/reports?state=open"],
+  ["POST", "/api/moderation/act", { itemId: "AAAAAAAA:user", source: "d1", action: "dismiss" }],
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],
@@ -174,5 +176,33 @@ describe("route wiring", () => {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);
       expect(`${method} ${path} -> ${res.status}`).toBe(`${method} ${path} -> 401`);
     }
+  });
+
+  /**
+   * The unified queue replaced two stopgap endpoints, and both halves of that swap are
+   * invisible to `wrangler deploy --dry-run`: a new path that never got routed and an
+   * old path still answering look exactly like success from there.
+   *
+   * 403 is the target, not 404 — it means the route matched, the handler ran, and the
+   * admin key was rejected. 404 would mean the router has no handler at all.
+   */
+  it("routes the unified moderation queue behind the admin key", async () => {
+    const listed = await worker.fetch(request("GET", "/api/moderation/reports?state=open"), env(), ctx);
+    expect(listed.status).toBe(403);
+
+    const acted = await worker.fetch(request("POST", "/api/moderation/act", {}), env(), ctx);
+    expect(acted.status).toBe(403);
+  });
+
+  it("no longer serves the stopgap person-report endpoints", async () => {
+    const listed = await worker.fetch(request("GET", "/api/moderation/user-reports"), env(), ctx);
+    expect(listed.status).toBe(404);
+
+    const acted = await worker.fetch(
+      request("POST", `/api/moderation/users/${USER_ID}/hide-picture`, {}),
+      env(),
+      ctx,
+    );
+    expect(acted.status).toBe(404);
   });
 });
