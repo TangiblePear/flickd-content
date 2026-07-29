@@ -1,0 +1,15 @@
+-- Posting suspension: a moderator can stop someone posting without locking them out.
+--
+-- ⚠️ NOT `users.status`. That column is checked in four places — auth.ts:289,
+-- friends.ts:165, friends.ts:494, friends.ts:606 — and every one treats a non-'active'
+-- value as "this person does not exist": no sign-in, no friend requests, absent from
+-- friend cards. That is a full account lockout plus social erasure. A suspended user
+-- must keep browsing, syncing, friends and watching, and lose only the ability to post.
+--
+-- NULL = not suspended. Permanent is stored as a far-future timestamp (4102444800000,
+-- 2100-01-01) rather than a separate flag, so one comparison covers both cases and no
+-- code has to special-case "forever".
+--
+-- No index. Every read is by `users.id` or `users.friend_id`, both already unique keys,
+-- and the column is only ever read alongside a row we are fetching anyway.
+ALTER TABLE users ADD COLUMN posting_suspended_until INTEGER;
