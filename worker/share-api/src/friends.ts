@@ -638,6 +638,17 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
       )
       .bind(id, id),
     env.DB.prepare("DELETE FROM comments WHERE author_id = ?").bind(id),
+    // Episode poll votes. This row is the ONLY thing linking a person to what they
+    // voted, so removing it is what makes the vote anonymous rather than merely
+    // unattributed.
+    //
+    // ⚠️ `episode_vote_counts` and `episode_option_counts` are deliberately NOT
+    // adjusted. They hold nothing but numbers — no user id, no way back to a person —
+    // so they are not this account's data to erase, and unpicking them would mean one
+    // statement per episode this user ever voted on, unbounded, inside a batch that has
+    // to stay transactional. The privacy policy says this plainly rather than implying
+    // the totals are recalculated.
+    env.DB.prepare("DELETE FROM episode_votes WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),

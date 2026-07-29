@@ -182,6 +182,7 @@ class FakeStmt {
       ["DELETE FROM comment_translations", "comment_translations", null],
       ["UPDATE comment_counts", "comment_counts", null],
       ["DELETE FROM comments", "comments", null],
+      ["DELETE FROM episode_votes", "episode_votes", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
@@ -612,5 +613,26 @@ describe("account deletion", () => {
     expect(env.DB.friendships.length).toBe(0);
     expect(env.DB.blocks.length).toBe(0);
     expect(env.DB.reports.length).toBe(0);
+  });
+
+  /**
+   * ⚠️ A table missing from the erasure batch fails SILENTLY — the delete returns 204
+   * and the rows simply stay. That is how `episode_votes` was left behind when the poll
+   * shipped, and it is only visible if something asserts it. The privacy policy claims
+   * a vote is removed with the account; this is what makes that claim true.
+   */
+  it("erases episode poll votes", async () => {
+    const env = await env0();
+    env.DB.episode_votes = [
+      { user_id: A, tmdb_id: 125988, media_type: "show", season: 1, episode: 1 },
+      { user_id: B, tmdb_id: 125988, media_type: "show", season: 1, episode: 1 },
+    ];
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect(env.DB.episode_votes.map((v: any) => v.user_id)).toEqual([B]);
   });
 });
