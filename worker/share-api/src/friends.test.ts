@@ -120,7 +120,7 @@ class FakeStmt {
     if (s.startsWith("SELECT id, friend_id FROM users WHERE friend_id IN")) {
       return { results: this.db.users.filter((u) => a.includes(u.friend_id) && u.status === "active") as T[] };
     }
-    if (s.startsWith("SELECT id, friend_id, friend_code FROM users WHERE id IN")) {
+    if (s.startsWith("SELECT id, friend_id, friend_code, push_friend_topic FROM users WHERE id IN")) {
       return {
         results: this.db.users.filter(
           (u) => a.includes(u.id) && u.status === "active" && u.friend_id != null,
@@ -448,7 +448,32 @@ describe("friend cards", () => {
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
     // feedReadToken must ride along: without it the new friend's feed is unreadable.
-    expect(res.cards).toEqual([{ userId: A, ...cards["FRIENDIDAAAA"] }]);
+    expect(res.cards).toEqual([{ userId: A, ...cards["FRIENDIDAAAA"], friendTopic: "" }]);
+  });
+
+  /**
+   * How a friend learns which FCM topic to subscribe to for someone's ambient updates.
+   *
+   * It used to travel sealed inside `access.json`, wrapped to the reader's keyset — a
+   * different object from the one step 2 moved, which is exactly why the push *write*
+   * could move onto the account while the *distribution* silently stayed on the relay.
+   * Nothing looked broken because the freshness call re-delivered that slot every sync.
+   */
+  it("hands an accepted friend the owner's push topic", async () => {
+    const env = await seeded();
+    env.DB.users.find((u: any) => u.id === A).push_friend_topic = "t_ABC123";
+    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
+
+    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
+    expect(res.cards[0].friendTopic).toBe("t_ABC123");
+  });
+
+  /** A stranger gets no card at all, so they never learn the topic either. */
+  it("does not leak a push topic to someone with no edge", async () => {
+    const env = await seeded();
+    env.DB.users.find((u: any) => u.id === C).push_friend_topic = "t_SECRET";
+    const res = (await (await handleGetFriendCards(post("tok-a", "/api/friends/cards", { userIds: [C] }), env, loader)).json()) as any;
+    expect(res.cards).toEqual([]);
   });
 
   /** The security argument: a users.id is not a capability, a friend code is. */

@@ -562,6 +562,24 @@ export interface PublicCard {
   feedReadToken: string;
 }
 
+/**
+ * A card plus the fields that come from D1 rather than the R2 blob.
+ *
+ * [friendTopic] is how a friend learns which FCM topic to subscribe to for this
+ * person's ambient updates. It used to travel **sealed inside `access.json`**, wrapped
+ * to each friend's public keyset — which is why step 2 could move the push *write* onto
+ * the account without noticing the *distribution* was somewhere else entirely.
+ *
+ * The two topics are asymmetric, and that is what hid the gap: `selfTopic` is subscribed
+ * only by the owner's own devices, which derive it from `socialSelfKey` and need no
+ * handout at all. `friendTopic` has to reach other people.
+ *
+ * No new exposure to the server: `users.push_friend_topic` has been a plaintext column
+ * since step 2. This only hands it to accepted friends, who are the intended audience,
+ * and it rides the `users` query this handler already runs.
+ */
+export type FriendCardWithTopic = PublicCard & { userId: string; friendTopic: string };
+
 const MAX_CARD_LOOKUPS = 25;
 
 /**
@@ -609,13 +627,13 @@ export async function handleGetFriendCards(
 
   const placeholders = allowed.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT id, friend_id, friend_code FROM users
+    `SELECT id, friend_id, friend_code, push_friend_topic FROM users
       WHERE id IN (${placeholders}) AND status = 'active' AND friend_id IS NOT NULL`,
   )
     .bind(...allowed)
-    .all<{ id: string; friend_id: string; friend_code: string | null }>();
+    .all<{ id: string; friend_id: string; friend_code: string | null; push_friend_topic: string | null }>();
 
-  const cards: (PublicCard & { userId: string })[] = [];
+  const cards: FriendCardWithTopic[] = [];
   for (const row of results ?? []) {
     if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
     // The code rides the query above, so the common path costs no extra read.
@@ -623,7 +641,7 @@ export async function handleGetFriendCards(
     // A card whose friendId disagrees with the claimed one is not this user's, and
     // `users.friend_id` is the claim-checked side — trust it over the R2 blob.
     if (!card || card.friendId !== row.friend_id) continue;
-    cards.push({ userId: row.id, ...card });
+    cards.push({ userId: row.id, ...card, friendTopic: row.push_friend_topic ?? "" });
   }
   return json({ cards });
 }
