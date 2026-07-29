@@ -99,17 +99,6 @@ class FakeStmt {
     if (s.startsWith("SELECT COUNT(*) AS n FROM comments WHERE author_id")) {
       return { n: this.db.comments.filter((c) => c.author_id === a[0] && c.created_at > a[1]).length } as T;
     }
-    if (s.startsWith("SELECT COUNT(*) AS n FROM ( SELECT 1 FROM comments")) {
-      const n = this.db.comments.filter(
-        (c) =>
-          this.onSubject(a)(c) &&
-          c.visibility === "public" &&
-          this.renderable(c) &&
-          c.lang != null &&
-          c.lang !== a[4],
-      ).length;
-      return { n } as T;
-    }
     if (s.startsWith("SELECT id, visibility, hidden_at, deleted_at, body, media_id, created_at FROM comments")) {
       const r = this.db.comments.find(
         (c) =>
@@ -161,6 +150,18 @@ class FakeStmt {
     const a = this.args;
     if (s.startsWith("SELECT user_a, user_b, state, requested_by, updated_at FROM friendships")) {
       return { results: this.db.friendships.filter((f) => f.user_a === a[0] || f.user_b === a[1]) as T[] };
+    }
+    if (s.startsWith("SELECT c.lang AS lang, COUNT(*) AS n")) {
+      const by = new Map<string, number>();
+      for (const c of this.db.comments) {
+        if (!this.onSubject(a)(c) || c.visibility !== "public" || !this.renderable(c)) continue;
+        if (c.lang == null) continue;
+        by.set(c.lang, (by.get(c.lang) ?? 0) + 1);
+      }
+      const results = [...by.entries()]
+        .map(([lang, n]) => ({ lang, n }))
+        .sort((x, y) => y.n - x.n);
+      return { results: results as T[] };
     }
     if (s.startsWith("SELECT c.id, c.tmdb_id, c.media_type")) {
       const isPublic = s.includes("c.visibility = 'public'");
@@ -418,16 +419,35 @@ describe("the public list", () => {
     expect(ids).toEqual(["C2"]);
   });
 
-  it("filters by language and reports how many are in others", async () => {
+  it("filters by language when one is asked for, and always names what is available", async () => {
     const e = env();
     seed(e.DB, { id: "C1", lang: "en" });
     seed(e.DB, { id: "C2", lang: "tr" });
     // Detection failing must never hide content, so a null lang always shows.
     seed(e.DB, { id: "C3", lang: null });
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?only=en"), e, MOVIE, ctx);
     const body = await res.json();
     expect(body.comments.map((c: any) => c.id).sort()).toEqual(["C1", "C3"]);
-    expect(body.otherLanguages).toBe(1);
+    // The picker has to name the options whether or not a filter is active.
+    expect(body.languages).toEqual([
+      { lang: "en", n: 1 },
+      { lang: "tr", n: 1 },
+    ]);
+  });
+
+  /**
+   * ⚠️ The default. Asking for nothing must return EVERYTHING — a reader whose device
+   * language happens to differ from the comments should not find an empty sheet, which
+   * is what filtering-by-default produced.
+   */
+  it("returns every language when none is asked for", async () => {
+    const e = env();
+    seed(e.DB, { id: "C1", lang: "en" });
+    seed(e.DB, { id: "C2", lang: "tr" });
+    seed(e.DB, { id: "C3", lang: null });
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const body = await res.json();
+    expect(body.comments.map((c: any) => c.id).sort()).toEqual(["C1", "C2", "C3"]);
   });
 });
 
@@ -444,11 +464,25 @@ describe("translation", () => {
     };
   };
 
-  it("does nothing without ?all=1 — tier 1 is a WHERE clause, not an AI call", async () => {
+  /**
+   * ⚠️ Automatic is the whole point. Translation used to require `?all=1`, an opt-in
+   * behind an affordance that was never rendered — so in practice it never ran at all.
+   */
+  it("translates automatically, with no opt-in flag", async () => {
     const e = env();
     e.AI = fakeAi((t) => `EN(${t})`);
     seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
-    await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    expect(e.AI.calls).toEqual(["harika"]);
+    expect((await res.json()).comments[0].translated).toBe("EN(harika)");
+  });
+
+  /** No target language, nothing to translate into — and no AI spent finding out. */
+  it("spends nothing when the reader sends no language", async () => {
+    const e = env();
+    e.AI = fakeAi((t) => `EN(${t})`);
+    seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
+    await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
     expect(e.AI.calls).toEqual([]);
   });
 
@@ -458,7 +492,7 @@ describe("translation", () => {
     seed(e.DB, { id: "C1", lang: "tr", body: "harika", updated_at: 500 });
     seed(e.DB, { id: "C2", lang: "en", body: "already english" });
 
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
     const byId = Object.fromEntries((await res.json()).comments.map((c: any) => [c.id, c]));
     expect(byId.C1.translated).toBe("EN(harika)");
     // A comment already in the reader's language costs nothing and offers nothing.
@@ -476,7 +510,7 @@ describe("translation", () => {
     seed(e.DB, { id: "C1", lang: "tr", body: "harika", updated_at: 500 });
     e.DB.comment_translations.push({ comment_id: "C1", lang: "en", text: "cached", src_updated_at: 500 });
 
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
     expect((await res.json()).comments[0].translated).toBe("cached");
     expect(e.AI.calls).toEqual([]);
   });
@@ -490,7 +524,7 @@ describe("translation", () => {
     // something that no longer matches the original.
     e.DB.comment_translations.push({ comment_id: "C1", lang: "en", text: "stale", src_updated_at: 500 });
 
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
     expect((await res.json()).comments[0].translated).toBe("fresh");
   });
 
@@ -508,7 +542,7 @@ describe("translation", () => {
     for (const id of ["C1", "C2", "C3"]) {
       seed(e.DB, { id, lang: "tr", body: `t-${id}`, created_at: Date.now() - Number(id[1]) });
     }
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
     const body = await res.json();
 
     // The page still renders — the whole point of catching per comment.
@@ -521,22 +555,22 @@ describe("translation", () => {
   it("flags everything untranslated when there is no AI binding at all", async () => {
     const e = env();
     seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
-    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
+    const res = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
     // One code path for "no binding" and "allowance gone": both mean the client
     // should offer to translate on the device.
     expect((await res.json()).comments[0].translationFailed).toBe(true);
   });
 
-  it("keys the cache on `all`, so the filtered and translated pages never collide", async () => {
-    // Both are per-language rather than per-reader, so both are cacheable — but
-    // they are different responses and must not share an entry.
+  it("keys the cache on the filter as well as the language, so pages never collide", async () => {
+    // Both are per-language rather than per-reader, so both are cacheable — but a
+    // narrowed page and a full one are different responses and must not share an entry.
     const e = env();
     e.AI = fakeAi((t) => `EN(${t})`);
     seed(e.DB, { id: "C1", lang: "tr", body: "harika" });
-    const filtered = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
-    const shown = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&all=1"), e, MOVIE, ctx);
-    expect((await filtered.json()).comments).toHaveLength(0);
-    expect((await shown.json()).comments).toHaveLength(1);
+    const all = await handleGetComments(get("/api/titles/movie/603/comments?lang=en"), e, MOVIE, ctx);
+    const onlyEn = await handleGetComments(get("/api/titles/movie/603/comments?lang=en&only=en"), e, MOVIE, ctx);
+    expect((await all.json()).comments).toHaveLength(1);
+    expect((await onlyEn.json()).comments).toHaveLength(0);
   });
 });
 

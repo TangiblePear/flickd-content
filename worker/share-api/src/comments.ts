@@ -87,8 +87,8 @@ const MAX_LANG = 8;
  * that already forced `FRESHNESS_CHUNK = 25`.
  */
 export const PAGE_LIMIT = 20;
-/** Bounds the "N comments in other languages" probe so it can never become a scan. */
-const OTHER_LANG_PROBE = 500;
+/** Bounds the language picker so a subject with absurd variety cannot become a scan. */
+const MAX_LANG_OPTIONS = 25;
 /** The caller's own reactions on one subject. Realistically a handful; this is the belt. */
 const MY_REACTIONS_LIMIT = 200;
 const DEFAULT_COMMENTS_PER_HOUR = 30;
@@ -393,19 +393,23 @@ export async function loadReactionCounts(
 
 // ── Translation ─────────────────────────────────────────────────────────────
 //
-// Three tiers, and most readers never leave the first:
+// Everyone sees every comment, in their own language, without asking:
 //
-//   1. **filter by `lang`** — a WHERE clause on a query already being made. Free,
-//      instant, no downloads, no AI. Fragmentation is one line of UI: "14 comments
-//      in other languages — show all", which is also where the affordance lives.
-//   2. **"show all": translate inline, here.** The request is already paid for, so
+//   1. **translate inline, here, by default.** The request is already paid for, so
 //      AI inference and D1 queries inside it are subrequests, not billed
-//      invocations — translation costs ZERO extra requests. The response becomes
-//      per-*language*, not per-*user*, so it still edge-caches: one entry per
-//      language rather than one per reader.
-//   3. **allowance exhausted: on-device.** The failure is caught PER COMMENT and
-//      the comment comes back flagged rather than failing the whole fetch. The
-//      client then offers ML Kit on Android; the PWA has no fallback tier yet.
+//      invocations — translation costs ZERO extra requests. Translations are cached
+//      per comment in D1 keyed on `src_updated_at`, so the model runs once per
+//      comment per language across every reader, and the response stays
+//      per-*language* rather than per-*reader*, so it still edge-caches.
+//   2. **allowance exhausted: on-device.** The failure is caught PER COMMENT and
+//      the comment comes back flagged (`translationFailed`) rather than failing the
+//      whole fetch. The client then offers ML Kit on Android.
+//
+// ⚠️ **`lang` is the translation TARGET, never a filter.** It was both once, and the
+// result was that a reader whose language differed from the comments watched them
+// load and then vanish. Narrowing is a separate, explicit `only` parameter driven by
+// the language picker — a thing the reader chooses, not a guess made from their
+// locale.
 //
 // ⚠️ **Never accept a client-generated translation back into this cache.** It is
 // tempting — a device that translated something could warm the cache for everyone
@@ -523,10 +527,10 @@ async function translateRows(
  * `?episode=2&season=1` and `?season=1&episode=2` are one cache entry, not two —
  * `caches.default` keys on the URL byte-for-byte and would otherwise fork.
  */
-function publicCacheKey(s: Subject, lang: string, all: boolean, cursor: number): Request {
+function publicCacheKey(s: Subject, lang: string, only: string, cursor: number): Request {
   return new Request(
     `https://comments.invalid/${s.mediaType}/${s.tmdbId}/${s.season}/${s.episode}` +
-      `?lang=${lang}&all=${all ? 1 : 0}&cursor=${cursor}`,
+      `?lang=${lang}&only=${only}&cursor=${cursor}`,
   );
 }
 
@@ -571,28 +575,33 @@ export async function loadPublicComments(env: CommentsEnv, s: Subject, lang: str
 }
 
 /**
- * How many public comments on [subject] are in some *other* language — the number
- * behind "14 comments in other languages — show all", which is also where the
- * translate affordance lives.
+ * Which languages this subject's public comments are actually written in.
  *
- * Bounded by [OTHER_LANG_PROBE] rather than counting honestly: an unbounded
- * `COUNT(*)` on a hot episode scans thousands of rows for a number rendered as one
- * line of text. "500+" is a perfectly good answer.
+ * Replaces a bare "N comments in other languages" count. A count can only power a
+ * single "show all" toggle; the picker needs to name the languages, and naming them
+ * is what lets a reader choose one deliberately instead of being filtered by a guess
+ * about their locale.
+ *
+ * One grouped query on the same indexed subject prefix the list read already walks,
+ * bounded by [MAX_LANG_OPTIONS] so it can never become a scan. Rows whose language
+ * was never detected are excluded — they always show regardless of filter, so they
+ * are not a choice anyone can make.
  */
-async function otherLanguageCount(env: CommentsEnv, s: Subject, lang: string): Promise<number> {
-  if (!lang) return 0;
-  const row = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM (
-       SELECT 1 FROM comments c
-        WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
-          AND c.visibility = 'public' AND ${RENDERABLE}
-          AND c.lang IS NOT NULL AND c.lang <> ?
-        LIMIT ?)`,
+async function languageBreakdown(env: CommentsEnv, s: Subject): Promise<Array<{ lang: string; n: number }>> {
+  const { results } = await env.DB.prepare(
+    `SELECT c.lang AS lang, COUNT(*) AS n
+       FROM comments c
+      WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
+        AND c.visibility = 'public' AND ${RENDERABLE} AND c.lang IS NOT NULL
+      GROUP BY c.lang
+      ORDER BY n DESC
+      LIMIT ?`,
   )
-    .bind(s.tmdbId, s.mediaType, s.season, s.episode, lang, OTHER_LANG_PROBE)
-    .first<{ n: number }>();
-  return row?.n ?? 0;
+    .bind(s.tmdbId, s.mediaType, s.season, s.episode, MAX_LANG_OPTIONS)
+    .all<{ lang: string; n: number }>();
+  return results ?? [];
 }
+
 
 /**
  * `GET /api/titles/{type}/{tmdbId}/comments?season=&episode=&lang=&cursor=`
@@ -608,23 +617,33 @@ async function otherLanguageCount(env: CommentsEnv, s: Subject, lang: string): P
  */
 export async function handleGetComments(req: Request, env: CommentsEnv, s: Subject, ctx?: ExecutionContext) {
   const url = new URL(req.url);
+  /**
+   * The reader's language, used ONLY as the translation target.
+   *
+   * ⚠️ This used to double as a filter, and that was the bug: a reader whose language
+   * did not match the comments saw them fetched and then hidden, with nothing saying
+   * why. Showing everything and translating into their language is what they actually
+   * wanted from "I speak German" — not "hide anything not German".
+   */
   const lang = (url.searchParams.get("lang") ?? "").slice(0, MAX_LANG);
-  // "Show all": stop filtering by language and translate what comes back. The
-  // response is still per-language rather than per-reader, so it still caches.
-  const all = url.searchParams.get("all") === "1";
+  /** Optional narrowing, from the language picker. Absent ⇒ every language. */
+  const only = (url.searchParams.get("only") ?? "").slice(0, MAX_LANG);
   const cursor = Number(url.searchParams.get("cursor")) || Number.MAX_SAFE_INTEGER;
 
   const cache = edgeCache();
-  const key = publicCacheKey(s, lang, all, cursor);
+  const key = publicCacheKey(s, lang, only, cursor);
   const hit = await cache?.match(key);
   if (hit) return hit;
 
-  const rows = await loadPublicComments(env, s, all ? "" : lang, cursor);
+  const rows = await loadPublicComments(env, s, only, cursor);
   const counts = await loadReactionCounts(env, rows.map((r) => r.id));
-  const translations = all && lang ? await translateRows(env, rows, lang, ctx) : {};
+  // Automatic, not opt-in. Cached per comment in D1 and keyed on `src_updated_at`, so
+  // the cost is paid once per comment per language across every reader — and the
+  // response stays per-LANGUAGE rather than per-reader, so it still edge-caches.
+  const translations = lang ? await translateRows(env, rows, lang, ctx) : {};
   const res = json({
     comments: rows.map((r) => toWire(r, counts[r.id], translations[r.id])),
-    otherLanguages: all ? 0 : await otherLanguageCount(env, s, lang),
+    languages: await languageBreakdown(env, s),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
   res.headers.set("Cache-Control", `public, max-age=${PUBLIC_CACHE_SECONDS}`);
