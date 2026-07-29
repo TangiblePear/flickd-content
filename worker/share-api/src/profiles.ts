@@ -395,6 +395,11 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
     // Remote Config: this request is already paid for, and Worker requests are the
     // binding constraint. Additive — older clients ignore the field.
     minSocialVersion: minSocialVersion(env),
+    // Rides app-open for the same reason minSocialVersion does: this request is already
+    // paid for, and Worker requests are the binding constraint. It lets the composer
+    // refuse up front instead of letting someone type a comment that will 403 on the
+    // next outbox sweep, minutes later and out of sight.
+    postingSuspendedUntil: await postingSuspendedUntil(env.DB, session.userId),
     serverTime: Date.now(),
   });
 }
