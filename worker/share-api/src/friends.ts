@@ -536,7 +536,12 @@ export async function handleLinkLegacyFriends(
  * testable without a bucket — the same reason `sync.ts` takes a `RelayLoader`.
  * Cards live in R2 and are written by the device that owns them.
  */
-export type CardLoader = (friendId: string) => Promise<PublicCard | null>;
+/**
+ * [friendCode] is the account-keyed lookup and is preferred; [friendId] is the legacy
+ * pointer, used only for an account that has not republished its card since the code
+ * moved into D1. The second argument goes at step 8.
+ */
+export type CardLoader = (friendCode: string | null, friendId: string) => Promise<PublicCard | null>;
 
 /**
  * Exactly the fields a local friend row needs, and nothing else.
@@ -604,16 +609,17 @@ export async function handleGetFriendCards(
 
   const placeholders = allowed.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT id, friend_id FROM users
+    `SELECT id, friend_id, friend_code FROM users
       WHERE id IN (${placeholders}) AND status = 'active' AND friend_id IS NOT NULL`,
   )
     .bind(...allowed)
-    .all<{ id: string; friend_id: string }>();
+    .all<{ id: string; friend_id: string; friend_code: string | null }>();
 
   const cards: (PublicCard & { userId: string })[] = [];
   for (const row of results ?? []) {
     if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
-    const card = await loadCard(row.friend_id);
+    // The code rides the query above, so the common path costs no extra read.
+    const card = await loadCard(row.friend_code ?? null, row.friend_id);
     // A card whose friendId disagrees with the claimed one is not this user's, and
     // `users.friend_id` is the claim-checked side — trust it over the R2 blob.
     if (!card || card.friendId !== row.friend_id) continue;
@@ -644,15 +650,20 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
   if (!session) return json({ error: "unauthorized" }, 401);
   const id = session.userId;
 
-  // The account's profile picture. It lives in R2, not D1, so the batch below cannot
-  // reach it — and it is the ONLY account-keyed object outside D1, which is exactly
-  // why it is easy to forget. Done before the batch: once `users` is gone there is no
-  // session left to prove who these bytes belonged to, and they become unreachable
-  // data no erasure can ever collect.
+  // The account-keyed objects that live in R2, not D1, so the batch below cannot reach
+  // them. Done BEFORE the batch: once the `users` row is gone, nothing can name them —
+  // the friend code in particular is only findable through that row — and they become
+  // unreachable data no erasure can ever collect.
   if (env.BUCKET) {
     await env.BUCKET.delete(`accounts/${id}/picture.jpg`);
     await env.BUCKET.delete(`accounts/${id}/picture-meta.json`);
     await env.BUCKET.delete(`_moderation/u/${id}.json`);
+    // The public friend card. Leaving it behind keeps a deleted person's name, avatar
+    // and picture URL resolvable by anyone still holding their code.
+    const own = await env.DB.prepare("SELECT friend_code FROM users WHERE id = ?")
+      .bind(id)
+      .first<{ friend_code: string | null }>();
+    if (own?.friend_code) await env.BUCKET.delete(`fc/${own.friend_code}.json`);
   }
 
   await env.DB.batch([

@@ -321,7 +321,7 @@ export default {
 
     // ── Friend code → public friend card ──
     if (p === "/api/friendcode" && req.method === "POST") {
-      return handlePublishFriendCode(req, env);
+      return handlePublishFriendCode(req, env, ctx);
     }
     const friendCode = p.match(new RegExp(`^/api/friendcode/(${FRIEND_CODE})$`));
     if (friendCode && req.method === "GET") return handleGetFriendCode(friendCode[1], env);
@@ -392,7 +392,7 @@ export default {
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);
     if (p === "/api/friends/link-legacy" && req.method === "POST") return handleLinkLegacyFriends(req, env, ctx);
     if (p === "/api/friends/cards" && req.method === "POST") {
-      return handleGetFriendCards(req, env, (friendId) => loadPublicCard(env, friendId), ctx);
+      return handleGetFriendCards(req, env, (code, friendId) => loadPublicCard(env, code, friendId), ctx);
     }
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
@@ -1508,34 +1508,64 @@ interface FcOwnerRecord {
   c: string;
 }
 
-// Publish my public friend card under a short, stable code (owner-authenticated).
-// The card holds only public pairing info — no secrets.
-async function handlePublishFriendCode(req: Request, env: Env): Promise<Response> {
-  const body = await req.text();
-  if (body.length > MAX_CARD_BYTES) return tooLarge();
-  let card: { friendId?: unknown };
+/**
+ * Publish my public friend card under a short, stable code. Session-authenticated
+ * (step 4 of the friendId retirement) — the owner secret it replaced meant the
+ * friendId WAS the auth scope.
+ *
+ * The card holds only public pairing info — no secrets — and is stored under the
+ * CODE, which does not move: printed QR codes, shared links and codes people have
+ * written down all resolve through `fc/{code}.json`. Only the reverse pointer moves.
+ */
+async function handlePublishFriendCode(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, { status: 401 });
+
+  const raw = await req.text();
+  if (raw.length > MAX_CARD_BYTES) return tooLarge();
+  let card: Record<string, unknown>;
   try {
-    card = JSON.parse(body);
+    card = JSON.parse(raw) as Record<string, unknown>;
   } catch {
     return invalidJson();
   }
   const friendId = typeof card.friendId === "string" ? card.friendId : "";
   if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) return json({ error: "invalid_card" }, { status: 400 });
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
 
-  // Stable code per friendId: reuse the existing one, else mint a unique one.
-  const owner = await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`);
-  const code = owner?.c ?? (await generateUniqueFriendCode(env));
+  // Stamped from the session, never taken from the body. `resolveCardOwner` trusts this
+  // field to address a match request, and the card is client-written — so a body that
+  // named someone else's account would have pointed everyone who scanned this code at
+  // them. The auth swap is what makes stamping it possible.
+  card.serverUserId = session.userId;
+  const body = JSON.stringify(card);
+
+  const owner = await env.DB.prepare("SELECT friend_id, friend_code FROM users WHERE id = ?")
+    .bind(session.userId)
+    .first<{ friend_id: string | null; friend_code: string | null }>();
+
+  // ⚠️ Order matters, and every branch PRESERVES an existing code. D1 first, then the
+  // legacy R2 pointer, and only then mint. Reversing those two — or skipping the
+  // fallback — hands an existing user a brand-new code and silently breaks every link
+  // and QR code they have already shared. That is why this reads before it writes.
+  const legacy = owner?.friend_code
+    ? null
+    : owner?.friend_id
+      ? await getJson<FcOwnerRecord>(env, `${owner.friend_id}/friendcode.json`)
+      : null;
+  const code = owner?.friend_code ?? legacy?.c ?? (await generateUniqueFriendCode(env));
+
   const existingCard = await getText(env, `fc/${code}.json`);
-  if (existingCard !== body) {
-    await putRaw(env, `fc/${code}.json`, body);
-    await putJson(env, `${friendId}/friendcode.json`, { c: code });
+  if (existingCard !== body) await putRaw(env, `fc/${code}.json`, body);
+  // Adopts the legacy code into D1 on the first republish, so the backfill needs no
+  // separate job. Still writes the legacy pointer while the relay purge path reads it.
+  if (owner?.friend_code !== code) {
+    await env.DB.prepare("UPDATE users SET friend_code = ? WHERE id = ?").bind(code, session.userId).run();
+    if (owner?.friend_id) await putJson(env, `${owner.friend_id}/friendcode.json`, { c: code });
   }
+
   return json({
     code,
     expiresAt: new Date(Date.now() + FRIENDCODE_TTL * 1000).toISOString(),
-    ownerRecreated: auth.created,
   });
 }
 
@@ -1545,22 +1575,21 @@ async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
 }
 
 /**
- * The public card a device published, by its friendId — the R2 half of
- * `POST /api/friends/cards`.
+ * The public card a device published — the R2 half of `POST /api/friends/cards`.
  *
- * Two gets, because cards are stored under the *code* (which is what a scanner
- * has) and the pointer from friendId to code lives beside the owner's other
- * objects. Callers are edge-gated and capped, so this never fans out far enough
- * to matter against the subrequest budget.
+ * ONE get when the account's `friend_code` is known, because that arrives in the
+ * `users` query the caller already runs; the second get is the legacy path, reading
+ * the friendId-keyed pointer for an account that has not republished since the code
+ * moved to D1. Subrequests are the binding constraint, so the common case is halved.
  *
  * Returns only the pairing fields. The stored card is client-written, so nothing
  * here may be trusted beyond being public — `handleGetFriendCards` re-checks the
  * friendId against the claim-checked `users.friend_id`.
  */
-async function loadPublicCard(env: Env, friendId: string): Promise<PublicCard | null> {
-  const owner = await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`);
-  if (!owner?.c) return null;
-  const card = await getJson<Record<string, unknown>>(env, `fc/${owner.c}.json`);
+async function loadPublicCard(env: Env, friendCode: string | null, friendId: string): Promise<PublicCard | null> {
+  const code = friendCode ?? (await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`))?.c ?? null;
+  if (!code) return null;
+  const card = await getJson<Record<string, unknown>>(env, `fc/${code}.json`);
   if (!card || typeof card.friendId !== "string" || typeof card.publicKeyset !== "string") return null;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
   return {

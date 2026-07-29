@@ -120,7 +120,7 @@ class FakeStmt {
     if (s.startsWith("SELECT id, friend_id FROM users WHERE friend_id IN")) {
       return { results: this.db.users.filter((u) => a.includes(u.friend_id) && u.status === "active") as T[] };
     }
-    if (s.startsWith("SELECT id, friend_id FROM users WHERE id IN")) {
+    if (s.startsWith("SELECT id, friend_id, friend_code FROM users WHERE id IN")) {
       return {
         results: this.db.users.filter(
           (u) => a.includes(u.id) && u.status === "active" && u.friend_id != null,
@@ -425,7 +425,11 @@ describe("friend cards", () => {
     "FRIENDIDBBBB": card("FRIENDIDBBBB", "Bo", "b"),
     "FRIENDIDCCCC": card("FRIENDIDCCCC", "Cy", "c"),
   };
-  const loader = async (friendId: string) => cards[friendId] ?? null;
+  // Mirrors the real loader: the account's friend_code when it has one, else the
+  // legacy friendId pointer. Both resolve to the same card here, so a test that does
+  // not care which path ran reads the same either way.
+  const loader = async (friendCode: string | null, friendId: string) =>
+    cards[friendCode ?? friendId] ?? cards[friendId] ?? null;
 
   /** Everyone has claimed a friendId and published a card. */
   const seeded = async () => {
@@ -476,7 +480,7 @@ describe("friend cards", () => {
   it("rejects a card whose friendId disagrees with the claimed one", async () => {
     const env = await seeded();
     await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
-    const lying = async () => ({ ...cards["FRIENDIDCCCC"] });
+    const lying = async (_code: string | null, _friendId: string) => ({ ...cards["FRIENDIDCCCC"] });
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, lying)).json()) as any;
     expect(res.cards).toEqual([]);
