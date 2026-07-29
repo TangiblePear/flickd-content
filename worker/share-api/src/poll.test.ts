@@ -57,7 +57,7 @@ class FakeStmt {
     if (s.trimStart().startsWith("SELECT n_voters")) {
       return (this.db.episode_vote_counts.find((r) => sameSubject(r, a)) ?? null) as T;
     }
-    if (s.trimStart().startsWith("SELECT rating, emotions, favourite_person_id")) {
+    if (s.trimStart().startsWith("SELECT rating, emotions, favourite_option_id")) {
       const row = this.db.episode_votes.find((r) => r.user_id === a[0] && sameSubject(r, a.slice(1)));
       return (row ?? null) as T;
     }
@@ -106,9 +106,9 @@ class FakeStmt {
       return { success: true, meta: { changes: 1 } };
     }
     if (s.trimStart().startsWith("INSERT INTO episode_votes")) {
-      const [user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_person_id, updated_at] = a;
+      const [user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_option_id, updated_at] = a;
       const row = this.db.episode_votes.find((r) => r.user_id === user_id && sameSubject(r, a.slice(1)));
-      if (row) Object.assign(row, { rating, emotions, favourite_person_id, updated_at });
+      if (row) Object.assign(row, { rating, emotions, favourite_option_id, updated_at });
       else
         this.db.episode_votes.push({
           user_id,
@@ -118,7 +118,7 @@ class FakeStmt {
           episode,
           rating,
           emotions,
-          favourite_person_id,
+          favourite_option_id,
           updated_at,
         });
       return { success: true, meta: { changes: 1 } };
@@ -161,12 +161,12 @@ describe("episode poll", () => {
 
   it("a first vote creates the totals and one row per option", async () => {
     const e = await env0();
-    await handlePutVote(vote("tok-a", { rating: 8, emotions: ["SHOCKED", "SAD"], favouritePersonId: 17419 }), e, EP);
+    await handlePutVote(vote("tok-a", { rating: 8, emotions: ["SHOCKED", "SAD"], favouriteOptionId: "TMDB:p17419" }), e, EP);
 
     expect(counts(e)).toMatchObject({ n_voters: 1, n_ratings: 1, rating_sum: 8 });
     expect(option(e, "emotion", "SHOCKED").n).toBe(1);
     expect(option(e, "emotion", "SAD").n).toBe(1);
-    expect(option(e, "person", "17419").n).toBe(1);
+    expect(option(e, "person", "TMDB:p17419").n).toBe(1);
   });
 
   /**
@@ -209,12 +209,12 @@ describe("episode poll", () => {
   /** A pick that did not change must not be double-counted by the diff. */
   it("re-submitting the same picks leaves the counts alone", async () => {
     const e = await env0();
-    await handlePutVote(vote("tok-a", { rating: 7, emotions: ["SAD"], favouritePersonId: 5 }), e, EP);
-    await handlePutVote(vote("tok-a", { rating: 7, emotions: ["SAD"], favouritePersonId: 5 }), e, EP);
+    await handlePutVote(vote("tok-a", { rating: 7, emotions: ["SAD"], favouriteOptionId: "TMDB:p5" }), e, EP);
+    await handlePutVote(vote("tok-a", { rating: 7, emotions: ["SAD"], favouriteOptionId: "TMDB:p5" }), e, EP);
 
     expect(counts(e)).toMatchObject({ n_voters: 1, n_ratings: 1, rating_sum: 7 });
     expect(option(e, "emotion", "SAD").n).toBe(1);
-    expect(option(e, "person", "5").n).toBe(1);
+    expect(option(e, "person", "TMDB:p5").n).toBe(1);
   });
 
   it("clearing a rating removes it from both the count and the sum", async () => {
@@ -262,7 +262,7 @@ describe("parseVote", () => {
     expect(parseVote({ emotions: ["SAD"] })).toEqual({
       rating: null,
       emotions: ["SAD"],
-      favouritePersonId: null,
+      favouriteOptionId: null,
     });
   });
 
@@ -283,8 +283,38 @@ describe("parseVote", () => {
     expect(parseVote({ emotions: ["SAD", "SAD", "SAD"] })?.emotions).toEqual(["SAD"]);
   });
 
-  it("rejects a non-positive person id", () => {
-    expect(parseVote({ favouritePersonId: 0 })).toBeNull();
-    expect(parseVote({ favouritePersonId: -3 })).toBeNull();
+  /**
+   * The favourite is a source-qualified CHARACTER key, not a bare person id -- one
+   * performer voices several characters, and the cast comes from two different id
+   * namespaces (Trakt relaying TMDB ids, or TVMaze). It becomes a PRIMARY KEY value,
+   * so the shape is validated rather than trusted.
+   */
+  it("accepts a source-qualified character or person key", () => {
+    expect(parseVote({ favouriteOptionId: "TVMAZE:c14839" })?.favouriteOptionId).toBe("TVMAZE:c14839");
+    expect(parseVote({ favouriteOptionId: "TMDB:p9999" })?.favouriteOptionId).toBe("TMDB:p9999");
+  });
+
+  it("rejects a favourite option id outside that shape", () => {
+    expect(parseVote({ favouriteOptionId: 17419 })).toBeNull();
+    expect(parseVote({ favouriteOptionId: "17419" })).toBeNull();
+    expect(parseVote({ favouriteOptionId: "tvmaze:c1" })).toBeNull();
+    expect(parseVote({ favouriteOptionId: "TMDB:x9999" })).toBeNull();
+    expect(parseVote({ favouriteOptionId: "TMDB:p" })).toBeNull();
+    expect(parseVote({ favouriteOptionId: "TMDB:p1; DROP" })).toBeNull();
+    // Unbounded ids would be unbounded index entries.
+    expect(parseVote({ favouriteOptionId: "TMDB:p" + "9".repeat(40) })).toBeNull();
+  });
+
+  /**
+   * The regression 0005 exists for: two characters voiced by ONE performer must land
+   * in two buckets, not one.
+   */
+  it("keeps two characters of the same performer apart", async () => {
+    const e = await env0();
+    await handlePutVote(vote("tok-a", { favouriteOptionId: "TVMAZE:c101" }), e, EP);
+    await handlePutVote(vote("tok-b", { favouriteOptionId: "TVMAZE:c102" }), e, EP);
+
+    expect(option(e, "person", "TVMAZE:c101").n).toBe(1);
+    expect(option(e, "person", "TVMAZE:c102").n).toBe(1);
   });
 });

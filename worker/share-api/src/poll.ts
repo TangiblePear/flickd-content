@@ -69,13 +69,18 @@ export interface PollOption {
 export interface VoteInput {
   rating: number | null;
   emotions: string[];
-  favouritePersonId: number | null;
+  /**
+   * The favourite CHARACTER, as one opaque source-qualified key -- `TVMAZE:c14839`
+   * or `TMDB:p9999`. See `migrations/0005_poll_character_options.sql` for why this is
+   * not a bare person id.
+   */
+  favouriteOptionId: string | null;
 }
 
 interface VoteRow {
   rating: number | null;
   emotions: string;
-  favourite_person_id: number | null;
+  favourite_option_id: string | null;
 }
 
 // ── Reading ─────────────────────────────────────────────────────────────────
@@ -200,20 +205,27 @@ export function parseVote(payload: unknown): VoteInput | null {
     if (!emotions.includes(e)) emotions.push(e);
   }
 
-  let favouritePersonId: number | null = null;
-  if (p.favouritePersonId != null) {
-    const id = Number(p.favouritePersonId);
-    if (!Number.isInteger(id) || id <= 0) return null;
-    favouritePersonId = id;
+  let favouriteOptionId: string | null = null;
+  if (p.favouriteOptionId != null) {
+    if (typeof p.favouriteOptionId !== "string") return null;
+    // ⚠️ Validated, not trusted: it becomes a PRIMARY KEY value in
+    // `episode_option_counts`, and the client is not the only thing that can send it.
+    // The charset is also what keeps the key bounded -- an unbounded id would be an
+    // unbounded index entry. (The kind/id packing below joins on NUL, which no input
+    // can contain, so that separator is not what this is defending.)
+    if (!/^[A-Z]{2,12}:[cp][0-9]{1,12}$/.test(p.favouriteOptionId)) return null;
+    favouriteOptionId = p.favouriteOptionId;
   }
 
-  return { rating, emotions, favouritePersonId };
+  return { rating, emotions, favouriteOptionId };
 }
 
 /** The options a vote contributes, as `kind`/`id` pairs. */
-function optionsOf(v: { emotions: string[]; favouritePersonId: number | null }): Array<[OptionKind, string]> {
+function optionsOf(v: { emotions: string[]; favouriteOptionId: string | null }): Array<[OptionKind, string]> {
   const out: Array<[OptionKind, string]> = v.emotions.map((e) => ["emotion" as OptionKind, e]);
-  if (v.favouritePersonId != null) out.push(["person", String(v.favouritePersonId)]);
+  // Still `person` as the kind: it is the slot for "the one thing you picked out of the
+  // cast", and renaming it would orphan every emotion-free reader for no gain.
+  if (v.favouriteOptionId != null) out.push(["person", v.favouriteOptionId]);
   return out;
 }
 
@@ -267,7 +279,7 @@ export async function handlePutVote(
 
   const key = [s.tmdbId, s.mediaType, s.season, s.episode] as const;
   const existing = await env.DB.prepare(
-    `SELECT rating, emotions, favourite_person_id FROM episode_votes
+    `SELECT rating, emotions, favourite_option_id FROM episode_votes
       WHERE user_id = ? AND tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?`,
   )
     .bind(session.userId, ...key)
@@ -277,7 +289,7 @@ export async function handlePutVote(
     ? {
         rating: existing.rating,
         emotions: existing.emotions ? existing.emotions.split(",").filter(Boolean) : [],
-        favouritePersonId: existing.favourite_person_id,
+        favouriteOptionId: existing.favourite_option_id,
       }
     : null;
 
@@ -308,7 +320,7 @@ export async function handlePutVote(
   );
 
   // ── Options, by set difference so an unchanged pick costs nothing ──
-  const before = new Set(optionsOf(old ?? { emotions: [], favouritePersonId: null }).map((o) => o.join(" ")));
+  const before = new Set(optionsOf(old ?? { emotions: [], favouriteOptionId: null }).map((o) => o.join(" ")));
   const after = new Set(optionsOf(vote).map((o) => o.join(" ")));
   for (const k of before) {
     if (!after.has(k)) {
@@ -327,19 +339,19 @@ export async function handlePutVote(
   statements.push(
     env.DB.prepare(
       `INSERT INTO episode_votes
-         (user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_person_id, updated_at)
+         (user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_option_id, updated_at)
        VALUES (?,?,?,?,?,?,?,?,?)
        ON CONFLICT(user_id, tmdb_id, media_type, season, episode) DO UPDATE SET
          rating = excluded.rating,
          emotions = excluded.emotions,
-         favourite_person_id = excluded.favourite_person_id,
+         favourite_option_id = excluded.favourite_option_id,
          updated_at = excluded.updated_at`,
     ).bind(
       session.userId,
       ...key,
       vote.rating,
       vote.emotions.join(","),
-      vote.favouritePersonId,
+      vote.favouriteOptionId,
       now,
     ),
   );
