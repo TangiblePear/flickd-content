@@ -97,6 +97,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/me/profile"],
   ["PUT", "/api/me/profile", {}],
   ["PUT", "/api/me/stats", {}],
+  ["PUT", "/api/me/push", { selfTopic: "s_abc", friendTopic: "f_abc" }],
   ["GET", "/api/feed"],
   ["POST", "/api/sync", {}],
   // Shared lists and match — the other `wake` consumers
@@ -171,6 +172,10 @@ describe("route wiring", () => {
       ["POST", "/api/comments"],
       ["DELETE", "/api/comments/AAAAAAAA"],
       ["POST", "/api/comments/AAAAAAAA/reaction"],
+      // The relay `PUT /api/user/{friendId}/push` it replaces answered 403 on a bad
+      // owner secret; this one must answer 401 on a missing session, which is the
+      // whole point of the move.
+      ["PUT", "/api/me/push"],
     ];
     for (const [method, path] of authed) {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);

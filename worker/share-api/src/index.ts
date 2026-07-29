@@ -111,6 +111,7 @@ import {
   minSocialVersion,
 } from "./profiles";
 import { postingSuspendedUntilForFriend, suspendedBody } from "./suspension";
+import { handlePutMyPush, readAccountPush } from "./push";
 
 interface ShareItem {
   tmdbId: number;
@@ -342,6 +343,10 @@ export default {
       if (req.method === "PUT") return handlePutMyProfile(req, env, ctx);
     }
     if (p === "/api/me/stats" && req.method === "PUT") return handlePutMyStats(req, env, ctx);
+    // Push topics on the account. Replaces `PUT /api/user/{friendId}/push`, which
+    // authenticated on a relay-issued owner secret — so the friendId WAS the auth
+    // scope. Both paths are served for one release; see push.ts.
+    if (p === "/api/me/push" && req.method === "PUT") return handlePutMyPush(req, env, ctx);
 
     const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
@@ -1448,17 +1453,25 @@ async function notifyAccount(
   collapseKey?: string,
 ): Promise<void> {
   try {
-    const row = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
-      .bind(userId)
-      .first<{ friend_id: string | null }>();
-    const friendId = row?.friend_id;
-    // No claimed friendId means no device has ever published a push record — there is
-    // nothing to wake, and that is normal for a brand-new account.
-    if (!friendId) return;
+    // One row for BOTH the topics and the legacy friendId — the same query that used
+    // to fetch `friend_id` alone, so the account-keyed path costs nothing extra and
+    // saves the R2 read the relay path needs.
+    const account = await readAccountPush(env.DB, userId);
+    if (!account) return;
     const config = fcmConfig(env);
     if (!config) return;
-    const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
+
+    // ⚠️ Fall through to the relay record when the account has no topics yet. Every
+    // install predating `PUT /api/me/push` published only `{friendId}/push.json`, so
+    // treating "no topics" as "unreachable" would silently unpush the whole userbase.
+    // Delete the fallback at step 8, not before.
+    const target =
+      pickFcmTarget(account, "self") ??
+      (account.friendId ? pickFcmTarget(await readPushRecord(env, account.friendId), "self") : null);
     if (!target) return;
+    // Still the friendId while one exists: it is the FCM message tag the client
+    // correlates on, not an addressing decision.
+    const friendId = account.friendId ?? userId;
     // `kind` distinguishes a rendered notification from the bare "sync now" wake
     // every other caller sends; the client switches on it.
     const type = data.kind ? data.kind : "inbox_update";
