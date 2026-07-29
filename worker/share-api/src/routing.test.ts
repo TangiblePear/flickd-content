@@ -113,6 +113,9 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/titles/movie/603/comments"],
   ["GET", "/api/titles/show/1399/comments?season=2&episode=5"],
   ["GET", "/api/titles/movie/603/comments/friends"],
+  // Episode poll. The GET is edge-cached and unauthenticated; the PUT is session-authed.
+  ["GET", "/api/titles/show/1399/poll?season=2&episode=5"],
+  ["PUT", "/api/titles/show/1399/vote?season=2&episode=5", { rating: 8, emotions: ["SAD"] }],
   ["POST", "/api/comments", { id: "AAAAAAAA", tmdbId: 603, mediaType: "movie", body: "hi" }],
   ["DELETE", "/api/comments/AAAAAAAA"],
   ["POST", "/api/comments/AAAAAAAA/reaction", { emoji: "🔥" }],
@@ -162,6 +165,7 @@ describe("route wiring", () => {
       // The comment write paths. The PUBLIC comment list is deliberately absent:
       // it answers 200 unauthenticated, which is the whole point of it.
       ["GET", "/api/titles/movie/603/comments/friends"],
+      ["PUT", "/api/titles/show/1399/vote?season=2&episode=5"],
       ["POST", "/api/comments"],
       ["DELETE", "/api/comments/AAAAAAAA"],
       ["POST", "/api/comments/AAAAAAAA/reaction"],

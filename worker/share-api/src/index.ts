@@ -84,6 +84,7 @@ import {
   handleReportComment,
   parseSubject,
 } from "./comments";
+import { handleGetPoll, handlePutVote } from "./poll";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleGiphy } from "./giphy";
 import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
@@ -432,6 +433,17 @@ export default {
       return commentsSubject[3]
         ? handleGetFriendComments(req, env, subject, ctx)
         : handleGetComments(req, env, subject, ctx);
+    }
+
+    // The episode poll rides the same `/api/titles/{type}/{id}/…` shape as comments so
+    // both features agree on what a subject is — `parseSubject` is shared, not copied.
+    // GET is unauthenticated and edge-cached; PUT is session-authed and writes.
+    const pollSubject = p.match(/^\/api\/titles\/([a-z]+)\/(\d+)\/(poll|vote)$/);
+    if (pollSubject) {
+      const subject = parseSubject(pollSubject[1], pollSubject[2], url.searchParams);
+      if (!subject) return json({ error: "invalid_subject" }, { status: 400 });
+      if (pollSubject[3] === "poll" && req.method === "GET") return handleGetPoll(req, env, subject, ctx);
+      if (pollSubject[3] === "vote" && req.method === "PUT") return handlePutVote(req, env, subject, ctx);
     }
 
     // One notifier for both comment paths. The collapse key is derived from the
