@@ -624,7 +624,21 @@ describe("picture auto-hide", () => {
     await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
     expect(env.BUCKET.puts.size).toBe(0);
     await handleReport(post("tok-c", "/api/report", { userId: B, kind: "picture" }), env);
-    expect(env.BUCKET.puts.get("_moderation/BBBBBB151CNQ6XHC0J.json")).toContain("auto_report_threshold");
+    expect(env.BUCKET.puts.get(`_moderation/u/${B}.json`)).toContain("auto_report_threshold");
+  });
+
+  /**
+   * The picture is reachable by two routes — account-keyed and legacy friendId — and
+   * each checks only its own key. Writing one and not the other leaves the image up on
+   * the other route, which is this control silently not working. Drop the legacy half
+   * of this assertion when the legacy route goes, not before.
+   */
+  it("writes BOTH tombstone keys while the legacy picture route still serves", async () => {
+    const env = await withBucket("1");
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    expect([...env.BUCKET.puts.keys()].sort()).toEqual(
+      [`_moderation/BBBBBB151CNQ6XHC0J.json`, `_moderation/u/${B}.json`].sort(),
+    );
   });
 
   it("does not let ONE reporter trip the threshold by reporting repeatedly", async () => {
@@ -635,14 +649,19 @@ describe("picture auto-hide", () => {
     expect(env.BUCKET.puts.size).toBe(0);
   });
 
-  it("records the report even when the target has no friendId to tombstone", async () => {
+  /**
+   * Was a documented gap: while the tombstone was keyed on the device friendId, an
+   * account that had never claimed one could NEVER have its picture taken down, and
+   * nothing said so. The account-keyed tombstone needs no friendId, so those accounts
+   * are covered now — the legacy key is simply skipped.
+   */
+  it("tombstones a target with no claimed friendId, on the account key alone", async () => {
     const env: any = await env0();
     env.BUCKET = makeBucket();
     env.REPORT_AUTOHIDE = "1";
-    // No claimed friend_id ⇒ nothing to hide, but the report must still be filed.
     expect((await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env)).status).toBe(204);
     expect(env.DB.reports.length).toBe(1);
-    expect(env.BUCKET.puts.size).toBe(0);
+    expect([...env.BUCKET.puts.keys()]).toEqual([`_moderation/u/${B}.json`]);
   });
 
   it("files the report with no bucket bound at all", async () => {

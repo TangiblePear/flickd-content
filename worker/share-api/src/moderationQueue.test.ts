@@ -398,20 +398,41 @@ describe("handleModerationAct", () => {
     return db;
   };
 
-  it("takes a picture down by writing the same tombstone the threshold writes", async () => {
+  // Both keys, both ways. The picture is reachable by the account-keyed route and the
+  // legacy friendId one, and each read path checks only its own key — so a takedown
+  // that wrote one and a restore that cleared the other would each be half-applied,
+  // with no error either time.
+  it("takes a picture down by writing the same tombstones the threshold writes", async () => {
     const db = withUser();
     const bucket = new ActFakeBucket();
     await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "hide" });
+    expect(bucket.store.has(`_moderation/u/${B}.json`)).toBe(true);
     expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(true);
   });
 
-  it("restoring a picture clears the tombstone AND dismisses its reports", async () => {
+  it("restoring a picture clears BOTH tombstones AND dismisses its reports", async () => {
     const db = withUser();
     const bucket = new ActFakeBucket();
+    bucket.store.set(`_moderation/u/${B}.json`, "{}");
     bucket.store.set("_moderation/FRIEND12345X.json", "{}");
     await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "restore" });
+    expect(bucket.store.has(`_moderation/u/${B}.json`)).toBe(false);
     expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(false);
     expect(db.reports[0].state).toBe("dismissed");
+  });
+
+  /**
+   * An account that never claimed a friendId used to be untakedownable — `actOnUser`
+   * answered 409 `no_picture_target` and the admin had no way to act. The account-keyed
+   * tombstone needs no friendId, so the 409 is gone for this case.
+   */
+  it("takes down a picture for an account with no claimed friendId", async () => {
+    const db = withUser();
+    db.users.find((u: any) => u.id === B).friend_id = null;
+    const bucket = new ActFakeBucket();
+    const res = await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "hide" });
+    expect(res.status).toBe(200);
+    expect([...bucket.store.keys()]).toEqual([`_moderation/u/${B}.json`]);
   });
 
   it("suspends for a preset duration", async () => {

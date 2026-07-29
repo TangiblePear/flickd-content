@@ -110,7 +110,7 @@ import {
   handlePutMyStats,
   minSocialVersion,
 } from "./profiles";
-import { postingSuspendedUntilForFriend, suspendedBody } from "./suspension";
+import { postingSuspendedUntil, postingSuspendedUntilForFriend, suspendedBody } from "./suspension";
 import { handlePutMyPush, readAccountPush } from "./push";
 
 interface ShareItem {
@@ -181,6 +181,10 @@ const MAX_SELF_BYTES = 512 * 1024; // live friends+block record ciphertext (grow
 
 const FRIENDCODE_TTL = 60 * 60 * 24 * 90; // 90 days
 const FRIEND_ID = "[A-Z0-9]{12,40}";
+// A D1 `users.id` — Crockford base32, 26 chars. Deliberately NOT reusing FRIEND_ID,
+// which it happens to satisfy: matching a friendId on an account-keyed route would
+// look up an id in the wrong id space and quietly answer 404.
+const USER_ID = "[0-9A-HJKMNP-TV-Z]{26}";
 const FRIEND_CODE = "[A-Z0-9]{6,12}";
 const HASH = "[a-f0-9]{32,160}"; // hex blind index (HMAC-SHA256 + Tink prefix)
 const LOOKUP_KEY = "[A-Za-z0-9_-]{22,128}"; // HKDF/HMAC blind index (hex or base64url)
@@ -286,6 +290,24 @@ export default {
       if (req.method === "GET") return handleGetPicture(friendId, env);
       if (req.method === "DELETE") return handleDeletePicture(friendId, req, env);
     }
+
+    // ── Profile picture, account-keyed (step 3 of the friendId retirement) ──
+    // Writes move under `/api/me/` and authenticate on the session; the READ stays
+    // public and unauthenticated at `/api/profile/{userId}/picture` because Coil
+    // loads it with no custom headers. `users.id` becomes the capability the
+    // friendId was — both are opaque, but note this promotes `users.id` from an
+    // identity into a URL anyone holding the URL can fetch.
+    //
+    // The old `/api/user/{friendId}/picture` trio above is untouched and keeps
+    // serving for one release: pictures uploaded by builds that predate this, and
+    // the `profiles.picture_url` values pointing at them, are still live.
+    if (p === "/api/me/picture") {
+      if (req.method === "PUT") return handlePutMyPicture(req, env, ctx);
+      if (req.method === "DELETE") return handleDeleteMyPicture(req, env, ctx);
+    }
+
+    const accountPicture = p.match(new RegExp(`^/api/profile/(${USER_ID})/picture$`));
+    if (accountPicture && req.method === "GET") return handleGetAccountPicture(accountPicture[1], env);
 
     // Report ingestion moved to `POST /api/report` (D1, session-authenticated). The
     // relay endpoint that lived here keyed on the device friendId and authenticated
@@ -1031,6 +1053,158 @@ async function handleDeletePicture(friendId: string, req: Request, env: Env): Pr
   await env.BUCKET.delete(picKey(friendId));
   await env.BUCKET.delete(picMetaKey(friendId));
   return json({ ok: true, ownerRecreated: auth.created });
+}
+
+// ── Account-keyed profile pictures (step 3 of the friendId retirement) ───────
+// Same bytes, same scan, same tombstone semantics as the relay trio above — but
+// keyed on `users.id` and written under a session instead of a relay-issued owner
+// secret. The secret WAS the auth scope, which is why this is a new mechanism
+// rather than a renamed path parameter.
+//
+// Stored under an explicit `accounts/` prefix, NOT at the bucket root. Root folders
+// there are friendId-shaped and the orphan reaper walks them looking for stale relay
+// profiles; a `users.id` folder sitting alongside them is indistinguishable from one,
+// and would eventually be reaped out from under a live account.
+const accountPicKey = (userId: string) => `accounts/${userId}/picture.jpg`;
+const accountPicMetaKey = (userId: string) => `accounts/${userId}/picture-meta.json`;
+
+/**
+ * Takedown tombstone, account-keyed.
+ *
+ * ⚠️ Both hide paths must write this **and** the legacy `_moderation/{friendId}.json`
+ * for as long as `handleGetPicture` still serves reads. They are two doors to the same
+ * image: a hide that wrote only one would leave the other serving it, which is an abuse
+ * control silently removed rather than a cosmetic inconsistency. The legacy write goes
+ * when the legacy route goes, not before.
+ */
+const accountTombstoneKey = (userId: string) => `_moderation/u/${userId}.json`;
+
+/**
+ * PUT /api/me/picture — session-authed upload of the raw image bytes.
+ *
+ * Deliberately identical to [handlePutPicture] in everything but auth and key: the
+ * size cap, the type sniff, the SafeSearch scan and the "a fresh upload clears any
+ * prior takedown" rule are all abuse controls, and a second upload path that enforced
+ * a subset of them would be a way around them.
+ */
+async function handlePutMyPicture(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, { status: 401 });
+
+  // No friendId hop: the session already names the account the suspension is on.
+  const suspended = await postingSuspendedUntil(env.DB, session.userId);
+  if (suspended > 0) return json(suspendedBody(suspended), { status: 403 });
+
+  const buf = new Uint8Array(await req.arrayBuffer());
+  if (buf.byteLength === 0) return invalidJson();
+  if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();
+
+  const contentType = sniffImageType(buf);
+  if (!contentType) return json({ error: "unsupported_type" }, { status: 400 });
+
+  const result = await moderateImage(buf, env);
+  if (!result.allowed) {
+    return json({ error: "rejected", categories: result.categories }, { status: 422 });
+  }
+
+  const version = Date.now();
+  await env.BUCKET.put(accountPicKey(session.userId), buf, { httpMetadata: { contentType } });
+  const meta: PictureMeta = {
+    version,
+    contentType,
+    sha256: await sha256hexBytes(buf),
+    verdict: result.verdict,
+    updatedAt: version,
+  };
+  await env.BUCKET.put(accountPicMetaKey(session.userId), JSON.stringify(meta), {
+    httpMetadata: { contentType: "application/json" },
+  });
+  // A new image supersedes any earlier auto/admin takedown — both spellings of it,
+  // since either hide path may have written either key.
+  await env.BUCKET.delete(accountTombstoneKey(session.userId));
+  ctx.waitUntil(clearLegacyTombstone(env, session.userId));
+
+  ctx.waitUntil(fanOutAccountProfileUpdate(env, session.userId));
+
+  const url = `https://flickto.app/api/profile/${session.userId}/picture?v=${version}`;
+  return json({ ok: true, url, version });
+}
+
+/**
+ * GET /api/profile/{userId}/picture. Public and unauthenticated **by design** — Coil
+ * loads it with no custom headers, so requiring one would break every avatar in the
+ * app rather than degrade it. A takedown tombstone yields 410, same as the relay route.
+ *
+ * There is no fallback to the relay key. Bytes uploaded by an older build live under
+ * `{friendId}/pics/`, and the `picture_url` stored for them still points at the relay
+ * route, which still serves — so nothing reaches this handler expecting them.
+ */
+async function handleGetAccountPicture(userId: string, env: Env): Promise<Response> {
+  const tomb = await env.BUCKET.get(accountTombstoneKey(userId));
+  if (tomb) return new Response("gone", { status: 410, headers: { ...CORS } });
+  const obj = await env.BUCKET.get(accountPicKey(userId));
+  if (!obj) return new Response("not found", { status: 404, headers: { ...CORS } });
+  const contentType = obj.httpMetadata?.contentType ?? "image/jpeg";
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      ...CORS,
+    },
+  });
+}
+
+/** DELETE /api/me/picture — session-authed removal of my own picture. */
+async function handleDeleteMyPicture(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const session = await resolveSession(req, env as any, ctx);
+  if (!session) return json({ error: "unauthorized" }, { status: 401 });
+  await env.BUCKET.delete(accountPicKey(session.userId));
+  await env.BUCKET.delete(accountPicMetaKey(session.userId));
+  return json({ ok: true });
+}
+
+/**
+ * Clear the legacy friendId-keyed tombstone too, so a fresh upload is not
+ * immediately re-hidden should the account ever be read back through the old route.
+ * Best-effort and off the response path — the account-keyed clear above is the one
+ * that has to happen.
+ */
+async function clearLegacyTombstone(env: Env, userId: string): Promise<void> {
+  try {
+    const row = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
+      .bind(userId)
+      .first<{ friend_id: string | null }>();
+    if (row?.friend_id) await env.BUCKET.delete(tombstoneKey(row.friend_id));
+  } catch {
+    // Nothing to do: the account-keyed tombstone is already gone.
+  }
+}
+
+/**
+ * The account-keyed twin of [fanOutProfileUpdate] — one FCM message to the owner's
+ * friend topic so friends refetch the profile and pick up the new picture URL.
+ *
+ * Falls back to the relay push record for the same reason [notifyAccount] does: every
+ * install predating `PUT /api/me/push` published only `{friendId}/push.json`, and
+ * treating "no topics on the account" as "unreachable" would silently stop friends
+ * being told anything changed.
+ */
+async function fanOutAccountProfileUpdate(env: Env, userId: string): Promise<void> {
+  try {
+    const config = fcmConfig(env);
+    if (!config) return;
+    const account = await readAccountPush(env.DB, userId);
+    if (!account) return;
+    const target =
+      pickFcmTarget(account, "friend") ??
+      (account.friendId ? pickFcmTarget(await readPushRecord(env, account.friendId), "friend") : null);
+    if (!target) return;
+    // The friendId while one exists: it is the tag the client correlates on, not an
+    // addressing decision. Same rule as notifyAccount.
+    await sendFcmMessage(config, target, account.friendId ?? userId, "social_update");
+  } catch (e) {
+    console.error("Failed to fan out account profile update", e);
+  }
 }
 
 // The relay report handler that lived here is gone — reports are D1 now

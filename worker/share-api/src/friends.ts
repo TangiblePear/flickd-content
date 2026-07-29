@@ -403,13 +403,17 @@ export async function handleReport(req: Request, env: FriendsEnv, ctx?: Executio
  * the system, so losing it in the migration would have quietly removed an abuse
  * control rather than dead code.
  *
- * The tombstone is still keyed on the device `friendId`, because that is what
- * `handleGetPicture` checks and what the object is stored under — hence the lookup.
- * When pictures move onto `users.id` this indirection goes with them.
+ * ⚠️ **Writes BOTH tombstones.** A picture is now reachable by two routes — the
+ * account-keyed `/api/profile/{userId}/picture` and the legacy
+ * `/api/user/{friendId}/picture` — and each checks its own key. Writing one and not
+ * the other leaves the image up on the other route, which is this abuse control
+ * silently not working rather than a cosmetic inconsistency. The legacy write goes
+ * when the legacy route goes, not before.
  *
- * Best-effort by design: a target with no claimed `friend_id`, or a Worker with no
- * bucket, means no takedown — but the report itself is already recorded, and failing
- * the request would lose the report to keep a picture up.
+ * Best-effort by design: a Worker with no bucket means no takedown — but the report
+ * itself is already recorded, and failing the request would lose the report to keep a
+ * picture up. A target with no claimed `friend_id` is no longer an obstacle: the
+ * account-keyed tombstone does not need one, so those accounts are now coverable too.
  */
 async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Promise<void> {
   const bucket = env.BUCKET;
@@ -426,16 +430,14 @@ async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Prom
     .first<{ n: number }>();
   if (!row || row.n < threshold) return;
 
+  const body = JSON.stringify({ reason: "auto_report_threshold", at: Date.now() });
+  const opts = { httpMetadata: { contentType: "application/json" } };
+  await bucket.put(`_moderation/u/${targetUserId}.json`, body, opts);
+
   const owner = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
     .bind(targetUserId)
     .first<{ friend_id: string | null }>();
-  if (!owner?.friend_id) return;
-
-  await bucket.put(
-    `_moderation/${owner.friend_id}.json`,
-    JSON.stringify({ reason: "auto_report_threshold", at: Date.now() }),
-    { httpMetadata: { contentType: "application/json" } },
-  );
+  if (owner?.friend_id) await bucket.put(`_moderation/${owner.friend_id}.json`, body, opts);
 }
 
 // ── Bridging the existing device-identity pairings ───────────────────────────
@@ -641,6 +643,18 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
   const id = session.userId;
+
+  // The account's profile picture. It lives in R2, not D1, so the batch below cannot
+  // reach it — and it is the ONLY account-keyed object outside D1, which is exactly
+  // why it is easy to forget. Done before the batch: once `users` is gone there is no
+  // session left to prove who these bytes belonged to, and they become unreachable
+  // data no erasure can ever collect.
+  if (env.BUCKET) {
+    await env.BUCKET.delete(`accounts/${id}/picture.jpg`);
+    await env.BUCKET.delete(`accounts/${id}/picture-meta.json`);
+    await env.BUCKET.delete(`_moderation/u/${id}.json`);
+  }
+
   await env.DB.batch([
     // Sealed match payloads first: they are children of match_requests, and a blob
     // outliving the handshake that addressed it is unreachable data nobody can delete.

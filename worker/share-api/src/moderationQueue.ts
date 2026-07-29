@@ -223,9 +223,16 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
   return out;
 }
 
-/** A picture takedown is an R2 object keyed on the device friendId, not a D1 column. */
+/**
+ * A picture takedown is an R2 object, not a D1 column. Checks the account-keyed key
+ * first and only then the legacy friendId one — a takedown recorded before pictures
+ * moved onto `users.id` exists under the legacy key alone, and reading it as "not
+ * hidden" would invite an admin to restore a picture that is already down.
+ */
 async function pictureTombstoned(env: ModerationEnv, r: QueueRow): Promise<boolean> {
-  if (r.kind !== "picture" || !env.BUCKET || !r.friend_id) return false;
+  if (r.kind !== "picture" || !env.BUCKET) return false;
+  if ((await env.BUCKET.head(`_moderation/u/${r.target_id}.json`)) !== null) return true;
+  if (!r.friend_id) return false;
   return (await env.BUCKET.head(`_moderation/${r.friend_id}.json`)) !== null;
 }
 
@@ -429,21 +436,28 @@ async function actOnUser(
           WHERE target_id = ? AND state = 'open' AND kind IN (${PERSON_KINDS.map(() => "?").join(",")})`,
       )
       .bind(userId, ...PERSON_KINDS);
-  const tombstone = owner.friend_id ? `_moderation/${owner.friend_id}.json` : null;
+  // BOTH spellings of the tombstone. A picture is reachable by two routes — the
+  // account-keyed one and the legacy friendId one — and each checks only its own key,
+  // so a hide that wrote one would leave the other route still serving the image.
+  // The legacy entry drops out when the legacy route does.
+  const tombstones = [`_moderation/u/${userId}.json`];
+  if (owner.friend_id) tombstones.push(`_moderation/${owner.friend_id}.json`);
 
   switch (action) {
-    // Writes the SAME object the automatic threshold writes, so a manual takedown and
+    // Writes the SAME objects the automatic threshold writes, so a manual takedown and
     // an automatic one can never disagree about whether a picture is down.
-    case "hide":
-      if (!tombstone || !env.BUCKET) return json({ error: "no_picture_target" }, 409);
-      await env.BUCKET.put(tombstone, JSON.stringify({ reason: "admin_takedown", at: Date.now() }), {
-        httpMetadata: { contentType: "application/json" },
-      });
+    case "hide": {
+      if (!env.BUCKET) return json({ error: "no_picture_target" }, 409);
+      const body = JSON.stringify({ reason: "admin_takedown", at: Date.now() });
+      for (const key of tombstones) {
+        await env.BUCKET.put(key, body, { httpMetadata: { contentType: "application/json" } });
+      }
       return json({ ok: true });
+    }
 
     case "restore":
-      if (!tombstone || !env.BUCKET) return json({ error: "no_picture_target" }, 409);
-      await env.BUCKET.delete(tombstone);
+      if (!env.BUCKET) return json({ error: "no_picture_target" }, 409);
+      for (const key of tombstones) await env.BUCKET.delete(key);
       await dismissKind(env, userId, "picture").run();
       return json({ ok: true });
 

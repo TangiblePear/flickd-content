@@ -98,6 +98,10 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["PUT", "/api/me/profile", {}],
   ["PUT", "/api/me/stats", {}],
   ["PUT", "/api/me/push", { selfTopic: "s_abc", friendTopic: "f_abc" }],
+  // Account-keyed profile picture. The PUT/DELETE are session-authed under /api/me/;
+  // the GET is public, which is why it is absent from the 401 list below.
+  ["DELETE", "/api/me/picture"],
+  ["GET", `/api/profile/${USER_ID}/picture`],
   ["GET", "/api/feed"],
   ["POST", "/api/sync", {}],
   // Shared lists and match — the other `wake` consumers
@@ -176,6 +180,10 @@ describe("route wiring", () => {
       // owner secret; this one must answer 401 on a missing session, which is the
       // whole point of the move.
       ["PUT", "/api/me/push"],
+      // The relay picture PUT answered 403 on a bad owner secret; these must answer
+      // 401 on a missing session, which is the whole point of the move.
+      ["PUT", "/api/me/picture"],
+      ["DELETE", "/api/me/picture"],
     ];
     for (const [method, path] of authed) {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);
