@@ -209,6 +209,32 @@ FIREBASE_PROJECT_ID = "flickto-cf7b6"
 # raised in docs/Current Plans/android-accounts-firebase-d1-plan.md §6C — an
 # unrecorded flip cannot be audited later, and getting it wrong silently breaks
 # friends' activity for everyone still behind.
+#
+# STILL 0 — and deliberately, having measured what raising it would actually do.
+#
+# **A floor of 31 would have blocked nobody.** versionCode 31 was set 2026-07-28; the
+# gate itself shipped 2026-07-29, still under 31. So builds exist that report 31 and
+# contain no gate code, and `31 < 31` is false. Raising it to 31 looks like protection
+# and provides none, which is worse than leaving it off.
+#
+# **A client-side "update required" prompt can never reach a build that predates the
+# prompt.** The gate is forward-looking insurance for FUTURE flips, not a way to warn
+# whoever is behind today. Those clients swallow the 426 in a runCatching and simply go
+# stale — which is exactly the silent breakage the plan warns of.
+#
+# RAISE IT TO 32 once a versionCode-32 build has shipped and rolled out. 32 is the first
+# build that both contains the gate and is distinguishable from the pre-gate 31s. Record
+# the value and date here and in docs/Current Plans/android-accounts-firebase-d1-plan.md
+# §6C when you do — an unrecorded flip cannot be audited later.
+#
+# Measured 2026-07-29, for whoever weighs that decision: `flickto-social` is the only
+# social bucket (created 2026-06-03) at 330 objects / 1.25 MB across 97 folders — but
+# only **6** have ever published a profile.json, and 71 are 2-object shells that
+# registered an identity and published nothing. 44 never ran a build after the
+# push-topics cutover of ~21 Jul, so they are dead. The blast radius of stopping relay
+# writes is those 6 folders. Note this CONTRADICTS the GOOGLE_WEB_CLIENT_ID comment
+# above about apps "already on the Play Store" with "real users" — that claim is either
+# about a build predating the social channel, or stale.
 MIN_SOCIAL_VERSION = "0"
 
 
