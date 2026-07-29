@@ -27,6 +27,8 @@
 // a moderation takeover.
 
 import { adminAuthorized } from "./commentsAdmin";
+import { setHidden, type CommentRow, type CommentsEnv } from "./comments";
+import { suspensionUntil } from "./suspension";
 
 export interface ModerationEnv {
   DB: D1Database;
@@ -310,4 +312,191 @@ async function loadR2(env: ModerationEnv): Promise<ReportItem[]> {
     });
   }
   return out;
+}
+
+// ── Actions ──────────────────────────────────────────────────────────────────
+// ONE endpoint rather than one per target type. The queue is heterogeneous, so the
+// alternative is the client choosing between four URLs — routing knowledge in the
+// browser, and a second place to keep the target-type mapping correct.
+//
+// ⚠️ **Every reversing action also dismisses the reports that caused it.** Leaving
+// them `open` means the next single report re-trips the threshold and one person
+// overturns the moderator. Established by commentsAdmin.ts; it holds identically for
+// pictures, shares and suspensions.
+
+type Action = "hide" | "restore" | "unblur" | "suspend" | "unsuspend" | "dismiss";
+
+const ALLOWED: Record<"comment" | "user" | "share", Set<Action>> = {
+  comment: new Set<Action>(["hide", "restore", "unblur", "dismiss"]),
+  user: new Set<Action>(["hide", "restore", "suspend", "unsuspend", "dismiss"]),
+  share: new Set<Action>(["hide", "restore", "dismiss"]),
+};
+
+/** `POST /api/moderation/act` — `{ itemId, source, action, durationMs? }`. */
+export async function handleModerationAct(req: Request, env: ModerationEnv): Promise<Response> {
+  if (!adminAuthorized(req, env as any)) return json({ error: "forbidden" }, 403);
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return json({ error: "invalid_json" }, 400);
+  }
+  const itemId = typeof body.itemId === "string" ? body.itemId : "";
+  const source = body.source === "r2" ? "r2" : "d1";
+  const action = String(body.action ?? "") as Action;
+  if (!itemId) return json({ error: "bad_request" }, 400);
+
+  if (source === "r2") {
+    if (!ALLOWED.share.has(action)) return json({ error: "unsupported_action" }, 400);
+    return actOnShare(itemId, action, env);
+  }
+
+  // `{targetId}:{kind}`, split on the LAST colon: a comment id is itself
+  // `{userId}:{subject}` and contains colons, while no kind ever does.
+  const cut = itemId.lastIndexOf(":");
+  if (cut <= 0) return json({ error: "bad_request" }, 400);
+  const targetId = itemId.slice(0, cut);
+  const kind = itemId.slice(cut + 1);
+
+  return COMMENT_KINDS.has(kind)
+    ? actOnComment(targetId, action, env)
+    : actOnUser(targetId, action, body.durationMs, env);
+}
+
+const dismissKind = (env: ModerationEnv, targetId: string, kind: string) =>
+  env.DB.prepare("UPDATE reports SET state = 'dismissed' WHERE target_id = ? AND kind = ? AND state = 'open'")
+    .bind(targetId, kind);
+
+async function actOnComment(id: string, action: Action, env: ModerationEnv): Promise<Response> {
+  if (!ALLOWED.comment.has(action)) return json({ error: "unsupported_action" }, 400);
+
+  const row = await env.DB.prepare(
+    `SELECT id, tmdb_id, media_type, season, episode, author_id, body, visibility,
+            spoiler, hidden_at, deleted_at, media_id
+       FROM comments WHERE id = ?`,
+  )
+    .bind(id)
+    .first<CommentRow>();
+  if (!row) return json({ error: "not_found" }, 404);
+
+  switch (action) {
+    case "hide":
+      // `setHidden` moves comment_counts.n_public in the same batch. That invariant has
+      // exactly one implementation and this is not a second one.
+      if (row.hidden_at == null) await setHidden(env as unknown as CommentsEnv, row, true);
+      return json({ ok: true });
+
+    case "restore":
+      if (row.hidden_at != null) await setHidden(env as unknown as CommentsEnv, row, false);
+      await dismissKind(env, id, "comment").run();
+      return json({ ok: true });
+
+    case "unblur":
+      await env.DB.batch([
+        env.DB.prepare("UPDATE comments SET spoiler = 0 WHERE id = ?").bind(id),
+        dismissKind(env, id, "comment_spoiler"),
+      ]);
+      return json({ ok: true });
+
+    // "This is fine" clears BOTH kinds — leaving the other open would put the item
+    // straight back in the queue the moderator just cleared.
+    default:
+      await env.DB.batch([dismissKind(env, id, "comment"), dismissKind(env, id, "comment_spoiler")]);
+      return json({ ok: true });
+  }
+}
+
+const PERSON_KINDS = ["user", "profile", "feed_comment", "picture"];
+
+async function actOnUser(
+  userId: string,
+  action: Action,
+  durationMs: unknown,
+  env: ModerationEnv,
+): Promise<Response> {
+  if (!ALLOWED.user.has(action)) return json({ error: "unsupported_action" }, 400);
+
+  const owner = await env.DB.prepare("SELECT id, friend_id FROM users WHERE id = ?")
+    .bind(userId)
+    .first<{ id: string; friend_id: string | null }>();
+  if (!owner) return json({ error: "not_found" }, 404);
+
+  const dismissAll = () =>
+    env.DB
+      .prepare(
+        `UPDATE reports SET state = 'dismissed'
+          WHERE target_id = ? AND state = 'open' AND kind IN (${PERSON_KINDS.map(() => "?").join(",")})`,
+      )
+      .bind(userId, ...PERSON_KINDS);
+  const tombstone = owner.friend_id ? `_moderation/${owner.friend_id}.json` : null;
+
+  switch (action) {
+    // Writes the SAME object the automatic threshold writes, so a manual takedown and
+    // an automatic one can never disagree about whether a picture is down.
+    case "hide":
+      if (!tombstone || !env.BUCKET) return json({ error: "no_picture_target" }, 409);
+      await env.BUCKET.put(tombstone, JSON.stringify({ reason: "admin_takedown", at: Date.now() }), {
+        httpMetadata: { contentType: "application/json" },
+      });
+      return json({ ok: true });
+
+    case "restore":
+      if (!tombstone || !env.BUCKET) return json({ error: "no_picture_target" }, 409);
+      await env.BUCKET.delete(tombstone);
+      await dismissKind(env, userId, "picture").run();
+      return json({ ok: true });
+
+    case "suspend": {
+      const until = suspensionUntil(Number(durationMs));
+      if (until == null) return json({ error: "invalid_duration" }, 400);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET posting_suspended_until = ? WHERE id = ?").bind(until, userId),
+        // Marked `dismissed`, not left open: a suspension is a decision on the person,
+        // and leaving the reports open would re-present a case already judged.
+        dismissAll(),
+      ]);
+      return json({ ok: true, until });
+    }
+
+    case "unsuspend":
+      await env.DB.batch([
+        env.DB.prepare("UPDATE users SET posting_suspended_until = NULL WHERE id = ?").bind(userId),
+        dismissAll(),
+      ]);
+      return json({ ok: true });
+
+    default:
+      await dismissAll().run();
+      return json({ ok: true });
+  }
+}
+
+async function actOnShare(code: string, action: Action, env: ModerationEnv): Promise<Response> {
+  const bucket = env.BUCKET;
+  if (!bucket) return json({ error: "no_bucket" }, 409);
+
+  // A share link's takedown state is a `hidden` flag on the object itself, not a
+  // `_moderation/` tombstone: the read paths check the flag and then answer exactly
+  // what an expired link answers, so a hidden link is indistinguishable from a stale one.
+  if (action === "hide" || action === "restore") {
+    const share = await bucket.get(`share/${code}.json`);
+    if (!share) return json({ error: "not_found" }, 404);
+    const stored = (await share.json()) as Record<string, unknown>;
+    await bucket.put(`share/${code}.json`, JSON.stringify({ ...stored, hidden: action === "hide" }), {
+      httpMetadata: { contentType: "application/json" },
+    });
+    // Restoring clears the reports for the same reason it does everywhere else.
+    if (action === "restore") await deleteShareReports(bucket, code);
+    return json({ ok: true });
+  }
+
+  await deleteShareReports(bucket, code);
+  return json({ ok: true });
+}
+
+/** R2 has no `state` column, so "resolved" is "deleted" for a share report. */
+async function deleteShareReports(bucket: R2Bucket, code: string): Promise<void> {
+  const listed = await bucket.list({ prefix: `_reports/${code}/`, limit: 1000 });
+  await Promise.all(listed.objects.map((o) => bucket.delete(o.key)));
 }

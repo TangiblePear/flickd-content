@@ -257,3 +257,222 @@ describe("handleModerationQueue", () => {
     expect(await items(res)).toHaveLength(1);
   });
 });
+
+import { handleModerationAct } from "./moderationQueue";
+import { PERMANENT_UNTIL } from "./suspension";
+
+/** Adds the write paths /act needs to the read-only fake above. */
+class ActFakeD1 extends FakeD1 {
+  batched: string[] = [];
+  prepare(sql: string) {
+    const self = this;
+    const s = sql.replace(/\s+/g, " ").trim();
+    const read = super.prepare(sql);
+    let args: unknown[] = [];
+    const stmt = {
+      _sql: s,
+      bind(...a: unknown[]) {
+        args = a;
+        (read as any).bind(...a);
+        return stmt;
+      },
+      async first<T>(): Promise<T | null> {
+        if (s.startsWith("SELECT id, tmdb_id")) {
+          return (self.comments.find((c) => c.id === args[0]) as T) ?? null;
+        }
+        if (s.startsWith("SELECT id, friend_id")) {
+          return (self.users.find((u) => u.id === args[0]) as T) ?? null;
+        }
+        return null;
+      },
+      async all<T>() {
+        return (read as any).all<T>();
+      },
+      async run() {
+        self.batched.push(s);
+        if (s.startsWith("UPDATE users SET posting_suspended_until = ?")) {
+          const u = self.users.find((x) => x.id === args[1]);
+          if (u) u.posting_suspended_until = args[0];
+        }
+        if (s.startsWith("UPDATE users SET posting_suspended_until = NULL")) {
+          const u = self.users.find((x) => x.id === args[0]);
+          if (u) u.posting_suspended_until = null;
+        }
+        if (s.startsWith("UPDATE comments SET hidden_at")) {
+          const c = self.comments.find((x) => x.id === args[1]);
+          if (c) c.hidden_at = args[0];
+        }
+        if (s.startsWith("UPDATE comments SET spoiler = 0")) {
+          const c = self.comments.find((x) => x.id === args[0]);
+          if (c) c.spoiler = 0;
+        }
+        if (s.startsWith("UPDATE reports SET state")) {
+          // TWO statement shapes: `AND kind = ?` binds one kind, `AND kind IN (?,?,?,?)`
+          // binds four. Collapsing them would make the person-level dismiss silently
+          // clear only the first kind and the tests below pass for the wrong reason.
+          const kinds = s.includes("kind IN (") ? args.slice(1) : [args[1]];
+          for (const r of self.reports) {
+            if (r.target_id === args[0] && r.state === "open" && kinds.includes(r.kind)) {
+              r.state = "dismissed";
+            }
+          }
+        }
+        return { success: true, meta: { changes: 1 } };
+      },
+    };
+    return stmt as any;
+  }
+  async batch(stmts: any[]) {
+    const out = [];
+    for (const s of stmts) out.push(await s.run());
+    return out;
+  }
+}
+
+class ActFakeBucket extends FakeBucket {
+  async put(key: string, value: string) {
+    this.store.set(key, typeof value === "string" ? value : "{}");
+  }
+  async delete(key: string) {
+    this.store.delete(key);
+  }
+}
+
+const act = (e: any, body: Record<string, unknown>, key: string | null = KEY) =>
+  handleModerationAct(
+    new Request("https://flickto.app/api/moderation/act", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(key ? { "X-Admin-Key": key } : {}) },
+      body: JSON.stringify(body),
+    }),
+    e,
+  );
+
+describe("handleModerationAct", () => {
+  const withComment = () => {
+    const db = new ActFakeD1();
+    db.comments = [
+      { id: "C1", tmdb_id: 550, media_type: "movie", season: -1, episode: -1, author_id: B, body: "x", visibility: "friends", spoiler: 1, hidden_at: null, deleted_at: null, media_id: null },
+    ];
+    db.reports = [
+      { target_id: "C1", kind: "comment", reporter_id: A, context: "", state: "open", created_at: NOW, body_snapshot: "x" },
+      { target_id: "C1", kind: "comment_spoiler", reporter_id: A, context: "", state: "open", created_at: NOW, body_snapshot: "x" },
+    ];
+    return db;
+  };
+
+  it("closes rather than opens when the key is wrong", async () => {
+    expect((await act(env(new ActFakeD1()), { itemId: "x:user", source: "d1", action: "dismiss" }, "nope")).status).toBe(403);
+  });
+
+  it("hides a comment", async () => {
+    const db = withComment();
+    const res = await act(env(db), { itemId: "C1:comment", source: "d1", action: "hide" });
+    expect(res.status).toBe(200);
+    expect(db.comments[0].hidden_at).not.toBeNull();
+  });
+
+  // The moderator-overturn guard. Leaving the reports open means the next single
+  // report re-trips the threshold and one person overrules the moderator.
+  it("restoring a comment also dismisses the reports that hid it", async () => {
+    const db = withComment();
+    db.comments[0].hidden_at = NOW;
+    await act(env(db), { itemId: "C1:comment", source: "d1", action: "restore" });
+    expect(db.comments[0].hidden_at).toBeNull();
+    expect(db.reports.find((r) => r.kind === "comment")!.state).toBe("dismissed");
+  });
+
+  it("unblurring also dismisses the spoiler reports", async () => {
+    const db = withComment();
+    await act(env(db), { itemId: "C1:comment_spoiler", source: "d1", action: "unblur" });
+    expect(db.comments[0].spoiler).toBe(0);
+    expect(db.reports.find((r) => r.kind === "comment_spoiler")!.state).toBe("dismissed");
+  });
+
+  const withUser = (until: number | null = null) => {
+    const db = new ActFakeD1();
+    db.users = [{ id: B, friend_id: "FRIEND12345X", posting_suspended_until: until }];
+    db.reports = [
+      { target_id: B, kind: "picture", reporter_id: A, context: "", state: "open", created_at: NOW, body_snapshot: null },
+    ];
+    return db;
+  };
+
+  it("takes a picture down by writing the same tombstone the threshold writes", async () => {
+    const db = withUser();
+    const bucket = new ActFakeBucket();
+    await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "hide" });
+    expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(true);
+  });
+
+  it("restoring a picture clears the tombstone AND dismisses its reports", async () => {
+    const db = withUser();
+    const bucket = new ActFakeBucket();
+    bucket.store.set("_moderation/FRIEND12345X.json", "{}");
+    await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "restore" });
+    expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(false);
+    expect(db.reports[0].state).toBe("dismissed");
+  });
+
+  it("suspends for a preset duration", async () => {
+    const db = withUser();
+    const before = Date.now();
+    const res = await act(env(db), { itemId: `${B}:picture`, source: "d1", action: "suspend", durationMs: 604_800_000 });
+    expect(res.status).toBe(200);
+    expect(db.users[0].posting_suspended_until).toBeGreaterThanOrEqual(before + 604_800_000);
+  });
+
+  it("stores permanent as the far-future sentinel", async () => {
+    const db = withUser();
+    await act(env(db), { itemId: `${B}:picture`, source: "d1", action: "suspend", durationMs: 0 });
+    expect(db.users[0].posting_suspended_until).toBe(PERMANENT_UNTIL);
+  });
+
+  it("rejects a duration that is not one of the four presets", async () => {
+    const db = withUser();
+    const res = await act(env(db), { itemId: `${B}:picture`, source: "d1", action: "suspend", durationMs: 1234 });
+    expect(res.status).toBe(400);
+    expect(db.users[0].posting_suspended_until).toBeNull();
+  });
+
+  it("unsuspending clears the column and dismisses the reports behind it", async () => {
+    const db = withUser(PERMANENT_UNTIL);
+    await act(env(db), { itemId: `${B}:picture`, source: "d1", action: "unsuspend" });
+    expect(db.users[0].posting_suspended_until).toBeNull();
+    expect(db.reports[0].state).toBe("dismissed");
+  });
+
+  it("hides and restores a share link on the share object, not a tombstone", async () => {
+    const bucket = new ActFakeBucket();
+    bucket.store.set("share/8FK2QP.json", JSON.stringify({ title: "list", hidden: false }));
+    bucket.store.set("_reports/8FK2QP/1-" + A + ".json", shareReport("8FK2QP", A, NOW));
+    const e = env(new ActFakeD1(), bucket);
+
+    await act(e, { itemId: "8FK2QP", source: "r2", action: "hide" });
+    expect(JSON.parse(bucket.store.get("share/8FK2QP.json")!).hidden).toBe(true);
+
+    await act(e, { itemId: "8FK2QP", source: "r2", action: "restore" });
+    expect(JSON.parse(bucket.store.get("share/8FK2QP.json")!).hidden).toBe(false);
+    // R2 has no state column, so "dismissed" means deleted.
+    expect([...bucket.store.keys()].some((k) => k.startsWith("_reports/8FK2QP/"))).toBe(false);
+  });
+
+  it("dismissing a share report deletes its records", async () => {
+    const bucket = new ActFakeBucket();
+    bucket.store.set("_reports/8FK2QP/1-" + A + ".json", shareReport("8FK2QP", A, NOW));
+    await act(env(new ActFakeD1(), bucket), { itemId: "8FK2QP", source: "r2", action: "dismiss" });
+    expect([...bucket.store.keys()].some((k) => k.startsWith("_reports/"))).toBe(false);
+  });
+
+  // A comment cannot be suspended and a share link cannot be unblurred. Silently
+  // ignoring a mismatch would let the UI show a button that appears to work.
+  it("rejects an action the target type does not support", async () => {
+    expect((await act(env(withComment()), { itemId: "C1:comment", source: "d1", action: "suspend", durationMs: 0 })).status).toBe(400);
+    expect((await act(env(new ActFakeD1(), new ActFakeBucket()), { itemId: "8FK2QP", source: "r2", action: "unblur" })).status).toBe(400);
+    expect((await act(env(withUser()), { itemId: `${B}:picture`, source: "d1", action: "unblur" })).status).toBe(400);
+  });
+
+  it("404s on an unknown target", async () => {
+    expect((await act(env(new ActFakeD1()), { itemId: `${B}:user`, source: "d1", action: "dismiss" })).status).toBe(404);
+  });
+});
