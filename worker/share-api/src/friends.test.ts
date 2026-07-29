@@ -84,8 +84,25 @@ class FakeStmt {
       return { n: this.db.friendships.filter((f) => f.requested_by === a[0] && f.created_at > a[1]).length } as T;
     }
     if (s.startsWith("SELECT id FROM reports")) {
-      const r = this.db.reports.find((x) => x.reporter_id === a[0] && x.target_id === a[1] && x.state === "open");
+      // Dedupe is per reporter/target/KIND — reporting a picture must not swallow a
+      // later report about behaviour, so the fake has to key on kind too or the
+      // regression it guards against would pass here.
+      const r = this.db.reports.find(
+        (x) => x.reporter_id === a[0] && x.target_id === a[1] && x.kind === a[2] && x.state === "open",
+      );
       return r ? ({ id: r.id } as T) : null;
+    }
+    if (s.startsWith("SELECT COUNT(DISTINCT reporter_id) AS n FROM reports")) {
+      const who = new Set(
+        this.db.reports
+          .filter((x) => x.target_id === a[0] && x.kind === "picture" && x.state === "open")
+          .map((x) => x.reporter_id),
+      );
+      return { n: who.size } as T;
+    }
+    if (s.startsWith("SELECT friend_id FROM users WHERE id = ?")) {
+      const u = this.db.users.find((x) => x.id === a[0]);
+      return u ? ({ friend_id: u.friend_id ?? null } as T) : null;
     }
     if (s.includes("FROM profiles WHERE user_id = ?")) return null;
     throw new Error(`FakeD1: unhandled first() ${s}`);
@@ -554,6 +571,85 @@ describe("reports", () => {
     const env = await env0();
     expect((await handleReport(post("tok-a", "/api/report", { userId: B, kind: "nonsense" }), env)).status).toBe(400);
     expect((await handleReport(post("tok-a", "/api/report", { userId: A, kind: "user" }), env)).status).toBe(400);
+  });
+
+  it("keeps reports of DIFFERENT kinds about the same person separate", async () => {
+    const env = await env0();
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "user" }), env);
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    // Deduping on the pair alone would have swallowed the second: reporting someone's
+    // picture must not silence a later report about their behaviour.
+    expect(env.DB.reports.length).toBe(2);
+  });
+
+  it("accepts feed_comment, the kind the relay endpoint used to carry", async () => {
+    const env = await env0();
+    expect(
+      (await handleReport(post("tok-a", "/api/report", { userId: B, kind: "feed_comment", context: "abuse" }), env))
+        .status,
+    ).toBe(204);
+  });
+});
+
+// ── Profile-picture auto-hide ────────────────────────────────────────────────
+// Ported from the relay report handler. It is the only automatic takedown in the
+// system, so it gets its own coverage: losing it in the migration would have
+// removed an abuse control rather than dead code.
+describe("picture auto-hide", () => {
+  /** A bucket fake that records puts, so the tombstone is observable. */
+  const makeBucket = () => {
+    const puts = new Map<string, string>();
+    return {
+      puts,
+      put: async (k: string, v: string) => {
+        puts.set(k, v);
+      },
+      delete: async (k: string) => {
+        puts.delete(k);
+      },
+    } as any;
+  };
+
+  const withBucket = async (autohide = "3") => {
+    const env: any = await env0();
+    env.BUCKET = makeBucket();
+    env.REPORT_AUTOHIDE = autohide;
+    // The tombstone is keyed on the device friendId, so the target needs one claimed.
+    env.DB.users.find((u: any) => u.id === B).friend_id = "BBBBBB151CNQ6XHC0J";
+    return env;
+  };
+
+  it("tombstones the picture once enough DISTINCT reporters flag it", async () => {
+    const env = await withBucket("2");
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    expect(env.BUCKET.puts.size).toBe(0);
+    await handleReport(post("tok-c", "/api/report", { userId: B, kind: "picture" }), env);
+    expect(env.BUCKET.puts.get("_moderation/BBBBBB151CNQ6XHC0J.json")).toContain("auto_report_threshold");
+  });
+
+  it("does not let ONE reporter trip the threshold by reporting repeatedly", async () => {
+    const env = await withBucket("2");
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
+    expect(env.BUCKET.puts.size).toBe(0);
+  });
+
+  it("records the report even when the target has no friendId to tombstone", async () => {
+    const env: any = await env0();
+    env.BUCKET = makeBucket();
+    env.REPORT_AUTOHIDE = "1";
+    // No claimed friend_id ⇒ nothing to hide, but the report must still be filed.
+    expect((await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env)).status).toBe(204);
+    expect(env.DB.reports.length).toBe(1);
+    expect(env.BUCKET.puts.size).toBe(0);
+  });
+
+  it("files the report with no bucket bound at all", async () => {
+    const env: any = await env0();
+    env.REPORT_AUTOHIDE = "1";
+    expect((await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env)).status).toBe(204);
+    expect(env.DB.reports.length).toBe(1);
   });
 });
 

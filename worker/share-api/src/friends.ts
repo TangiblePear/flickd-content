@@ -20,6 +20,13 @@ export interface FriendsEnv {
   DB: D1Database;
   FIREBASE_PROJECT_ID?: string;
   FRIEND_REQUESTS_PER_HOUR?: string;
+  /**
+   * Distinct reporters that auto-hide a profile picture. Optional so the report
+   * handler still works in tests and on a Worker without the binding — a missing
+   * bucket disables the takedown, it never fails the report.
+   */
+  BUCKET?: R2Bucket;
+  REPORT_AUTOHIDE?: string;
 }
 
 const CORS = {
@@ -35,7 +42,10 @@ const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const FRIEND_ID_RE = /^[A-Z0-9]{12,40}$/;
 const MAX_REPORT_CONTEXT = 1000;
 const MAX_LEGACY_FRIEND_IDS = 200;
-const REPORT_KINDS = new Set(["user", "profile", "comment", "picture"]);
+// `feed_comment` is a friend's comment as it appears on the Friend Feed, and is
+// distinct from `comment` (a D1 title/episode comment) — they are moderated through
+// different admin queues, so folding them together would hide one behind the other.
+const REPORT_KINDS = new Set(["user", "profile", "comment", "comment_spoiler", "feed_comment", "picture"]);
 const DEFAULT_REQUESTS_PER_HOUR = 20;
 
 /** 128-bit opaque id, Crockford base32 — same shape as `users.id`. */
@@ -347,8 +357,15 @@ export async function handleGetBlocks(req: Request, env: FriendsEnv, ctx?: Execu
 
 /**
  * POST /api/report `{ userId, kind, context? }` — file a moderation report.
- * One open report per reporter/target pair; repeats are folded in rather than
- * stacking, so a single user cannot inflate a target's report count.
+ *
+ * One open report per reporter/target/**kind**; repeats are folded in rather than
+ * stacking, so a single user cannot inflate a target's report count. The kind is
+ * part of that key deliberately: reporting someone's picture must not silently
+ * swallow a later report about their behaviour, which is what happened while the
+ * dedupe was on the pair alone.
+ *
+ * Replaces the relay's `POST /api/user/{friendId}/report`, which authenticated on a
+ * bound read token rather than a session and keyed on the device `friendId`.
  */
 export async function handleReport(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
   const session = await requireSession(req, env, ctx);
@@ -362,19 +379,63 @@ export async function handleReport(req: Request, env: FriendsEnv, ctx?: Executio
     typeof payload?.context === "string" ? payload.context.trim().slice(0, MAX_REPORT_CONTEXT) : null;
 
   const existing = await env.DB.prepare(
-    "SELECT id FROM reports WHERE reporter_id = ? AND target_id = ? AND state = 'open'",
+    "SELECT id FROM reports WHERE reporter_id = ? AND target_id = ? AND kind = ? AND state = 'open'",
   )
-    .bind(session.userId, target)
+    .bind(session.userId, target, kind)
     .first<{ id: string }>();
-  if (existing) return noContent();
+  if (!existing) {
+    await env.DB.prepare(
+      `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at)
+       VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+    )
+      .bind(newId(), session.userId, target, kind, context, Date.now())
+      .run();
+  }
 
-  await env.DB.prepare(
-    `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at)
-     VALUES (?, ?, ?, ?, ?, 'open', ?)`,
-  )
-    .bind(newId(), session.userId, target, kind, context, Date.now())
-    .run();
+  if (kind === "picture") await maybeAutoHidePicture(env, target);
   return noContent();
+}
+
+/**
+ * Hide a profile picture once enough **distinct** reporters have flagged it.
+ *
+ * Ported from the relay handler this replaced. It is the only automatic takedown in
+ * the system, so losing it in the migration would have quietly removed an abuse
+ * control rather than dead code.
+ *
+ * The tombstone is still keyed on the device `friendId`, because that is what
+ * `handleGetPicture` checks and what the object is stored under — hence the lookup.
+ * When pictures move onto `users.id` this indirection goes with them.
+ *
+ * Best-effort by design: a target with no claimed `friend_id`, or a Worker with no
+ * bucket, means no takedown — but the report itself is already recorded, and failing
+ * the request would lose the report to keep a picture up.
+ */
+async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Promise<void> {
+  const bucket = env.BUCKET;
+  if (!bucket) return;
+  const threshold = Number(env.REPORT_AUTOHIDE ?? "3");
+  if (!Number.isFinite(threshold) || threshold <= 0) return;
+
+  // COUNT(DISTINCT ...) in SQL rather than listing rows: D1 bills rows SCANNED, and
+  // idx_reports_pair covers this.
+  const row = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT reporter_id) AS n FROM reports WHERE target_id = ? AND kind = 'picture' AND state = 'open'",
+  )
+    .bind(targetUserId)
+    .first<{ n: number }>();
+  if (!row || row.n < threshold) return;
+
+  const owner = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
+    .bind(targetUserId)
+    .first<{ friend_id: string | null }>();
+  if (!owner?.friend_id) return;
+
+  await bucket.put(
+    `_moderation/${owner.friend_id}.json`,
+    JSON.stringify({ reason: "auto_report_threshold", at: Date.now() }),
+    { httpMetadata: { contentType: "application/json" } },
+  );
 }
 
 // ── Bridging the existing device-identity pairings ───────────────────────────

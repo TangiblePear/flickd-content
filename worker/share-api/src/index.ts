@@ -81,7 +81,12 @@ import {
   parseSubject,
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
-import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
+import {
+  handleAdminCommentAction,
+  handleAdminCommentReports,
+  handleAdminUserAction,
+  handleAdminUserReports,
+} from "./commentsAdmin";
 import { handleGiphy } from "./giphy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
@@ -284,9 +289,10 @@ export default {
       if (req.method === "DELETE") return handleDeletePicture(friendId, req, env);
     }
 
-    // ── Report ingestion (user / feed-comment / picture) → admin inbox ──
-    const userReport = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/report$`));
-    if (userReport && req.method === "POST") return handleReport(userReport[1], req, env);
+    // Report ingestion moved to `POST /api/report` (D1, session-authenticated). The
+    // relay endpoint that lived here keyed on the device friendId and authenticated
+    // on a bound read token; its picture auto-hide now runs in friends.ts, against
+    // the same tombstone and the same REPORT_AUTOHIDE threshold.
 
     // ── Freshness Check (Batch) ──
     if (p === "/api/social/freshness" && req.method === "POST") {
@@ -486,6 +492,18 @@ export default {
     const adminComment = p.match(/^\/api\/moderation\/comments\/([0-9A-Z:]{8,80})\/([a-z]+)$/);
     if (adminComment && req.method === "POST") {
       return handleAdminCommentAction(adminComment[1], adminComment[2], req, env);
+    }
+
+    // Reports about PEOPLE rather than comments. These had no reader at all: the
+    // picture auto-hide threshold fired, but no human ever saw the report behind it
+    // and no other kind produced any outcome. Same shared-key auth as above.
+    if (p === "/api/moderation/user-reports" && req.method === "GET") return handleAdminUserReports(req, env);
+
+    // `[a-z-]` not `[a-z]`: the actions here are hyphenated (hide-picture), and the
+    // comment pattern above would have silently 404'd them.
+    const adminUser = p.match(/^\/api\/moderation\/users\/([0-9A-HJKMNP-TV-Z]{26})\/([a-z-]+)$/);
+    if (adminUser && req.method === "POST") {
+      return handleAdminUserAction(adminUser[1], adminUser[2], req, env);
     }
 
     // ── Account / data deletion (Google Play deletion policy) ──
@@ -907,12 +925,13 @@ const MAX_PICTURE_BYTES = 512 * 1024;
 const picKey = (friendId: string) => `${friendId}/pics/picture.jpg`;
 const picMetaKey = (friendId: string) => `${friendId}/pics/meta.json`;
 const tombstoneKey = (friendId: string) => `_moderation/${friendId}.json`;
-const REPORT_KINDS = new Set(["user", "feed_comment", "picture"]);
 /**
- * Report kind for a public `share/{code}` link. Deliberately NOT in [REPORT_KINDS]:
- * that set gates `/api/user/{friendId}/report`, whose target is a friendId, and a
- * share code is not one. Share reports have their own route and their own target
- * namespace under the same `_reports/` prefix.
+ * Report kind for a public `share/{code}` link.
+ *
+ * Stays here rather than moving to D1 with the other kinds: a share link can be
+ * opened, and reported, by someone with no account at all, so there is no session to
+ * file it under and no `users.id` to key it on. It keeps its own route and its own
+ * target namespace under the `_reports/` prefix — which it is now the only writer of.
  */
 const KIND_SHARED_LIST = "shared_list";
 
@@ -1011,63 +1030,16 @@ async function handleDeletePicture(friendId: string, req: Request, env: Env): Pr
   return json({ ok: true, ownerRecreated: auth.created });
 }
 
-// POST a report for any content kind. The reporter proves a real identity by
-// presenting their own bound read token (X-Read-Token matching reporterId). The
-// record lands in the admin Reports inbox; picture reports auto-hide at threshold.
-async function handleReport(targetFriendId: string, req: Request, env: Env): Promise<Response> {
-  const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
-  const limit = Number(env.RATE_LIMIT_PER_HOUR ?? "10");
-  if (await rateLimited(env, "report", ip, limit)) return json({ error: "rate_limited" }, { status: 429 });
-
-  let body: { kind?: unknown; reporterId?: unknown; reason?: unknown; context?: unknown };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return invalidJson();
-  }
-  const kind = typeof body.kind === "string" ? body.kind : "";
-  const reporterId = typeof body.reporterId === "string" ? body.reporterId : "";
-  if (!REPORT_KINDS.has(kind) || !reporterId) return json({ error: "bad_request" }, { status: 400 });
-
-  // Anti-spam: the reporter must own the reporterId (its bound read token).
-  if (!(await verifyReadToken(env, reporterId, req.headers.get("X-Read-Token"), "a"))) return forbidden();
-
-  const record = {
-    kind,
-    targetFriendId,
-    reporterId,
-    reason: typeof body.reason === "string" ? body.reason.slice(0, 2000) : "",
-    context: typeof body.context === "string" ? body.context.slice(0, 4000) : "",
-    at: Date.now(),
-    resolved: false,
-  };
-  await env.BUCKET.put(
-    `_reports/${targetFriendId}/${record.at}-${reporterId}.json`,
-    JSON.stringify(record),
-    { httpMetadata: { contentType: "application/json" } },
-  );
-
-  // Picture reports auto-hide once enough distinct reporters flag them.
-  if (kind === "picture") {
-    const threshold = Number(env.REPORT_AUTOHIDE ?? "3");
-    const listed = await env.BUCKET.list({ prefix: `_reports/${targetFriendId}/` });
-    const reporters = new Set<string>();
-    for (const o of listed.objects) {
-      const name = o.key.split("/").pop() ?? "";
-      const who = name.replace(/\.json$/, "").split("-").slice(1).join("-");
-      if (who) reporters.add(who);
-    }
-    if (reporters.size >= threshold) {
-      await env.BUCKET.put(
-        tombstoneKey(targetFriendId),
-        JSON.stringify({ reason: "auto_report_threshold", at: Date.now() }),
-        { httpMetadata: { contentType: "application/json" } },
-      );
-    }
-  }
-
-  return json({ ok: true });
-}
+// The relay report handler that lived here is gone — reports are D1 now
+// (`handleReport` in friends.ts, reached via `POST /api/report`), where they are
+// session-authenticated, keyed on `users.id`, and readable by the admin panel.
+//
+// Its picture auto-hide moved with it, unchanged in behaviour: distinct open
+// `picture` reports counted against REPORT_AUTOHIDE, writing the same
+// `_moderation/{friendId}.json` tombstone that `handleGetPicture` checks for a 410.
+//
+// The `_reports/` R2 prefix is now written only by share-link reports
+// (`handleShareReport`), which are anonymous by design and have no account to key on.
 
 /**
  * Resolve a session **without requiring one**. Returns the account id, or null for
