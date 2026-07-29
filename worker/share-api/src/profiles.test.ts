@@ -28,6 +28,8 @@ class FakeD1 {
   profile_stats: Row[] = [];
   friendships: Row[] = [];
   blocks: Row[] = [];
+  /** Only `posting_suspended_until` is read from here; the rest of the row is irrelevant. */
+  users: Row[] = [];
   /** token → user, stood in for the sessions table; expiry/revocation aren't under test here. */
   sessions = new Map<string, string>();
 
@@ -79,6 +81,10 @@ class FakeStmt {
       const [a, b] = this.args as string[];
       const row = this.db.friendships.find((f) => f.user_a === a && f.user_b === b && f.state === "accepted");
       return row ? ({ state: row.state } as T) : null;
+    }
+    if (s.startsWith("SELECT posting_suspended_until")) {
+      const row = this.db.users.find((u) => u.id === this.args[0]);
+      return row ? ({ until: row.posting_suspended_until ?? null } as T) : null;
     }
     throw new Error(`FakeD1: unhandled first() for ${s}`);
   }
@@ -538,5 +544,78 @@ describe("appVersion", () => {
     expect(appVersion(withHeader("banana"))).toBe(0);
     expect(appVersion(withHeader("-1"))).toBe(0);
     expect(appVersion(withHeader(""))).toBe(0);
+  });
+});
+
+// ── Posting suspension, profile TEXT only ────────────────────────────────────
+// The guard compares VALUES, it does not check for keys, and that distinction is the
+// whole feature. Android's `ProfileWriteRequest` declares all 14 fields non-optional
+// and sends every one on every save, so a presence check would also block avatar,
+// border, layout and favourite edits — none of them abuse surfaces — turning a posting
+// ban into an editing lockout.
+
+/** A PUT body in the shape Android actually sends: every field, every time. */
+const fullBody = (over: Record<string, unknown> = {}) => ({
+  displayName: "Pear",
+  avatarId: "a1",
+  borderId: "",
+  pictureUrl: "",
+  headerColor: "",
+  headerBackdropUrl: "",
+  favouriteMovies: [],
+  favouriteShows: [],
+  featuredAchievements: [],
+  layout: [],
+  bio: "hello",
+  favouritePeople: [],
+  personalityId: "",
+  visibility: "friends",
+  ...over,
+});
+
+describe("posting suspension on the profile PUT", () => {
+  /** A profile at version 1 holding displayName "Pear" and bio "hello". */
+  const seeded = async (suspendedUntil: number | null) => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", fullBody()), env);
+    env.DB.users.push({ id: OWNER, posting_suspended_until: suspendedUntil });
+    return env;
+  };
+
+  it("blocks a bio change while suspended", async () => {
+    const env = await seeded(Date.now() + 86_400_000);
+    const res = await handlePutMyProfile(put("tok-owner", fullBody({ bio: "something new" }), "1"), env);
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as any).error).toBe("posting_suspended");
+    // The version must NOT move: a refused write is not a write.
+    const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(got.profile.bio).toBe("hello");
+    expect(got.profile.version).toBe(1);
+  });
+
+  it("blocks a display-name change while suspended", async () => {
+    const env = await seeded(Date.now() + 86_400_000);
+    const res = await handlePutMyProfile(put("tok-owner", fullBody({ displayName: "Mango" }), "1"), env);
+    expect(res.status).toBe(403);
+  });
+
+  // The point of the whole task. Android resends bio and displayName unchanged on every
+  // save; if that counted as "posting", changing an avatar would be blocked.
+  it("permits an avatar-only edit that resends the same bio and name", async () => {
+    const env = await seeded(Date.now() + 86_400_000);
+    const res = await handlePutMyProfile(put("tok-owner", fullBody({ avatarId: "a2" }), "1"), env);
+    expect(res.status).toBe(200);
+    const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(got.profile.avatarId).toBe("a2");
+  });
+
+  it("permits a bio change when not suspended", async () => {
+    const env = await seeded(null);
+    expect((await handlePutMyProfile(put("tok-owner", fullBody({ bio: "brand new" }), "1"), env)).status).toBe(200);
+  });
+
+  it("permits a bio change once the suspension has elapsed, with no manual step", async () => {
+    const env = await seeded(Date.now() - 1_000);
+    expect((await handlePutMyProfile(put("tok-owner", fullBody({ bio: "brand new" }), "1"), env)).status).toBe(200);
   });
 });

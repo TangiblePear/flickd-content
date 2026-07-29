@@ -114,6 +114,7 @@ import {
   handlePutMyStats,
   minSocialVersion,
 } from "./profiles";
+import { postingSuspendedUntilForFriend, suspendedBody } from "./suspension";
 
 interface ShareItem {
   tmdbId: number;
@@ -970,6 +971,13 @@ async function handlePutPicture(
 ): Promise<Response> {
   const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"), req.headers.get("X-Read-Token-C"));
   if (!owner.ok) return forbidden();
+
+  // ⚠️ Keyed on friendId, not users.id: this endpoint authenticates on a relay-issued
+  // owner secret, so there is no session to read an account id from. The extra lookup
+  // goes away when pictures move onto users.id.
+  const suspended = await postingSuspendedUntilForFriend(env.DB, friendId);
+  if (suspended > 0) return json(suspendedBody(suspended), { status: 403 });
+
   const buf = new Uint8Array(await req.arrayBuffer());
   if (buf.byteLength === 0) return invalidJson();
   if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();

@@ -14,6 +14,7 @@ import { canView, parseVisibility, Visibility } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { loadFeed } from "./feed";
+import { postingSuspendedUntil, suspendedBody } from "./suspension";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -262,6 +263,19 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   const claimed = ifMatch ?? 0;
   if (claimed !== currentVersion) {
     return json({ error: "version_conflict", version: currentVersion }, 409);
+  }
+
+  // ── Posting suspension: profile TEXT only ──────────────────────────────────
+  // Compares values rather than checking for the keys. Android sends all 14 fields
+  // on every save, so a presence check would block avatar, border, layout and
+  // favourite edits too — none of them abuse surfaces — and turn a posting ban into
+  // an editing lockout. Costs no extra query: `existing` is already in hand.
+  const changesText =
+    (next.bio ?? "") !== (existing?.bio ?? "") ||
+    (next.display_name ?? "") !== (existing?.display_name ?? "");
+  if (changesText) {
+    const until = await postingSuspendedUntil(env.DB, session.userId);
+    if (until > 0) return json(suspendedBody(until), 403);
   }
 
   const now = Date.now();

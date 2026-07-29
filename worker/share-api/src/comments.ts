@@ -33,6 +33,7 @@
 import { areFriends, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
+import { postingSuspendedUntil, suspendedBody } from "./suspension";
 
 export interface CommentsEnv {
   DB: D1Database;
@@ -851,6 +852,11 @@ export async function handlePostComment(
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
+
+  // Editing is a POST here too, and it is blocked as well: an author who could edit
+  // while suspended could turn clean text into abuse without posting anything new.
+  const suspendedUntil = await postingSuspendedUntil(env.DB, session.userId);
+  if (suspendedUntil > 0) return json(suspendedBody(suspendedUntil), 403);
 
   const id = typeof payload.id === "string" ? payload.id : "";
   const mediaType = typeof payload.mediaType === "string" ? payload.mediaType : "";
