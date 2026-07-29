@@ -206,6 +206,33 @@ describe("episode poll", () => {
     expect(option(e, "emotion", "AMUSED").n).toBe(1);
   });
 
+  /**
+   * ⚠️ The regression for the "one vote showed 50%" device bug (2026-07-29).
+   *
+   * A rating IS a vote, so someone who rated an episode in an earlier session already
+   * has a vote row. The client cannot see that — the poll read is unauthenticated and
+   * carries no per-user data — so it guessed "new voter", added a phantom second one,
+   * and rendered a single Shocked vote as 50%. The vote now answers with the
+   * recomputed totals so the client never has to guess.
+   */
+  it("answers with the recomputed poll, so the client need not guess", async () => {
+    const e = await env0();
+    // An earlier session: rating only. This is what makes the user a voter already.
+    await handlePutVote(vote("tok-a", { rating: 8 }), e, EP);
+
+    const res = await handlePutVote(
+      vote("tok-a", { rating: 8, emotions: ["SHOCKED"] }),
+      e,
+      EP,
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // ONE voter, not two: the row already existed, so this was an edit.
+    expect(body).toMatchObject({ nVoters: 1, nRatings: 1, ratingSum: 8 });
+    expect(body.options).toContainEqual({ kind: "emotion", id: "SHOCKED", n: 1 });
+  });
+
   /** A pick that did not change must not be double-counted by the diff. */
   it("re-submitting the same picks leaves the counts alone", async () => {
     const e = await env0();

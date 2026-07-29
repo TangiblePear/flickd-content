@@ -38,7 +38,6 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
     status,
     headers: { "Content-Type": "application/json", ...CORS, ...headers },
   });
-const noContent = () => new Response(null, { status: 204, headers: CORS });
 
 export interface PollEnv {
   DB: D1Database;
@@ -120,6 +119,22 @@ export async function loadPoll(
   return { totals, options };
 }
 
+/**
+ * The wire body, shared by the read and the vote response.
+ *
+ * One function on purpose: the vote answers with the recomputed poll so the client
+ * never has to derive it, and the moment the two shapes could drift the client would
+ * be parsing one as the other.
+ */
+function pollBody(totals: PollTotals, options: PollOption[]) {
+  return {
+    nVoters: totals.nVoters,
+    nRatings: totals.nRatings,
+    ratingSum: totals.ratingSum,
+    options: options.map((o) => ({ kind: o.kind, id: o.optionId, n: o.n })),
+  };
+}
+
 function pollCacheKey(s: Subject): Request {
   return new Request(`https://poll.invalid/${s.mediaType}/${s.tmdbId}/${s.season}/${s.episode}`);
 }
@@ -163,12 +178,7 @@ export async function handleGetPoll(
   if (hit) return hit;
 
   const { totals, options } = await loadPoll(env, s);
-  const res = json({
-    nVoters: totals.nVoters,
-    nRatings: totals.nRatings,
-    ratingSum: totals.ratingSum,
-    options: options.map((o) => ({ kind: o.kind, id: o.optionId, n: o.n })),
-  });
+  const res = json(pollBody(totals, options));
   res.headers.set("Cache-Control", `public, max-age=${POLL_CACHE_SECONDS}`);
 
   // Fire-and-forget: a response must never be delayed by storing it.
@@ -357,5 +367,26 @@ export async function handlePutVote(
   );
 
   await env.DB.batch(statements);
-  return noContent();
+
+  // ⚠️ Drop the edge copy, or the voter can be served their own pre-vote numbers.
+  // Device-found 2026-07-29: open an episode (the read is cached for 60s), vote, come
+  // straight back — the refetch hit the cached copy, so `nVoters` was 0, every option
+  // was missing, and the client rendered 0% for everything including the vote just
+  // cast. `caches.default` is per-colo, so this only clears the colo that took the
+  // vote; the answer below is what actually guarantees the voter sees the truth.
+  const cache = edgeCache();
+  if (cache) {
+    const purge = cache.delete(pollCacheKey(s));
+    if (ctx) ctx.waitUntil(purge);
+    else await purge;
+  }
+
+  // ⚠️ Answer with the recomputed poll rather than 204. The client cannot derive these
+  // numbers reliably on its own — it does not know whether this user already had a vote
+  // row, so it cannot tell a new voter from an edit, and it guessed wrong every time
+  // someone rated an episode in an earlier session (the rating IS a vote, so `n_voters`
+  // was already 1 and the client added a phantom second one: one vote rendered as 50%).
+  // One extra read here removes that entire class of bug instead of re-deriving it.
+  const { totals, options } = await loadPoll(env, s);
+  return json(pollBody(totals, options));
 }
