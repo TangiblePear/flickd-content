@@ -21,29 +21,9 @@ import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
 
 export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv;
 
-/** Epoch ms after which the E2EE **inbox** is retired. Unset/0 ⇒ not scheduled. */
 export interface RetirementEnv {
-  RELAY_RETIRES_AT?: string;
 }
 
-/**
- * When the inbox retires, as epoch ms; 0 when no date is set.
- *
- * **Scoped to the inbox, not the relay.** The relay also serves `freshness` (how
- * friend profiles are pulled) and `self` (the friends record), and neither retires
- * here — they move with the comments plan. Switching off the whole relay block would
- * silently break the friend feed.
- */
-export function inboxRetiresAt(env: RetirementEnv): number {
-  const v = Number(env.RELAY_RETIRES_AT ?? "0");
-  return Number.isFinite(v) && v > 0 ? v : 0;
-}
-
-/** True once the retirement date has passed. False when none is set — the default. */
-export function inboxRetired(env: RetirementEnv, now = Date.now()): boolean {
-  const at = inboxRetiresAt(env);
-  return at > 0 && now >= at;
-}
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -94,11 +74,7 @@ export interface SyncRequest {
 export interface RelayRequest {
   /** The caller's own device friendId — needed to seal a rotated access slot. */
   requesterId?: string;
-  /** Owner secret for the inbox read. Absent ⇒ no inbox is returned. */
-  feedSecret?: string;
   friends?: Array<{ friendId: string; readToken: string; since?: number; keyEpoch?: number }>;
-  /** Present ⇒ read this device's inbox in the same request. */
-  inbox?: boolean;
   /**
    * Blind-index key for the live friends+block record. Possession of the key IS the
    * authorization here — it is derived from a secret only the owner's devices hold —
@@ -109,7 +85,6 @@ export interface RelayRequest {
 
 export interface RelayResponse {
   freshness: unknown[];
-  inbox: { items: unknown[]; acks: unknown[]; ownerRecreated: boolean } | null;
   /** Null when not asked for, or when nothing has been published yet (the 404 case). */
   self: { ciphertext: string; version: number } | null;
 }
@@ -185,14 +160,13 @@ export async function handleSync(
   const lists = body.lists ? await loadSharedLists(env, session.userId) : null;
   const match = body.match ? await loadMatches(env, session.userId) : null;
 
-  // 4. R2, if the caller asked for it. Past the retirement date the inbox half is
-  //    refused while freshness and the friends record carry on — the client stops
-  //    asking too, so this is the backstop for an install that never updates.
+  // 4. R2, if the caller asked for it. This half now carries only `freshness` and
+  //    the friends record; the E2EE inbox that used to ride along was retired with
+  //    the last message type it carried (Part C).
   let relay: RelayResponse | null = null;
   if (body.relay && loadRelay) {
     relay = await loadRelay(env, session.userId, {
       ...body.relay,
-      inbox: body.relay.inbox === true && !inboxRetired(env),
       friends: (body.relay.friends ?? []).slice(0, MAX_RELAY_FRIENDS),
     });
   }
@@ -222,7 +196,6 @@ export async function handleSync(
     // into a build cannot be corrected for anyone who never updates. Null until one
     // is set, which is the default, so this changes nothing until you schedule it.
     policy: {
-      inboxRetiresAt: inboxRetiresAt(env) || null,
       // "Claim your device friendId, I have none for you." Self-healing by design:
       // it stays true until the claim lands, so a failed attempt simply retries on
       // the next sync instead of leaving the account permanently unreachable by push.

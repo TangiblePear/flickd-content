@@ -13,7 +13,6 @@ routes = [
   { pattern = "flickto.app/share/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/user/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/opinions/batch", zone_name = "flickto.app" },
-  { pattern = "flickto.app/api/inbox/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/friendcode", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/friendcode/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/social/*", zone_name = "flickto.app" },
@@ -199,22 +198,6 @@ GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googl
 # project id, NOT the project number (468641021144). Unset → /api/auth/* 503s.
 FIREBASE_PROJECT_ID = "flickto-cf7b6"
 
-# Step 4 of the shared-lists/match plan: the date the E2EE **inbox** stops being
-# served, as epoch ms. UNSET means never — the default, and it changes nothing.
-#
-# Scoped to the inbox ONLY. `freshness` (friend profile pulls) and the friends record
-# ride the same relay block and must keep working until the comments plan moves them;
-# setting this does not touch them.
-#
-# Server-controlled on purpose: a date compiled into an app build cannot be corrected
-# for anyone who never updates. Clients read it from `POST /api/sync` (`policy
-# .inboxRetiresAt`) and stop asking; these endpoints refuse independently, which is
-# what covers installs that never update. Both halves are needed — the client half
-# saves the requests, the server half makes deletion safe.
-#
-# Before setting it: confirm `/api/inbox/*` traffic has fallen to ~zero in the
-# Cloudflare route metrics (observability is on below). That is step 5's gate.
-# RELAY_RETIRES_AT = "1790000000000"
 
 [observability]
 enabled = true

@@ -44,10 +44,17 @@ async function put(env: any, kind: string, secret: string, body: string) {
   return worker.fetch(req, env, ctx);
 }
 
-async function getInbox(env: any, friendId: string, secret: string) {
-  const req = new Request(`https://flickto.app/api/inbox/${friendId}`, {
-    method: "GET",
-    headers: { "X-Feed-Secret": secret },
+/**
+ * Any owner-authed call will do. This used to probe the inbox GET; the inbox is gone
+ * (Part C) but the self-heal it carried is not — `ownerRecreated` rides a dozen
+ * owner-authed endpoints and `OwnerRecreatedInterceptor` peeks EVERY relay response,
+ * so the guarantee is endpoint-agnostic and the coverage has to stay.
+ */
+async function ownerAuthed(env: any, friendId: string, secret: string) {
+  const req = new Request(`https://flickto.app/api/user/${friendId}/fcm-token`, {
+    method: "PUT",
+    headers: { "X-Feed-Secret": secret, "X-Read-Token": "rt" },
+    body: '{"token":"x"}',
   });
   return worker.fetch(req, env, ctx);
 }
@@ -63,22 +70,20 @@ describe("ownerRecreated flag", () => {
     expect(((await second.json()) as any).ownerRecreated).toBe(false);
   });
 
-  it("is true on the first inbox GET that has to bind the owner, false after", async () => {
+  it("is true on the first call that has to bind an unseen owner, false after", async () => {
     const env = makeEnv();
 
-    const first = await getInbox(env, "BBBBBBBBBBBB", "s2");
-    const firstBody = (await first.json()) as any;
-    expect(firstBody.ownerRecreated).toBe(true);
-    expect(firstBody.items).toEqual([]);
+    const first = await ownerAuthed(env, "BBBBBBBBBBBB", "s2");
+    expect(((await first.json()) as any).ownerRecreated).toBe(true);
 
-    const second = await getInbox(env, "BBBBBBBBBBBB", "s2");
+    const second = await ownerAuthed(env, "BBBBBBBBBBBB", "s2");
     expect(((await second.json()) as any).ownerRecreated).toBe(false);
   });
 
   it("still forbids a wrong secret after the owner is bound", async () => {
     const env = makeEnv();
     await put(env, "fcm-token", "secret1", '{"token":"x"}');
-    const bad = await getInbox(env, FID, "wrong-secret");
+    const bad = await ownerAuthed(env, FID, "wrong-secret");
     expect(bad.status).toBe(403);
   });
 });

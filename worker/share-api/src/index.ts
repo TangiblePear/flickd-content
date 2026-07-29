@@ -50,10 +50,6 @@ interface Env {
   //   wrangler secret put ADMIN_KEY
   // Unset ⇒ /api/admin/* answers 403. Closed rather than open when unconfigured.
   ADMIN_KEY?: string;
-  // Epoch ms after which the E2EE **inbox** stops being served. Unset ⇒ never, which
-  // is the default and changes nothing. Scoped to the inbox: `freshness` and the
-  // friends record ride the same relay and do NOT retire here.
-  RELAY_RETIRES_AT?: string;
 }
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
@@ -87,7 +83,7 @@ import {
 import { handleGetPoll, handlePutVote } from "./poll";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleGiphy } from "./giphy";
-import { handleSync, inboxRetired, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
+import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
   handleClaimFriendId,
@@ -172,8 +168,6 @@ const CORS = {
 // ── Limits (the relay stores ciphertext only; these just cap abuse) ──
 const MAX_BLOB_BYTES = 256 * 1024; // a profile / opinion ciphertext object
 const MAX_ACCESS_BYTES = 512 * 1024; // wrapped-keys bundle (grows with friend count)
-const MAX_INBOX_ITEM_BYTES = 64 * 1024;
-const MAX_INBOX_ITEMS = 200;
 const MAX_BATCH_ITEMS = 200; // friends queried per opinion-batch call
 const MAX_CARD_BYTES = 8 * 1024;
 const MAX_FILTERS_BYTES = 4096;
@@ -271,17 +265,6 @@ export default {
     // ── Report ingestion (user / feed-comment / picture) → admin inbox ──
     const userReport = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/report$`));
     if (userReport && req.method === "POST") return handleReport(userReport[1], req, env);
-
-    // ── Inbox (sealed handshake / share messages) ──
-    const inboxAck = p.match(new RegExp(`^/api/inbox/(${FRIEND_ID})/ack$`));
-    if (inboxAck && req.method === "POST") return handleAckInbox(inboxAck[1], req, env);
-
-    const inbox = p.match(new RegExp(`^/api/inbox/(${FRIEND_ID})$`));
-    if (inbox) {
-      if (req.method === "POST") return handlePostInbox(inbox[1], req, env);
-      if (req.method === "GET") return handleGetInbox(inbox[1], req, env);
-      if (req.method === "DELETE") return handleDeleteInbox(inbox[1], req, env, url);
-    }
 
     // ── Freshness Check (Batch) ──
     if (p === "/api/social/freshness" && req.method === "POST") {
@@ -1220,164 +1203,18 @@ async function handleOpinionsBatch(req: Request, env: Env): Promise<Response> {
   return json({ items: out });
 }
 
-interface InboxStored {
-  id: string;
-  at: number;
-  ciphertext: string;
-}
 
-// An acknowledgement tombstone: the user actioned item `id` on device `by`. Broadcast
-// delivery + shared acks let every device see a message while a single action clears
-// it everywhere (0b).
-interface InboxAck {
-  id: string;
-  at: number;
-  by: string;
-  action: string;
-}
 
-interface InboxRecord {
-  items: InboxStored[];
-  acks: InboxAck[];
-}
 
 // Keep an acked item this long so a device offline for a few days still learns the
 // ack (and dismisses its own copy) rather than re-showing a resolved request.
-const INBOX_ACK_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 // Unacked items expire here — nobody ever actioned them.
-const INBOX_UNACKED_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-// Read the inbox, tolerating the legacy bare-array shape (pre-0b) as items-only.
-async function readInbox(env: Env, friendId: string): Promise<InboxRecord> {
-  const raw = await getJson<InboxRecord | InboxStored[]>(env, `${friendId}/inbox.json`);
-  if (!raw) return { items: [], acks: [] };
-  if (Array.isArray(raw)) return { items: raw, acks: [] };
-  return {
-    items: Array.isArray(raw.items) ? raw.items : [],
-    acks: Array.isArray(raw.acks) ? raw.acks : [],
-  };
-}
 
-// Drop acked items past the grace window and unacked items past 30d; keep acks while
-// their item survives or within the grace window. Pruned on every write.
-function pruneInbox(rec: InboxRecord, now: number): InboxRecord {
-  const ackedIds = new Set(rec.acks.map((a) => a.id));
-  const items = rec.items
-    .filter((it) =>
-      ackedIds.has(it.id) ? now - it.at < INBOX_ACK_GRACE_MS : now - it.at < INBOX_UNACKED_TTL_MS,
-    )
-    .slice(-MAX_INBOX_ITEMS);
-  const keptIds = new Set(items.map((it) => it.id));
-  const acks = rec.acks.filter((a) => keptIds.has(a.id) || now - a.at < INBOX_ACK_GRACE_MS);
-  return { items, acks };
-}
 
-// Append a sealed message to a recipient's inbox (open write, rate-limited).
-async function handlePostInbox(friendId: string, req: Request, env: Env): Promise<Response> {
-  // Retired: accept and discard. Deliberately NOT an error — a stale client posting a
-  // friend request should fail quietly rather than surface a crash-shaped message for
-  // something the user cannot act on. The recipient's own client has stopped reading
-  // this by now, so storing it would only grow the bucket.
-  if (inboxRetired(env)) return json({ ok: true });
-  const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
-  const limit = Number(env.RATE_LIMIT_PER_HOUR ?? "10") * 6; // inbox is chattier than share-create
-  if (await rateLimited(env, "inbox", ip, limit)) return json({ error: "rate_limited" }, { status: 429 });
 
-  let ciphertext: string;
-  try {
-    const parsed = (await req.json()) as { ciphertext?: unknown };
-    if (typeof parsed.ciphertext !== "string") throw new Error("bad");
-    ciphertext = parsed.ciphertext;
-  } catch {
-    return invalidJson();
-  }
-  if (ciphertext.length > MAX_INBOX_ITEM_BYTES) return tooLarge();
 
-  const now = Date.now();
-  const rec = await readInbox(env, friendId);
-  rec.items.push({ id: `${now}-${randomCode(6)}`, at: now, ciphertext });
-  await putJson(env, `${friendId}/inbox.json`, pruneInbox(rec, now));
 
-  // Fire an FCM push to the recipient so every one of their devices fetches the
-  // inbox message immediately. The self-topic reaches all of the recipient's
-  // devices in one send; a pre-topics recipient falls back to their device token.
-  //
-  // (Retirement is checked before any of the above — see the guard at the top.)
-  try {
-    const config = fcmConfig(env);
-    if (config) {
-      const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
-      if (target) await sendFcmMessage(config, target, friendId, "inbox_update");
-    }
-  } catch (e) {
-    // Ignore FCM failures, inbox is durable
-  }
-
-  return json({ ok: true });
-}
-
-async function handleGetInbox(friendId: string, req: Request, env: Env): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  // Retired: an empty inbox, not an error. Owner-auth still runs first so this cannot
-  // be used to probe whether an identity exists.
-  if (inboxRetired(env)) return json({ ownerRecreated: auth.created, items: [], acks: [] });
-  // Nothing is removed on read: every device sees every item AND every ack, and
-  // filters locally. ownerRecreated first so a truncated client body peek still
-  // catches it even when the record is large.
-  const rec = await readInbox(env, friendId);
-  return json({ ownerRecreated: auth.created, items: rec.items, acks: rec.acks });
-}
-
-// Acknowledge one or more inbox items (owner-auth). Called when the user *actions* a
-// message on any device; the ack converges every other device to "resolved". Fans an
-// inbox_ack push to the owner's self-topic so siblings dismiss instantly (0b).
-async function handleAckInbox(friendId: string, req: Request, env: Env): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  // Retired: nothing left to acknowledge, and writing an ack for an item nobody can
-  // read would only resurrect the object the retirement exists to stop writing.
-  if (inboxRetired(env)) return json({ ok: true, ownerRecreated: auth.created });
-  let body: { ids?: unknown; action?: unknown; deviceId?: unknown };
-  try {
-    body = (await req.json()) as typeof body;
-  } catch {
-    return invalidJson();
-  }
-  const ids = Array.isArray(body.ids)
-    ? (body.ids.filter((x) => typeof x === "string") as string[]).slice(0, MAX_INBOX_ITEMS)
-    : [];
-  const action = typeof body.action === "string" ? body.action.slice(0, 32) : "processed";
-  const deviceId = typeof body.deviceId === "string" ? body.deviceId.slice(0, 64) : "";
-  if (!ids.length) return json({ ok: true, ownerRecreated: auth.created });
-
-  const now = Date.now();
-  const rec = await readInbox(env, friendId);
-  const existing = new Set(rec.acks.map((a) => a.id));
-  for (const id of ids) if (!existing.has(id)) rec.acks.push({ id, at: now, by: deviceId, action });
-  await putJson(env, `${friendId}/inbox.json`, pruneInbox(rec, now));
-
-  try {
-    const config = fcmConfig(env);
-    if (config) {
-      const target = pickFcmTarget(await readPushRecord(env, friendId), "self");
-      if (target) await sendFcmMessage(config, target, friendId, "inbox_ack");
-    }
-  } catch (e) {
-    // Ignore FCM failures — convergence still happens on the next fetch.
-  }
-
-  return json({ ok: true, ownerRecreated: auth.created });
-}
-
-// Kept owner-authed but a NO-OP (0b): the shared inbox is now cleared per-item via
-// acks, not by a cursor. A stale client still calling DELETE ?upTo= must not wipe
-// messages another device hasn't seen yet. `url` retained for the route signature.
-async function handleDeleteInbox(friendId: string, req: Request, env: Env, _url: URL): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  return json({ ok: true, ownerRecreated: auth.created });
-}
 
 interface FreshnessQuery {
   friendId?: unknown;
@@ -1402,29 +1239,19 @@ async function loadRelay(env: Env, relay: RelayRequest): Promise<RelayResponse> 
       : "";
   const queries = (relay.friends ?? []) as FreshnessQuery[];
 
-  // All three in parallel: they touch different objects and none depends on the
-  // others, so the request costs one round trip's worth of latency, not three.
-  const [freshness, inbox, self] = await Promise.all([
+  // Both in parallel: they touch different objects and neither depends on the other,
+  // so the request costs one round trip's worth of latency rather than two.
+  const [freshness, self] = await Promise.all([
     queries.length ? freshnessItems(env, queries, requesterId) : Promise.resolve([]),
-    relay.inbox && requesterId && relay.feedSecret
-      ? readOwnInbox(env, requesterId, relay.feedSecret)
-      : Promise.resolve(null),
     relay.selfLookupKey && new RegExp(`^${LOOKUP_KEY}$`).test(relay.selfLookupKey)
       ? getJson<SelfRecord>(env, `self/${relay.selfLookupKey}.json`).then((r) =>
           r ? { ciphertext: r.ciphertext, version: r.version } : null,
         )
       : Promise.resolve(null),
   ]);
-  return { freshness, inbox, self };
+  return { freshness, self };
 }
 
-/** Owner-authenticated inbox read. Returns null rather than throwing on a bad secret. */
-async function readOwnInbox(env: Env, friendId: string, secret: string) {
-  const auth = await verifyOwner(env, friendId, secret);
-  if (!auth.ok) return null;
-  const rec = await readInbox(env, friendId);
-  return { ownerRecreated: auth.created, items: rec.items, acks: rec.acks };
-}
 
 /** Blind index of a friendId for access.json slots — matches the client's derivation. */
 async function accessSlotHash(friendId: string): Promise<string> {

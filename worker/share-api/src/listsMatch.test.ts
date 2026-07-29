@@ -251,6 +251,7 @@ class FakeStmt {
       ["DELETE FROM comment_translations", "comment_translations", null],
       ["UPDATE comment_counts", "comment_counts", null],
       ["DELETE FROM comments WHERE author_id", "comments", "author_id"],
+      ["DELETE FROM episode_votes", "episode_votes", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],
