@@ -101,6 +101,7 @@ class FakeStmt {
         header_color,
         header_backdrop_url,
         layout,
+        friend_layout,
         bio,
         favourite_movies,
         favourite_shows,
@@ -120,6 +121,7 @@ class FakeStmt {
         header_color,
         header_backdrop_url,
         layout,
+        friend_layout,
         bio,
         favourite_movies,
         favourite_shows,
@@ -460,6 +462,48 @@ describe("foreign profile", () => {
     const env = await env0();
     const res = await handleGetProfile(OWNER, new Request(`https://flickto.app/api/profile/${OWNER}`), env);
     expect(res.status).toBe(401);
+  });
+
+  /**
+   * The reason `friend_layout` exists at all. `layout` is the OWNER'S — it is the restore
+   * source, so it cannot be filtered at the push without deleting their private blocks on
+   * reinstall — and it contains the blocks `friendVisibleLayout` strips, including the
+   * consent-gated sensitive trio. A foreign reader must receive the filtered one, under
+   * the same field name, and must not receive the unfiltered one at all.
+   */
+  it("serves a friend the FILTERED layout, and never the owner's", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "stat_mosaic" }, { type: "top_rated" }],
+        friendLayout: [{ type: "stat_mosaic" }],
+      }),
+      env,
+    );
+
+    const foreign = (await (await handleGetProfile(OWNER, authed("tok-other", `/api/profile/${OWNER}`), env)).json()) as any;
+    expect(foreign.profile.layout).toEqual([{ type: "stat_mosaic" }]);
+    // Not merely "filtered" — the unfiltered list must be absent from the body entirely,
+    // so no caller can reach it by picking the wrong field.
+    expect(JSON.stringify(foreign)).not.toContain("top_rated");
+
+    // The owner still gets their own, unfiltered, through their own endpoint.
+    const own = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(own.profile.layout).toEqual([{ type: "stat_mosaic" }, { type: "top_rated" }]);
+  });
+
+  /**
+   * NULL is "this client predates the field", not "no blocks". Serving `[]` for it would
+   * flip every friend of an un-updated client to the default layout, which looks like a
+   * rendering bug and is really a wire-compat one.
+   */
+  it("sends null, not an empty list, when the owner has never published one", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public", layout: [{ type: "stat_mosaic" }] }), env);
+    const foreign = (await (await handleGetProfile(OWNER, authed("tok-other", `/api/profile/${OWNER}`), env)).json()) as any;
+    expect(foreign.profile.layout).toBeNull();
   });
 });
 

@@ -1,0 +1,22 @@
+-- The friend-visible profile layout, so `layout` can stop being two things at once.
+--
+-- `profiles.layout` is the OWNER'S layout. It has to be: `applyPulled` writes it back to
+-- the local profile on a new device, so it is the restore source, and filtering it at the
+-- push would permanently delete a user's private blocks the first time they reinstall.
+--
+-- But it is also what a friend reading the profile would receive, and it contains the
+-- blocks `ProfileBlockCatalog.friendVisibleLayout` strips — owner-only ones, and the
+-- sensitive trio (CURRENTLY_WATCHING / TOP_RATED / RECENT_ACTIVITY) that needs explicit
+-- consent before it is shared. One column cannot honestly serve both readers.
+--
+-- So the client publishes both: `layout` for itself, `friend_layout` already filtered.
+-- `handleGetProfile` serves `friend_layout` **in the `layout` field**, meaning a foreign
+-- reader never receives the unfiltered one at all — it is absent from the response rather
+-- than present-and-not-to-be-read. Filtering in the Worker instead would need a hardcoded
+-- list of sensitive block ids here, which would drift from the client's catalogue the
+-- first time a new sensitive block shipped, and drift silently, in the leaking direction.
+--
+-- NULL means "this client predates the field", which is NOT the same as "no blocks".
+-- Readers must treat it as "no opinion" and keep whatever they already had, or every
+-- friend of an un-updated client would flip to the default layout.
+ALTER TABLE profiles ADD COLUMN friend_layout TEXT;

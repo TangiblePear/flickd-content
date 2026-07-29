@@ -84,6 +84,8 @@ interface ProfileRow {
   header_color: string | null;
   header_backdrop_url: string | null;
   layout: string | null;
+  /** The owner's layout with owner-only and unconsented blocks already stripped. */
+  friend_layout: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -97,8 +99,8 @@ interface ProfileRow {
 
 const PROFILE_COLUMNS =
   "user_id, display_name, avatar_id, border_id, picture_url, header_color, header_backdrop_url, " +
-  "layout, bio, favourite_movies, favourite_shows, favourite_people, featured_achievements, " +
-  "personality_id, visibility, version, updated_at";
+  "layout, friend_layout, bio, favourite_movies, favourite_shows, favourite_people, " +
+  "featured_achievements, personality_id, visibility, version, updated_at";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -130,6 +132,26 @@ export function toWire(row: ProfileRow) {
     visibility: parseVisibility(row.visibility),
     version: row.version,
     updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * Row → wire **for someone who is not the owner**.
+ *
+ * The only difference is `layout`, and it is the whole point: a foreign reader gets
+ * `friend_layout` — already stripped of owner-only and unconsented-sensitive blocks by
+ * the client that published it — under the same field name. The unfiltered `layout` is
+ * not in the response at all, so no caller can read it by mistake. That is the safety
+ * property; a flag saying "don't read this one" would not be.
+ *
+ * `null` when the owner's client predates the field, which is NOT "they have no blocks".
+ * Readers must keep whatever they already had, or every friend of an un-updated client
+ * flips to the default layout the first time this is read.
+ */
+export function toForeignWire(row: ProfileRow) {
+  return {
+    ...toWire(row),
+    layout: row.friend_layout == null ? null : jsonColumn<unknown[]>(row.friend_layout, []),
   };
 }
 
@@ -168,6 +190,7 @@ interface ValidatedProfile {
   header_color: string | null;
   header_backdrop_url: string | null;
   layout: string | null;
+  friend_layout: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -191,6 +214,10 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
   const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
   const layout = has("layout") ? jsonList(body.layout) : (existing?.layout ?? null);
   if (layout != null && layout.length > MAX_LAYOUT_BYTES) return null;
+  // Same cap: it is a strict subset of `layout`, but it arrives as its own field and an
+  // unchecked one would be a way straight past the limit the line above enforces.
+  const friendLayout = has("friendLayout") ? jsonList(body.friendLayout) : (existing?.friend_layout ?? null);
+  if (friendLayout != null && friendLayout.length > MAX_LAYOUT_BYTES) return null;
 
   const text = (key: string, column: keyof ProfileRow, max: number) =>
     has(key) ? str(body[key], max) : ((existing?.[column] as string | null) ?? null);
@@ -205,6 +232,7 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
     header_color: text("headerColor", "header_color", MAX_SHORT),
     header_backdrop_url: text("headerBackdropUrl", "header_backdrop_url", MAX_URL),
     layout,
+    friend_layout: friendLayout,
     bio: text("bio", "bio", MAX_BIO),
     favourite_movies: list("favouriteMovies", "favourite_movies"),
     favourite_shows: list("favouriteShows", "favourite_shows"),
@@ -282,14 +310,14 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   const version = currentVersion + 1;
   await env.DB.prepare(
     `INSERT INTO profiles (user_id, display_name, avatar_id, border_id, picture_url, header_color,
-       header_backdrop_url, layout, bio, favourite_movies, favourite_shows, favourite_people,
-       featured_achievements, personality_id, visibility, version, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       header_backdrop_url, layout, friend_layout, bio, favourite_movies, favourite_shows,
+       favourite_people, featured_achievements, personality_id, visibility, version, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(user_id) DO UPDATE SET
        display_name = excluded.display_name, avatar_id = excluded.avatar_id,
        border_id = excluded.border_id, picture_url = excluded.picture_url,
        header_color = excluded.header_color, header_backdrop_url = excluded.header_backdrop_url,
-       layout = excluded.layout, bio = excluded.bio,
+       layout = excluded.layout, friend_layout = excluded.friend_layout, bio = excluded.bio,
        favourite_movies = excluded.favourite_movies, favourite_shows = excluded.favourite_shows,
        favourite_people = excluded.favourite_people,
        featured_achievements = excluded.featured_achievements,
@@ -305,6 +333,7 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
       next.header_color,
       next.header_backdrop_url,
       next.layout,
+      next.friend_layout,
       next.bio,
       next.favourite_movies,
       next.favourite_shows,
@@ -362,7 +391,8 @@ export async function handleGetProfile(
   if (!row) return notFound();
   if (!(await canView(env, session.userId, userId, parseVisibility(row.visibility)))) return notFound();
 
-  return json({ profile: toWire(row), stats: await readStats(env, userId) });
+  // toForeignWire, NOT toWire: the latter carries the owner's unfiltered layout.
+  return json({ profile: toForeignWire(row), stats: await readStats(env, userId) });
 }
 
 /**
