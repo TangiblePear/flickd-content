@@ -197,6 +197,19 @@ GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googl
 # Firebase Auth (Phase 1). The project **id** — a Firebase ID token's `aud` is the
 # project id, NOT the project number (468641021144). Unset → /api/auth/* 503s.
 FIREBASE_PROJECT_ID = "flickto-cf7b6"
+# Lowest Android versionCode allowed on the social surface. Returned on
+# /api/me/bootstrap; the client blocks Friends below it, and the Worker enforces it
+# too (a client-side gate is a request, not a guarantee).
+#
+# **0 = no gate**, and that is the correct default — a typo here locks every user out
+# of social, so unset/invalid deliberately falls back to 0 rather than to a floor.
+#
+# Raise this ONLY to retire the E2EE relay profile path, and only once the gating
+# build has actually shipped and had time to roll out. Record the value and the date
+# raised in docs/Current Plans/android-accounts-firebase-d1-plan.md §6C — an
+# unrecorded flip cannot be audited later, and getting it wrong silently breaks
+# friends' activity for everyone still behind.
+MIN_SOCIAL_VERSION = "0"
 
 
 [observability]

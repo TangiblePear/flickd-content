@@ -18,13 +18,42 @@ import { loadFeed } from "./feed";
 export interface ProfileEnv {
   DB: D1Database;
   FIREBASE_PROJECT_ID?: string;
+  /**
+   * Lowest Android `versionCode` still allowed on the social surface, as a string
+   * (wrangler `vars` are always strings). Unset or unparseable ⇒ 0 ⇒ no gate, which
+   * is the correct default: a typo in this var must not lock every user out.
+   *
+   * Raised only when retiring the E2EE relay profile path, so no build that still
+   * READS the relay is left running when the writes stop. Record the value and the
+   * date it was raised in the plan doc — an unrecorded flip is unauditable.
+   */
+  MIN_SOCIAL_VERSION?: string;
 }
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-Match, X-Revoke-Session",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-Match, X-Revoke-Session, X-App-Version",
 };
+
+/** The configured social floor, or 0 when unset/invalid. Never throws. */
+export function minSocialVersion(env: { MIN_SOCIAL_VERSION?: string }): number {
+  const n = Number(env.MIN_SOCIAL_VERSION);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+/**
+ * The caller's `X-App-Version`, or 0 when absent or junk.
+ *
+ * 0 means "unknown", and unknown must NOT be treated as below the floor: the PWA and
+ * every pre-gate Android build send no header at all, and refusing them would break
+ * clients this gate was never aimed at. Enforcement is against builds that identify
+ * themselves as too old.
+ */
+export function appVersion(req: Request): number {
+  const n = Number(req.headers.get("X-App-Version"));
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
@@ -348,6 +377,10 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
     // First page of the feed rides along: app-open should cost ONE request, and
     // the Worker request cap binds far tighter than the row budget.
     feed: await loadFeed(env as any, session.userId, 50),
+    // The social minimum version rides app-open rather than its own endpoint or
+    // Remote Config: this request is already paid for, and Worker requests are the
+    // binding constraint. Additive — older clients ignore the field.
+    minSocialVersion: minSocialVersion(env),
     serverTime: Date.now(),
   });
 }

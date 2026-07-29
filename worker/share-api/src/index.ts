@@ -101,11 +101,13 @@ import {
 } from "./friends";
 import type { PublicCard } from "./friends";
 import {
+  appVersion,
   handleBootstrap,
   handleGetMyProfile,
   handleGetProfile,
   handlePutMyProfile,
   handlePutMyStats,
+  minSocialVersion,
 } from "./profiles";
 
 interface ShareItem {
@@ -242,6 +244,26 @@ export default {
     const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(access|profile|fcm-token|push)$`));
     if (userObj) {
       const [, friendId, kind] = userObj;
+      // The E2EE profile/access path is being retired. Once MIN_SOCIAL_VERSION is
+      // raised, builds below it are refused here as well as blocked in their own UI:
+      // a client-side gate is a request, not a guarantee, and an old build that
+      // ignored it would carry on reading the relay after the writes stopped —
+      // exactly the state the floor exists to prevent.
+      //
+      // `push` is NOT gated: it is the delivery path for the very notifications that
+      // tell a user to come back, and it is moving to /api/me/push independently.
+      const floor = minSocialVersion(env);
+      if (floor > 0 && (kind === "access" || kind === "profile")) {
+        const v = appVersion(req);
+        // v === 0 means "did not say" (the PWA, pre-gate builds). Only refuse a
+        // client that positively identifies itself as too old.
+        if (v > 0 && v < floor) {
+          return new Response(JSON.stringify({ error: "update_required", minSocialVersion: floor }), {
+            status: 426,
+            headers: { "Content-Type": "application/json", ...CORS },
+          });
+        }
+      }
       if (req.method === "PUT") return handlePutUserObject(friendId, kind, req, env, ctx);
       if (req.method === "GET" && kind !== "fcm-token" && kind !== "push") return handleGetUserObject(friendId, kind, req, env);
     }

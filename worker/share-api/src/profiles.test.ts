@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { canView, parseVisibility, friendshipKey } from "./authz";
 import {
+  appVersion,
   handleBootstrap,
   handleGetMyProfile,
   handleGetProfile,
   handlePutMyProfile,
   handlePutMyStats,
+  minSocialVersion,
 } from "./profiles";
 
 // ── In-memory D1 fake ────────────────────────────────────────────────────────
@@ -481,5 +483,60 @@ describe("bootstrap", () => {
   it("401s without a session", async () => {
     const env = await env0();
     expect((await handleBootstrap(new Request("https://flickto.app/api/me/bootstrap"), env)).status).toBe(401);
+  });
+
+  it("carries the social floor so the client can gate itself", async () => {
+    const env = await env0();
+    (env as any).MIN_SOCIAL_VERSION = "42";
+    const body = (await (await handleBootstrap(authed("tok-owner", "/api/me/bootstrap"), env)).json()) as any;
+    expect(body.minSocialVersion).toBe(42);
+  });
+
+  it("reports no floor when the var is unset", async () => {
+    const env = await env0();
+    const body = (await (await handleBootstrap(authed("tok-owner", "/api/me/bootstrap"), env)).json()) as any;
+    expect(body.minSocialVersion).toBe(0);
+  });
+});
+
+// ── The social version floor ─────────────────────────────────────────────────
+// Both helpers exist to fail OPEN. A bad var or a missing header must never lock
+// a user out of Friends, so every malformed input has to land on 0 ("no opinion")
+// rather than on something that could be compared as "too old".
+describe("minSocialVersion", () => {
+  it("reads a configured floor", () => {
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "1234" })).toBe(1234);
+  });
+
+  it("is 0 when unset, empty, negative, or not a number", () => {
+    expect(minSocialVersion({})).toBe(0);
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "" })).toBe(0);
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "-5" })).toBe(0);
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "banana" })).toBe(0);
+    // A typo here would otherwise lock every user out of the social surface.
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "12 34" })).toBe(0);
+  });
+
+  it("floors a decimal rather than rejecting it", () => {
+    expect(minSocialVersion({ MIN_SOCIAL_VERSION: "42.9" })).toBe(42);
+  });
+});
+
+describe("appVersion", () => {
+  const withHeader = (v: string) =>
+    new Request("https://flickto.app/api/user/ABCDEF123456/profile", { headers: { "X-App-Version": v } });
+
+  it("reads the header", () => {
+    expect(appVersion(withHeader("77"))).toBe(77);
+  });
+
+  it("is 0 when the header is absent — the PWA and pre-gate builds send none", () => {
+    expect(appVersion(new Request("https://flickto.app/api/user/ABCDEF123456/profile"))).toBe(0);
+  });
+
+  it("is 0 for junk, so a mangled header cannot read as 'too old'", () => {
+    expect(appVersion(withHeader("banana"))).toBe(0);
+    expect(appVersion(withHeader("-1"))).toBe(0);
+    expect(appVersion(withHeader(""))).toBe(0);
   });
 });
