@@ -547,15 +547,20 @@ export async function handleGetFriendCards(
     if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
     // The code rides the query above, so the common path costs no extra read.
     const card = await loadCard(row.friend_code ?? null);
-    // ⚠⚠ THE CLAIM-CHECK THAT STOOD HERE IS GONE WITH `users.friend_id` (8c-3), AND
-    // THIS IS THE ONE THING THAT DECISION COST. It compared the card's self-declared
-    // friendId against the claim-checked column, so a client could not publish a card
-    // asserting somebody else's friendId. Nothing verifies that now.
+    // ✅ CLOSED 2026-07-30. The claim-check that stood here went with `users.friend_id`
+    // (8c-3), and for a while nothing verified a card's self-declared `friendId` — a
+    // hostile client could publish one asserting somebody else's.
     //
-    // The blast radius is bounded but real: `social_friends.friendId` carries a UNIQUE
-    // index since 8b, so a spoofed duplicate fails the row insert on the victim's
-    // device. It needs a hostile client, and it closes for good when the client stops
-    // trusting the card's friendId at all — the friendId->userId migration.
+    // The fix named here was "the client stops trusting the card's friendId at all",
+    // and that is now true. The Android client reads `userId` for every decision the
+    // friendId used to serve: which row a card merges into, which row a push topic is
+    // written to, the block check on a scanned code, and the pairing self-check. The
+    // column it could collide with is gone too (Room v26).
+    //
+    // ⚠️ `friendId` is still PRESENT on the card this returns, because it is spread
+    // from the published card and clients still publish their own. It is inert — no
+    // reader on either side — and it leaves the wire when the publish side does, with
+    // the device identity handle. Do not re-introduce a reader for it.
     if (!card) continue;
     cards.push({ userId: row.id, ...card, friendTopic: row.push_friend_topic ?? "" });
   }
