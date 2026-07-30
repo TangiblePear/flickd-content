@@ -656,9 +656,15 @@ export async function handleGetFriendCards(
   if (allowed.length === 0) return json({ cards: [] });
 
   const placeholders = allowed.map(() => "?").join(",");
+  // ⚠️ `AND friend_id IS NOT NULL` was here and is gone (9a). It made an account that
+  // never claimed a device friendId INVISIBLE to its own friends: no card came back, so
+  // `applyServerGraph` dropped the edge at `cards[userId] ?? continue` and an accepted
+  // friendship on both sides rendered as nothing, with no error anywhere. Measured
+  // 2026-07-30: 1 of 5 active accounts was in exactly that state. The column is on its
+  // way out (8c-3) and was never what authorised the card — the friendship edge is.
   const { results } = await env.DB.prepare(
     `SELECT id, friend_id, friend_code, push_friend_topic FROM users
-      WHERE id IN (${placeholders}) AND status = 'active' AND friend_id IS NOT NULL`,
+      WHERE id IN (${placeholders}) AND status = 'active'`,
   )
     .bind(...allowed)
     .all<{ id: string; friend_id: string; friend_code: string | null; push_friend_topic: string | null }>();

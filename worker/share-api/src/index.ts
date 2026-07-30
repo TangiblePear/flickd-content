@@ -252,40 +252,18 @@ export default {
     // ⚠️ The route PATTERN stays: `push` serves through it, as do `picture` and
     // `opinions/*` below. Removing a pattern that still has traffic is a silent 405, and
     // `wrangler deploy --dry-run` cannot see it.
-    const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(fcm-token|push)$`));
-    if (userObj) {
-      const [, friendId, kind] = userObj;
-      // The E2EE profile/access path is being retired. Once MIN_SOCIAL_VERSION is
-      // raised, builds below it are refused here as well as blocked in their own UI:
-      // a client-side gate is a request, not a guarantee, and an old build that
-      // ignored it would carry on reading the relay after the writes stopped —
-      // exactly the state the floor exists to prevent.
-      //
-      // `push` is NOT gated: it is the delivery path for the very notifications that
-      // tell a user to come back, and it is moving to /api/me/push independently.
-      // The MIN_SOCIAL_VERSION check went with those two kinds. It existed to refuse an old
-      // build that would otherwise keep reading the relay after the writes stopped, and
-      // there is nothing left here to refuse it from. The floor stays in wrangler.toml for
-      // the CLIENT gate — see the note there on why it is still "0".
-      //
-      // PUT only. A push record is never client-readable, which is why there is no GET.
-      if (req.method === "PUT") return handlePutUserObject(friendId, kind, req, env, ctx);
-    }
-
-    const userOpinion = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/opinions/(${HASH})$`));
-    if (userOpinion) {
-      const [, friendId, hash] = userOpinion;
-      if (req.method === "PUT") return handlePutOpinion(friendId, hash, req, env);
-      if (req.method === "DELETE") return handleDeleteOpinion(friendId, hash, req, env);
-    }
-
     // ── Profile picture (server-visible, moderated) ──
+    // ⚠️ READ ONLY, and deliberately still here. PUT/DELETE are gone with the client
+    // that called them (9a), but one ACTIVE account's `profiles.picture_url` still
+    // points at this route, so removing GET would put a broken avatar on every screen
+    // that shows them. 8adbcbb5 heals that URL on the owner's next profile publish;
+    // this goes one release after it has, not before. Verified 2026-07-30, and by
+    // measurement rather than assumption — the plan claimed the data was already
+    // migrated and it was not.
     const userPicture = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/picture$`));
     if (userPicture) {
       const [, friendId] = userPicture;
-      if (req.method === "PUT") return handlePutPicture(friendId, req, env, ctx);
       if (req.method === "GET") return handleGetPicture(friendId, env);
-      if (req.method === "DELETE") return handleDeletePicture(friendId, req, env);
     }
 
     // ── Profile picture, account-keyed (step 3 of the friendId retirement) ──
@@ -683,34 +661,6 @@ async function verifyOwner(env: Env, friendId: string, secret: string | null): P
 }
 
 /**
- * Owner-authenticate AND (re)bind the read tokens friends present to read.
- * `ta` gates access.json (stable); `tc` gates profile/opinions (rotatable). Each
- * absent value preserves what was bound before, so a write that carries only one
- * token never clears the other. Rotation is just a write that supplies a new `tc`.
- */
-async function verifyOwnerBindToken(
-  env: Env,
-  friendId: string,
-  secret: string | null,
-  ta: string | null,
-  tc: string | null,
-): Promise<OwnerAuth> {
-  if (!secret) return { ok: false, created: false };
-  const hash = await sha256hex(secret);
-  const existing = await getJson<OwnerRecord>(env, ownerKey(friendId));
-  if (existing && existing.h !== hash) return { ok: false, created: false };
-  const next: OwnerRecord = {
-    h: hash,
-    ta: ta ?? (existing ? effTa(existing) : undefined),
-    tc: tc ?? (existing ? effTc(existing) : undefined),
-  };
-  if (!existing || existing.h !== next.h || existing.ta !== next.ta || existing.tc !== next.tc) {
-    await putJson(env, ownerKey(friendId), next);
-  }
-  return { ok: true, created: !existing };
-}
-
-/**
  * Read-gate: the presented token must match the author's bound read token for the
  * given slot — `"a"` for access.json (stable `ta`), `"c"` for profile/opinions
  * (rotatable `tc`). A rotated `tc` therefore 403s a stale reader immediately.
@@ -751,87 +701,6 @@ function strongEtag(value: string | null): string | null {
 }
 
 // PUT access.json / profile.json — owner-auth + bind read token. Body is opaque.
-async function handlePutUserObject(
-  friendId: string,
-  kind: string,
-  req: Request,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<Response> {
-  // X-Read-Token = stable `ta` (access); X-Read-Token-C = rotatable `tc`
-  // (profile/opinions). Each write rebinds whichever it carries; rotation is just a
-  // write with a new tc. Access writes rate-limited so churn can't hammer the relay.
-  const ta = req.headers.get("X-Read-Token");
-  const tc = req.headers.get("X-Read-Token-C");
-  if (kind === "access") {
-    const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
-    if (await rateLimited(env, "access", ip, Number(env.RATE_LIMIT_PER_HOUR ?? "10") * 6)) {
-      return json({ error: "rate_limited" }, { status: 429 });
-    }
-  }
-  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), ta, tc);
-  if (!owner.ok) return forbidden();
-  const body = await req.text();
-  let cap = MAX_BLOB_BYTES;
-  if (kind === "access") cap = MAX_ACCESS_BYTES;
-  if (kind === "fcm-token" || kind === "push") cap = 2048;
-  if (body.length > cap) return tooLarge();
-  try {
-    JSON.parse(body);
-  } catch {
-    return invalidJson();
-  }
-  if (kind === "profile") {
-    // Stash the rotatable read token (tc) on the object so freshness can authorize
-    // with a single get() (0a-2). Profile is re-PUT on rotation, so this stays
-    // current — unlike opinions, whose batch endpoint checks owner.json.tc directly.
-    const putOpts: R2PutOptions = {
-      httpMetadata: { contentType: "application/json" },
-      ...(tc ? { customMetadata: { rt: tc } } : {}),
-    };
-    // Read-merge-write concurrency (0c-2): when the client sends the etag it merged
-    // against (X-If-Match), do a conditional put so two devices can't lose one
-    // another's merge. A mismatch (or a since-deleted object) returns 409 + the
-    // current etag; the client re-reads, re-merges and retries once.
-    const ifMatch = strongEtag(req.headers.get("X-If-Match"));
-    if (ifMatch) {
-      const written = await env.BUCKET.put(`${friendId}/${kind}.json`, body, {
-        ...putOpts,
-        onlyIf: { etagMatches: ifMatch },
-      });
-      if (written === null) {
-        const head = await env.BUCKET.head(`${friendId}/${kind}.json`);
-        return json({ error: "etag_conflict", etag: head?.httpEtag }, { status: 409 });
-      }
-      ctx.waitUntil(fanOutProfileUpdate(friendId, env));
-      return json({ ok: true, ownerRecreated: owner.created, etag: written.httpEtag });
-    }
-    const written = await env.BUCKET.put(`${friendId}/${kind}.json`, body, putOpts);
-    ctx.waitUntil(fanOutProfileUpdate(friendId, env));
-    return json({ ok: true, ownerRecreated: owner.created, etag: written?.httpEtag });
-  }
-
-  await putRaw(env, `${friendId}/${kind}.json`, body);
-  return json({ ok: true, ownerRecreated: owner.created });
-}
-
-interface PushRecord {
-  selfTopic?: string;
-  friendTopic?: string;
-  token?: string;
-}
-
-/** Read an owner's push record, preferring `push.json` over the legacy `fcm-token.json`. */
-async function readPushRecord(env: Env, friendId: string): Promise<PushRecord | null> {
-  const raw = (await getText(env, `${friendId}/push.json`)) ?? (await getText(env, `${friendId}/fcm-token.json`));
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as PushRecord;
-  } catch {
-    return null;
-  }
-}
-
 function fcmConfig(env: Env): FcmConfig | null {
   if (!env.FCM_PROJECT_ID || !env.FCM_SERVICE_ACCOUNT_EMAIL || !env.FCM_PRIVATE_KEY) return null;
   return {
@@ -846,87 +715,9 @@ function fcmConfig(env: Env): FcmConfig | null {
 // every device. Only a pre-topics owner (no `friendTopic` yet) falls back to the
 // legacy per-friend token loop, which self-resolves once the owner republishes
 // `push.json` within the client's ~3-day heartbeat.
-async function fanOutProfileUpdate(myId: string, env: Env) {
-  const config = fcmConfig(env);
-  if (!config) return;
-  try {
-    const mine = await readPushRecord(env, myId);
-    if (mine && typeof mine.friendTopic === "string" && mine.friendTopic) {
-      const target = pickFcmTarget(mine, "friend");
-      if (target && "topic" in target) {
-        await sendFcmMessage(config, target, myId, "social_update");
-        return;
-      }
-    }
-    // Legacy fallback: owner not yet on topics — notify each friend's device token.
-    const accessStr = await getText(env, `${myId}/access.json`);
-    if (!accessStr) return;
-    const access = JSON.parse(accessStr) as { keys?: Record<string, unknown> };
-    if (!access.keys) return;
-    for (const friendId of Object.keys(access.keys)) {
-      const rec = await readPushRecord(env, friendId);
-      if (rec && typeof rec.token === "string" && rec.token) {
-        await sendFcmMessage(config, { token: rec.token }, myId, "social_update");
-      }
-    }
-  } catch (e) {
-    console.error("Failed to fan out profile update", e);
-  }
-}
-
 // GET access.json / profile.json — read-token-gated; returns stored ciphertext.
-async function handleGetUserObject(
-  friendId: string,
-  kind: string,
-  req: Request,
-  env: Env,
-): Promise<Response> {
-  // access.json is gated by the stable `ta`; profile.json by the rotatable `tc`.
-  const which = kind === "access" ? "a" : "c";
-  if (!(await verifyReadToken(env, friendId, req.headers.get("X-Read-Token"), which))) return forbidden();
-  // get() (not getText) so we can surface the ETag — the owner's read-merge-write
-  // sends it back as X-If-Match for the conditional profile write (0c-2).
-  const obj = await env.BUCKET.get(`${friendId}/${kind}.json`);
-  if (!obj) return notFound();
-  const raw = await obj.text();
-  return new Response(raw, {
-    headers: {
-      "Content-Type": "application/json",
-      ...CORS,
-      "Access-Control-Expose-Headers": "ETag",
-      ETag: obj.httpEtag,
-    },
-  });
-}
-
 // PUT one encrypted opinion, located by its blind index hash. Owner-auth.
-async function handlePutOpinion(friendId: string, hash: string, req: Request, env: Env): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  const body = await req.text();
-  if (body.length > MAX_BLOB_BYTES) return tooLarge();
-  try {
-    JSON.parse(body);
-  } catch {
-    return invalidJson();
-  }
-  // Stash the read token so the batch endpoint can authorize with one get() (0a-2).
-  const readToken = req.headers.get("X-Read-Token");
-  await env.BUCKET.put(`${friendId}/opinions/${hash}.json`, body, {
-    httpMetadata: { contentType: "application/json" },
-    ...(readToken ? { customMetadata: { rt: readToken } } : {}),
-  });
-  return json({ ok: true, ownerRecreated: auth.created });
-}
-
 // DELETE one opinion (true removal on tombstone). Owner-auth.
-async function handleDeleteOpinion(friendId: string, hash: string, req: Request, env: Env): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  await env.BUCKET.delete(`${friendId}/opinions/${hash}.json`);
-  return json({ ok: true, ownerRecreated: auth.created });
-}
-
 // ── Profile pictures + reports ──────────────────────────────────────────────
 // All picture-domain objects live in the social bucket alongside E2EE user data
 // so the flickto-web admin panel can bind the same bucket for review/takedown:
@@ -975,55 +766,6 @@ function sniffImageType(bytes: Uint8Array): string | null {
 // PUT the owner's profile picture. Owner-auth (same secret + read token that
 // gates profile.json). Scans the bytes before storing; a flagged image is never
 // persisted or shared. A fresh upload clears any prior takedown tombstone.
-async function handlePutPicture(
-  friendId: string,
-  req: Request,
-  env: Env,
-  ctx: ExecutionContext,
-): Promise<Response> {
-  const owner = await verifyOwnerBindToken(env, friendId, req.headers.get("X-Feed-Secret"), req.headers.get("X-Read-Token"), req.headers.get("X-Read-Token-C"));
-  if (!owner.ok) return forbidden();
-
-  // ⚠️ Keyed on friendId, not users.id: this endpoint authenticates on a relay-issued
-  // owner secret, so there is no session to read an account id from. The extra lookup
-  // goes away when pictures move onto users.id.
-  const suspended = await postingSuspendedUntilForFriend(env.DB, friendId);
-  if (suspended > 0) return json(suspendedBody(suspended), { status: 403 });
-
-  const buf = new Uint8Array(await req.arrayBuffer());
-  if (buf.byteLength === 0) return invalidJson();
-  if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();
-
-  const contentType = sniffImageType(buf);
-  if (!contentType) return json({ error: "unsupported_type" }, { status: 400 });
-
-  const result = await moderateImage(buf, env);
-  if (!result.allowed) {
-    return json({ error: "rejected", categories: result.categories }, { status: 422 });
-  }
-
-  const version = Date.now();
-  await env.BUCKET.put(picKey(friendId), buf, { httpMetadata: { contentType } });
-  const meta: PictureMeta = {
-    version,
-    contentType,
-    sha256: await sha256hexBytes(buf),
-    verdict: result.verdict,
-    updatedAt: version,
-  };
-  await env.BUCKET.put(picMetaKey(friendId), JSON.stringify(meta), {
-    httpMetadata: { contentType: "application/json" },
-  });
-  // A new image supersedes any earlier auto/admin takedown.
-  await env.BUCKET.delete(tombstoneKey(friendId));
-
-  // Reuse the profile fan-out so friends refresh and pull the new pictureUrl.
-  ctx.waitUntil(fanOutProfileUpdate(friendId, env));
-
-  const url = `https://flickto.app/api/user/${friendId}/picture?v=${version}`;
-  return json({ ok: true, url, version, ownerRecreated: owner.created });
-}
-
 // GET a profile picture. Public — the opaque friendId is the capability, so Coil
 // loads it with no custom headers. A takedown tombstone yields 410.
 async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
@@ -1042,14 +784,6 @@ async function handleGetPicture(friendId: string, env: Env): Promise<Response> {
 }
 
 // DELETE the owner's own picture. Owner-auth.
-async function handleDeletePicture(friendId: string, req: Request, env: Env): Promise<Response> {
-  const auth = await verifyOwner(env, friendId, req.headers.get("X-Feed-Secret"));
-  if (!auth.ok) return forbidden();
-  await env.BUCKET.delete(picKey(friendId));
-  await env.BUCKET.delete(picMetaKey(friendId));
-  return json({ ok: true, ownerRecreated: auth.created });
-}
-
 // ── Account-keyed profile pictures (step 3 of the friendId retirement) ───────
 // Same bytes, same scan, same tombstone semantics as the relay trio above — but
 // keyed on `users.id` and written under a session instead of a relay-issued owner
@@ -1176,7 +910,7 @@ async function clearLegacyTombstone(env: Env, userId: string): Promise<void> {
 }
 
 /**
- * The account-keyed twin of [fanOutProfileUpdate] — one FCM message to the owner's
+ * One FCM message to the owner's
  * friend topic so friends refetch the profile and pick up the new picture URL.
  *
  * Falls back to the relay push record for the same reason [notifyAccount] does: every
@@ -1190,9 +924,7 @@ async function fanOutAccountProfileUpdate(env: Env, userId: string): Promise<voi
     if (!config) return;
     const account = await readAccountPush(env.DB, userId);
     if (!account) return;
-    const target =
-      pickFcmTarget(account, "friend") ??
-      (account.friendId ? pickFcmTarget(await readPushRecord(env, account.friendId), "friend") : null);
+    const target = pickFcmTarget(account, "friend");
     if (!target) return;
     // The friendId while one exists: it is the tag the client correlates on, not an
     // addressing decision. Same rule as notifyAccount.
@@ -1591,13 +1323,12 @@ async function notifyAccount(
     const config = fcmConfig(env);
     if (!config) return;
 
-    // ⚠️ Fall through to the relay record when the account has no topics yet. Every
-    // install predating `PUT /api/me/push` published only `{friendId}/push.json`, so
-    // treating "no topics" as "unreachable" would silently unpush the whole userbase.
-    // Delete the fallback at step 8, not before.
-    const target =
-      pickFcmTarget(account, "self") ??
-      (account.friendId ? pickFcmTarget(await readPushRecord(env, account.friendId), "self") : null);
+    // The relay fallback (`{friendId}/push.json`) is gone as of 9a. An account with no
+    // topics is now simply unreachable by directed push until its client publishes them,
+    // which every current build does on the sync after upgrading. Measured before
+    // removing: 3 of 5 active accounts had no account topics and lose directed push
+    // until they open an updated build — the accepted price, decided twice.
+    const target = pickFcmTarget(account, "self");
     if (!target) return;
     // Still the friendId while one exists: it is the FCM message tag the client
     // correlates on, not an addressing decision.

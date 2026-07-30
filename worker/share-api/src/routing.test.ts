@@ -225,10 +225,41 @@ describe("route wiring", () => {
     }
   });
 
-  it("still routes PUT push, which shares that pattern", async () => {
+  it("no longer routes PUT push — the relay dual-write is retired (9a)", async () => {
     const res = await worker.fetch(request("PUT", `/api/user/${FRIEND_ID}/push`, { selfTopic: "t_a" }), env(), ctx);
-    // 403 = the matcher ran and owner auth rejected it. 404 would mean the kind was lost.
-    expect(res.status).toBe(403);
+    // Was 403 (matcher ran, owner auth rejected). Now 404: the whole
+    // `/api/user/{friendId}/(fcm-token|push)` matcher is gone and topics live on
+    // `users`. An account with no topics is unreachable by directed push rather than
+    // falling back to the relay record — the accepted, measured price.
+    expect(res.status).toBe(404);
+  });
+
+  it("still serves GET picture — one live account's picture_url points at it", async () => {
+    // PUT/DELETE went with the client that called them, but this READ is load-bearing
+    // until 8adbcbb5 heals the last stale `profiles.picture_url`.
+    //
+    // ⚠️ Asserting `not 404` would be worthless: an unmatched route and a missing
+    // object BOTH return 404, so that assertion passes whether or not the route
+    // exists. Serve an object and require 200 — only a wired route can produce it.
+    const e = env();
+    e.BUCKET = {
+      async get(key: string) {
+        if (key.endsWith("/pics/picture.jpg")) {
+          return { body: "bytes", httpMetadata: { contentType: "image/jpeg" } };
+        }
+        return null; // no tombstone
+      },
+      async put() {},
+      async head() {
+        return null;
+      },
+      async delete() {},
+      async list() {
+        return { objects: [], delimitedPrefixes: [], truncated: false, cursor: undefined };
+      },
+    };
+    const res = await worker.fetch(request("GET", `/api/user/${FRIEND_ID}/picture`), e, ctx);
+    expect(res.status).toBe(200);
   });
 
   it("no longer serves the stopgap person-report endpoints", async () => {
