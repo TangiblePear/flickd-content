@@ -8,30 +8,57 @@
 --   * pairing, blocks and the graph are D1 rows keyed on `users.id`
 --   * `social_friends` is keyed on `users.id` client-side (step 8b)
 --
--- ⚠️ WHAT THIS COSTS, recorded because it is a real trade and not a cleanup.
+-- ⚠️ A PLAIN `ALTER TABLE users DROP COLUMN friend_id` DOES NOT WORK, and the first
+-- version of this migration tried it. SQLite refuses with
+-- `cannot drop UNIQUE column: "friend_id"` because the constraint is declared INLINE
+-- (`friend_id TEXT UNIQUE`), not as a separate index — dropping an index first does
+-- not help, and there was no separate index to drop. So this is a table rebuild.
+--
+-- ⚠️ EIGHT TABLES CARRY `REFERENCES users(id)`: identities, sessions, profiles,
+-- profile_stats, feed_events, comments, comment_reactions, episode_votes. None uses
+-- ON DELETE CASCADE — checked before writing this — so there is no cascade-delete
+-- risk. `defer_foreign_keys` holds enforcement until the transaction commits, by
+-- which point `users_new` has been renamed into place and every reference resolves
+-- again.
+--
+-- ⚠️ WHAT DROPPING THE COLUMN COSTS, recorded because it is a real trade.
 --
 -- `handleGetFriendCards` compared the friend card's self-declared `friendId` against
--- this column before returning it. The card blob is CLIENT-WRITTEN, so that comparison
--- was the only thing stopping a client publishing a card that asserts somebody else's
--- friendId. Nothing verifies it now.
+-- this column before returning it. The card blob is CLIENT-WRITTEN, so that
+-- comparison was the only thing stopping a client publishing a card that asserts
+-- somebody else's friendId. Nothing verifies it now.
 --
--- The blast radius is bounded: `social_friends.friendId` carries a UNIQUE index since
--- 8b, so a spoofed duplicate fails an insert on the victim's device rather than
--- impersonating anyone. It needs a hostile client, and it closes properly when the
--- client stops trusting the card's friendId at all — the friendId→userId migration
--- still ahead. Taken deliberately at 4 known accounts, pre-launch.
+-- Bounded: `social_friends.friendId` carries a UNIQUE index since 8b, so a spoofed
+-- duplicate fails an insert on the victim's device rather than impersonating anyone.
+-- It needs a hostile client, and it closes when the client stops trusting the card's
+-- friendId at all — the friendId→userId migration now underway (M1, M2 landed).
 --
--- Everything else that read the column was already dead or already covered:
---   * the `{friendId}/friendcode.json` legacy pointer resolved to nothing — measured
---     2026-07-30, both accounts that would have used it had no such object, step 7's
---     purge having taken them
---   * `_moderation/{friend_id}.json` was the relay picture route's takedown marker;
---     `_moderation/u/{userId}.json` covers the account route, which is the only one
---     that still accepts writes
---   * `postingSuspendedUntilForFriend` lost its caller when the relay picture PUT went
---   * `needsFriendId` told clients to claim an id nothing reads
---
--- SQLite has supported DROP COLUMN since 3.35 and D1 is well past that, so this needs
--- no table rebuild. The index on the column goes with it automatically.
-DROP INDEX IF EXISTS idx_users_friend_id;
-ALTER TABLE users DROP COLUMN friend_id;
+-- NB the behavioural half of 8c-3 is already live without this: no deployed code
+-- reads `friend_id`. This migration only reclaims the column.
+PRAGMA defer_foreign_keys = true;
+
+CREATE TABLE users_new (
+  id         TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'active',
+  posting_suspended_until INTEGER,
+  push_self_topic TEXT,
+  push_friend_topic TEXT,
+  friend_code TEXT
+);
+
+INSERT INTO users_new (id, created_at, status, posting_suspended_until,
+                       push_self_topic, push_friend_topic, friend_code)
+SELECT id, created_at, status, posting_suspended_until,
+       push_self_topic, push_friend_topic, friend_code
+  FROM users;
+
+DROP TABLE users;
+ALTER TABLE users_new RENAME TO users;
+
+-- Recreate what the old table carried. ⚠️ `idx_users_friend_code` is UNIQUE and MUST
+-- be recreated that way: a plain index here would silently let two accounts hold the
+-- same friend code, and the first symptom would be a shared code resolving to the
+-- wrong person. `friend_id`'s UNIQUE auto-index (sqlite_autoindex_users_2) goes with
+-- the column, which is the point of the rebuild.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code);
