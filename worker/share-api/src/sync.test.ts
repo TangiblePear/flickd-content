@@ -93,6 +93,15 @@ class FakeStmt {
           .slice(0, limit) as T[],
       };
     }
+    // A friend's CURRENT push topic now rides the graph, because it rotates under them
+    // and a copy cached once at pairing goes stale silently — see `loadFriendTopics`.
+    if (s.startsWith("SELECT id, push_friend_topic FROM users")) {
+      return {
+        results: this.args
+          .map((id) => ({ id, push_friend_topic: `t_TOPIC_${id}` }))
+          .filter((r) => r.id !== "no-topic") as T[],
+      };
+    }
     throw new Error(`unhandled all(): ${s}`);
   }
   async run() {

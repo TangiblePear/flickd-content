@@ -114,11 +114,50 @@ export async function loadFriendships(env: FriendsEnv, userId: string) {
   return { accepted, incoming, outgoing };
 }
 
+/**
+ * Current `push_friend_topic` for each of [ids], omitting anyone who has none.
+ *
+ * ⚠️ **A friend's push topic is MUTABLE and was previously cached forever.** It rotates
+ * whenever its owner removes or blocks someone (`rotateKeys`), so the copy a friend took
+ * from a card at pairing time goes stale the moment that happens. The client's only
+ * refresh trigger was "my cached topic is BLANK", which catches a friend who had not
+ * published yet and never catches one who has published a *different* topic since.
+ *
+ * Measured on two devices 2026-07-30: after a remove/re-add, one held `''` and the other
+ * held a topic three rotations old, while D1 held the correct value for both. Directed
+ * pushes between them were silently dead in one direction.
+ *
+ * Riding the graph restores what the relay's freshness call used to do for free — it was
+ * re-delivered on every sync, so rotation self-healed, and nothing replaced that when the
+ * relay was retired. Deliberately NOT folded into `loadFriendships`: seven callers use
+ * that for authorization only and must not pay for a second query.
+ */
+export async function loadFriendTopics(
+  env: FriendsEnv,
+  ids: string[],
+): Promise<Record<string, string>> {
+  const wanted = [...new Set(ids)].slice(0, MAX_TOPIC_LOOKUPS);
+  if (wanted.length === 0) return {};
+  const placeholders = wanted.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT id, push_friend_topic FROM users
+      WHERE id IN (${placeholders}) AND status = 'active'`,
+  )
+    .bind(...wanted)
+    .all<{ id: string; push_friend_topic: string | null }>();
+  const out: Record<string, string> = {};
+  for (const row of results ?? []) {
+    if (row.push_friend_topic) out[row.id] = row.push_friend_topic;
+  }
+  return out;
+}
+
 /** GET /api/friends — accepted friends plus pending in both directions. */
 export async function handleGetFriends(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
-  return json(await loadFriendships(env, session.userId));
+  const graph = await loadFriendships(env, session.userId);
+  return json({ ...graph, topics: await loadFriendTopics(env, graph.accepted) });
 }
 
 // ── Requesting and accepting ─────────────────────────────────────────────────
@@ -484,6 +523,10 @@ export interface PublicCard {
 export type FriendCardWithTopic = PublicCard & { userId: string; friendTopic: string };
 
 const MAX_CARD_LOOKUPS = 25;
+
+/** Cap on `loadFriendTopics`. Higher than the card cap: it is one cheap indexed
+ *  read of a single column, and it must cover a whole accepted list, not a page. */
+const MAX_TOPIC_LOOKUPS = 200;
 
 /**
  * POST /api/friends/cards `{ userIds: [...] }` — the public cards for people you

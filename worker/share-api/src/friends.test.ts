@@ -137,6 +137,11 @@ class FakeStmt {
         results: this.db.users.filter((u) => a.includes(u.id) && u.status === "active") as T[],
       };
     }
+    // A friend's CURRENT push topic now rides the graph, because it rotates under them
+    // and a copy cached once at pairing goes stale silently — see `loadFriendTopics`.
+    if (s.startsWith("SELECT id, push_friend_topic FROM users")) {
+      return { results: this.args.map((id) => ({ id, push_friend_topic: `t_TOPIC_${id}` })) as T[] };
+    }
     throw new Error(`FakeD1: unhandled all() ${s}`);
   }
 

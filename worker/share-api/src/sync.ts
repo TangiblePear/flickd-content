@@ -14,7 +14,7 @@
 
 import { resolveSession } from "./auth";
 import { loadFeed, publishEvents, type FeedEnv } from "./feed";
-import { loadFriendships } from "./friends";
+import { loadFriendships, loadFriendTopics } from "./friends";
 import { loadSharedLists, type ListsEnv } from "./lists";
 import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEnv } from "./match";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
@@ -130,7 +130,10 @@ export async function handleSync(
   const written = Array.isArray(body.events) ? await publishEvents(env, session.userId, body.events) : 0;
 
   // 2. D1. All subrequests, all free.
-  const friends = await loadFriendships(env as any, session.userId);
+  const graph = await loadFriendships(env as any, session.userId);
+  // Refreshed on EVERY sync, because a friend's push topic rotates under them and a
+  // copy taken once at pairing goes stale silently — see `loadFriendTopics`.
+  const friends = { ...graph, topics: await loadFriendTopics(env as any, graph.accepted) };
   const feedSince = typeof body.feedSince === "number" ? body.feedSince : 0;
   const events = await loadFeed(env, session.userId, DEFAULT_PAGE, undefined, feedSince);
   const cursor = events.reduce((newest, e) => Math.max(newest, e.createdAt), feedSince);
