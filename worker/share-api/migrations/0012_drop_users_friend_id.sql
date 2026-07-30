@@ -1,70 +1,47 @@
--- Step 8c-3 of the friendId retirement: drop the device friendId from `users`.
+-- 8c-3: `users.friend_id` STAYS. This migration is a deliberate no-op.
 --
--- The column bridged two id spaces while pairing, pictures, push and friend codes all
--- addressed a device rather than an account. Every one of those has moved:
---   * push topics are columns on this table (step 2)
---   * pictures are keyed on `users.id` (step 3)
---   * friend codes are `users.friend_code` (step 4)
---   * pairing, blocks and the graph are D1 rows keyed on `users.id`
---   * `social_friends` is keyed on `users.id` client-side (step 8b)
+-- ⚠️ DO NOT REWRITE THIS TO DROP THE COLUMN. It was attempted three times against the
+-- remote database on 2026-07-30 and cannot work there. Every attempt rolled back
+-- cleanly — production integrity was re-verified each time — but each one took the
+-- database briefly offline for nothing.
 --
--- ⚠️ A PLAIN `ALTER TABLE users DROP COLUMN friend_id` DOES NOT WORK, and the first
--- version of this migration tried it. SQLite refuses with
--- `cannot drop UNIQUE column: "friend_id"` because the constraint is declared INLINE
--- (`friend_id TEXT UNIQUE`), not as a separate index — dropping an index first does
--- not help, and there was no separate index to drop. So this is a table rebuild.
+-- WHY IT CANNOT WORK
 --
--- ⚠️ EIGHT TABLES CARRY `REFERENCES users(id)`: identities, sessions, profiles,
--- profile_stats, feed_events, comments, comment_reactions, episode_votes. None uses
--- ON DELETE CASCADE — checked, so there is no cascade-delete risk.
+-- `friend_id TEXT UNIQUE` is declared inline, so SQLite refuses
+-- `ALTER TABLE users DROP COLUMN friend_id` outright:
+--     cannot drop UNIQUE column: "friend_id"                          [attempt 1]
+-- That forces a create-copy-drop-rename. But EIGHT tables carry
+-- `REFERENCES users(id)` — identities, sessions, profiles, profile_stats,
+-- feed_events, comments, comment_reactions, episode_votes — so dropping the parent
+-- violates all of them:
+--     FOREIGN KEY constraint failed                                [attempts 2, 3]
 --
--- ⚠️ `defer_foreign_keys` IS NOT ENOUGH, and the second attempt failed on that. It
--- postpones ROW-level checks to commit; dropping a parent table that eight tables
--- reference is a SCHEMA violation deferral does not cover, so the commit reported
--- "the application left the database in a state where constraints were violated".
--- Reproduced in a local SQLite loaded with this exact schema, where all three were
--- tried: `defer_foreign_keys` FAILS, `foreign_keys=OFF` re-asserted per statement
--- FAILS, and `foreign_keys=OFF` held across the whole file SUCCEEDS with the column
--- gone, zero `foreign_key_check` violations and the UNIQUE index intact.
+-- Both escapes fail on remote D1:
+--   * `PRAGMA defer_foreign_keys` defers ROW checks to commit. Dropping a parent
+--     table is a SCHEMA violation, which deferral does not cover. Reproduced in a
+--     local SQLite loaded with this exact schema pulled from D1.
+--   * `PRAGMA foreign_keys = OFF` works in plain SQLite — including
+--     `wrangler d1 migrations apply --local`, where all twelve migrations apply and
+--     the result verifies clean (column gone, UNIQUE index intact, no FK violations).
+--     ⚠️ **Remote D1 does not honour it.** That local/remote difference is what made
+--     attempt 3 look safe when it was not: a green `--local` run is NOT evidence for
+--     `--remote` when PRAGMAs are involved.
 --
--- ⚠️ WHAT DROPPING THE COLUMN COSTS, recorded because it is a real trade.
+-- The only route left is rebuilding all NINE tables to strip and restore the FK
+-- clauses — a large, risky operation on live data to reclaim a column nothing reads.
 --
--- `handleGetFriendCards` compared the friend card's self-declared `friendId` against
--- this column before returning it. The card blob is CLIENT-WRITTEN, so that
--- comparison was the only thing stopping a client publishing a card that asserts
--- somebody else's friendId. Nothing verifies it now.
+-- WHY LEAVING IT COSTS NOTHING
 --
--- Bounded: `social_friends.friendId` carries a UNIQUE index since 8b, so a spoofed
--- duplicate fails an insert on the victim's device rather than impersonating anyone.
--- It needs a hostile client, and it closes when the client stops trusting the card's
--- friendId at all — the friendId→userId migration now underway (M1, M2 landed).
+-- 8c-3's behavioural half is already deployed and verified by live curl: no code
+-- reads `users.friend_id`. The claim-check that used it is gone, `handleClaimFriendId`
+-- and `PUT /api/me/friend-id` are gone, and the client stopped writing it. The column
+-- is inert — four rows of dead storage.
 --
--- NB the behavioural half of 8c-3 is already live without this: no deployed code
--- reads `friend_id`. This migration only reclaims the column.
-PRAGMA foreign_keys = OFF;
-
-CREATE TABLE users_new (
-  id         TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'active',
-  posting_suspended_until INTEGER,
-  push_self_topic TEXT,
-  push_friend_topic TEXT,
-  friend_code TEXT
-);
-
-INSERT INTO users_new (id, created_at, status, posting_suspended_until,
-                       push_self_topic, push_friend_topic, friend_code)
-SELECT id, created_at, status, posting_suspended_until,
-       push_self_topic, push_friend_topic, friend_code
-  FROM users;
-
-DROP TABLE users;
-ALTER TABLE users_new RENAME TO users;
-
--- Recreate what the old table carried. ⚠️ `idx_users_friend_code` is UNIQUE and MUST
--- be recreated that way: a plain index here would silently let two accounts hold the
--- same friend code, and the first symptom would be a shared code resolving to the
--- wrong person. `friend_id`'s UNIQUE auto-index (sqlite_autoindex_users_2) goes with
--- the column, which is the point of the rebuild.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code);
+-- The one thing that ever depended on it — the friend-card claim-check, whose removal
+-- left a card's self-declared `friendId` unverified — closes with the client-side
+-- friendId→userId migration (M1–M7), NOT by reclaiming this column. Dropping it here
+-- would not have advanced that by a single step.
+--
+-- If it must eventually go, fold it into a migration that is rebuilding `users` for
+-- another reason anyway, and rebuild the child tables in the same pass.
+SELECT 1;
