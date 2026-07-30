@@ -316,11 +316,30 @@ export async function handleBlock(
   if (!session) return json({ error: "unauthorized" }, 401);
   if (!USER_ID_RE.test(target) || target === session.userId) return json({ error: "invalid_payload" }, 400);
 
+  // Snapshot who they were, BEFORE the friendship goes. A block record that cannot name
+  // its target is unrenderable later: the local row is gone after a device wipe, and
+  // `GET /api/profile/{userId}` is gated by `canView`, which fails on a blocked pair. So
+  // the one thing that could name them is the one thing a block guarantees you cannot read.
+  //
+  // Read outside the batch and tolerated as null — a block must never fail because a name
+  // lookup did. A snapshot, not a live join, so a later rename does not rewrite history.
+  const who = await env.DB.prepare("SELECT display_name, avatar_id FROM profiles WHERE user_id = ?")
+    .bind(target)
+    .first<{ display_name: string | null; avatar_id: string | null }>()
+    .catch(() => null);
+
   const [a, b] = friendshipKey(session.userId, target);
   await env.DB.batch([
+    // OR REPLACE, not OR IGNORE: re-blocking someone should refresh the snapshot rather
+    // than keep a name from the first time.
     env.DB
-      .prepare("INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)")
-      .bind(session.userId, target, Date.now()),
+      .prepare(
+        `INSERT INTO blocks (blocker_id, blocked_id, created_at, display_name, avatar_id)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(blocker_id, blocked_id) DO UPDATE SET
+           display_name = excluded.display_name, avatar_id = excluded.avatar_id`,
+      )
+      .bind(session.userId, target, Date.now(), who?.display_name ?? null, who?.avatar_id ?? null),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b),
   ]);
   return noContent();
@@ -345,12 +364,23 @@ export async function handleUnblock(
 export async function handleGetBlocks(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
   const session = await requireSession(req, env, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
+  // `displayName` / `avatarId` are the snapshot taken at block time — the only way a
+  // client that has been wiped can render this list at all. Empty for a row written before
+  // migration 0011, which the client renders as an unnamed entry rather than hiding: a
+  // block you cannot see is a block you cannot lift.
   const { results } = await env.DB.prepare(
-    "SELECT blocked_id, created_at FROM blocks WHERE blocker_id = ? ORDER BY created_at DESC",
+    "SELECT blocked_id, created_at, display_name, avatar_id FROM blocks WHERE blocker_id = ? ORDER BY created_at DESC",
   )
     .bind(session.userId)
-    .all<{ blocked_id: string; created_at: number }>();
-  return json({ blocked: (results ?? []).map((r) => ({ userId: r.blocked_id, at: r.created_at })) });
+    .all<{ blocked_id: string; created_at: number; display_name: string | null; avatar_id: string | null }>();
+  return json({
+    blocked: (results ?? []).map((r) => ({
+      userId: r.blocked_id,
+      at: r.created_at,
+      displayName: r.display_name ?? "",
+      avatarId: r.avatar_id ?? "",
+    })),
+  });
 }
 
 // ── Reporting ────────────────────────────────────────────────────────────────

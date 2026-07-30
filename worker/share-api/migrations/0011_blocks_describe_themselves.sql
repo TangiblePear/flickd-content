@@ -1,0 +1,21 @@
+-- Make a block record able to describe itself.
+--
+-- `blocks` held only (blocker_id, blocked_id, created_at), so `GET /api/blocks` could say
+-- THAT you had blocked an opaque `users.id` but not WHO. The client papered over it by
+-- rendering from its local `social_friends` row — which meant a device wipe left the block
+-- enforced but invisible and impossible to undo from the UI, since:
+--
+--   * the local row is gone with the device, and
+--   * the name cannot be fetched: `GET /api/profile/{userId}` is gated by `canView`, which
+--     fails on a blocked pair and returns 404 by design. So the one thing that could name
+--     the person is the one thing a block guarantees you cannot read.
+--
+-- Snapshotting at block time is therefore not denormalisation for speed — it is the only
+-- way the record can render itself later. It is also a name the blocker already had, stored
+-- in the blocker's own row, so it grants no new visibility.
+--
+-- Deliberately a SNAPSHOT, not a live join: if the blocked person renames themselves, the
+-- blocker should still see who they blocked. A live lookup would also re-introduce the
+-- `canView` problem above.
+ALTER TABLE blocks ADD COLUMN display_name TEXT;
+ALTER TABLE blocks ADD COLUMN avatar_id TEXT;

@@ -104,6 +104,10 @@ class FakeStmt {
       const u = this.db.users.find((x) => x.id === a[0]);
       return u ? ({ friend_id: u.friend_id ?? null } as T) : null;
     }
+    if (s.startsWith("SELECT display_name, avatar_id FROM profiles WHERE user_id = ?")) {
+      const p = this.db.profiles.find((x) => x.user_id === a[0]);
+      return p ? ({ display_name: p.display_name ?? null, avatar_id: p.avatar_id ?? null } as T) : null;
+    }
     if (s.includes("FROM profiles WHERE user_id = ?")) return null;
     throw new Error(`FakeD1: unhandled first() ${s}`);
   }
@@ -114,7 +118,7 @@ class FakeStmt {
     if (s.startsWith("SELECT user_a, user_b, state, requested_by, updated_at FROM friendships")) {
       return { results: this.db.friendships.filter((f) => f.user_a === a[0] || f.user_b === a[1]) as T[] };
     }
-    if (s.startsWith("SELECT blocked_id, created_at FROM blocks")) {
+    if (s.startsWith("SELECT blocked_id, created_at, display_name, avatar_id FROM blocks")) {
       return { results: this.db.blocks.filter((b) => b.blocker_id === a[0]) as T[] };
     }
     if (s.startsWith("SELECT id, friend_id FROM users WHERE friend_id IN")) {
@@ -162,9 +166,21 @@ class FakeStmt {
       this.db.friendships = this.db.friendships.filter((f) => f.user_a !== a[0] && f.user_b !== a[1]);
       return { success: true, meta: { changes: 1 } };
     }
-    if (s.startsWith("INSERT OR IGNORE INTO blocks")) {
-      if (!this.db.blocks.some((b) => b.blocker_id === a[0] && b.blocked_id === a[1])) {
-        this.db.blocks.push({ blocker_id: a[0], blocked_id: a[1], created_at: a[2] });
+    if (s.startsWith("INSERT INTO blocks") || s.startsWith("INSERT OR IGNORE INTO blocks")) {
+      // Upsert: re-blocking refreshes the name/avatar snapshot rather than keeping the
+      // first one, which is what the real ON CONFLICT clause does.
+      const existing = this.db.blocks.find((b) => b.blocker_id === a[0] && b.blocked_id === a[1]);
+      if (existing) {
+        existing.display_name = a[3] ?? null;
+        existing.avatar_id = a[4] ?? null;
+      } else {
+        this.db.blocks.push({
+          blocker_id: a[0],
+          blocked_id: a[1],
+          created_at: a[2],
+          display_name: a[3] ?? null,
+          avatar_id: a[4] ?? null,
+        });
       }
       return { success: true, meta: { changes: 1 } };
     }
@@ -580,6 +596,46 @@ describe("blocking", () => {
     await handleBlock(A, post("tok-c", `/api/blocks/${A}`), env); // C blocked A
     const mine = (await (await handleGetBlocks(get("tok-a", "/api/blocks"), env)).json()) as any;
     expect(mine.blocked.map((b: any) => b.userId)).toEqual([B]);
+  });
+
+  /**
+   * **The block record must be able to name its own target.**
+   *
+   * The list used to return bare `users.id`s and the client rendered the name from its
+   * local friend row. That made a block invisible — and so impossible to lift — on any
+   * device that had been wiped, because the name cannot be recovered: `GET /api/profile/
+   * {userId}` is gated by `canView`, which fails on a blocked pair by design. The one
+   * thing that could identify them is the one thing a block guarantees you cannot read.
+   */
+  it("snapshots the blocked person's name so the list can render after a wipe", async () => {
+    const env = await env0();
+    env.DB.profiles.push({ user_id: B, display_name: "Bea", avatar_id: "av_b" });
+
+    await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env);
+
+    const mine = (await (await handleGetBlocks(get("tok-a", "/api/blocks"), env)).json()) as any;
+    expect(mine.blocked[0]).toMatchObject({ userId: B, displayName: "Bea", avatarId: "av_b" });
+  });
+
+  /** A block must never fail because a name lookup did. */
+  it("blocks successfully when the target has no profile to snapshot", async () => {
+    const env = await env0();
+    expect((await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env)).status).toBe(204);
+    const mine = (await (await handleGetBlocks(get("tok-a", "/api/blocks"), env)).json()) as any;
+    expect(mine.blocked[0]).toMatchObject({ userId: B, displayName: "" });
+  });
+
+  /** Re-blocking refreshes the snapshot rather than keeping a stale name. */
+  it("refreshes the snapshot when the same person is blocked again", async () => {
+    const env = await env0();
+    env.DB.profiles.push({ user_id: B, display_name: "Old", avatar_id: "av1" });
+    await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env);
+    env.DB.profiles[0].display_name = "New";
+    await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env);
+
+    const mine = (await (await handleGetBlocks(get("tok-a", "/api/blocks"), env)).json()) as any;
+    expect(mine.blocked).toHaveLength(1);
+    expect(mine.blocked[0].displayName).toBe("New");
   });
 
   it("refuses to block yourself", async () => {
