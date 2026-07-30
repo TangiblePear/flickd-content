@@ -91,12 +91,10 @@ import {
   handleDeleteAccount,
   handleFriendAccept,
   handleFriendRemove,
-  handleFriendRemoveByFriendId,
   handleFriendRequest,
   handleGetBlocks,
   handleGetFriendCards,
   handleGetFriends,
-  handleLinkLegacyFriends,
   handleReport as handleUserReport,
   handleUnblock,
 } from "./friends";
@@ -363,20 +361,12 @@ export default {
     if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
     if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx, wake);
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);
-    if (p === "/api/friends/link-legacy" && req.method === "POST") return handleLinkLegacyFriends(req, env, ctx);
     if (p === "/api/friends/cards" && req.method === "POST") {
       return handleGetFriendCards(req, env, (code, friendId) => loadPublicCard(env, code, friendId), ctx);
     }
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (friendTarget && req.method === "DELETE") return handleFriendRemove(friendTarget[1], req, env, ctx, wake);
-    // Its own path rather than an overload of the one above: a 26-character friendId
-    // is a legal `users.id` too, so one route could not tell the two id spaces apart.
-    const friendByDevice = p.match(/^\/api\/friends\/by-friend\/([A-Z0-9]{12,40})$/);
-    if (friendByDevice && req.method === "DELETE") {
-      return handleFriendRemoveByFriendId(friendByDevice[1], req, env, ctx, wake);
-    }
-
     if (p === "/api/blocks" && req.method === "GET") return handleGetBlocks(req, env, ctx);
     const blockTarget = p.match(/^\/api\/blocks\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (blockTarget) {

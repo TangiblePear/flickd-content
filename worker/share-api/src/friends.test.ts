@@ -1,3 +1,10 @@
+// NB: "removing by device friendId" and "bridging legacy device pairings" lived here
+// until 8c retired `DELETE /api/friends/by-friend/{id}` and `POST /api/friends/link-legacy`.
+// Both endpoints existed for one reason — the client knew friends by device friendId and
+// had no reliable way to reach their account id. Since 8b that id IS the friend row's
+// primary key, so removal addresses `DELETE /api/friends/{userId}` directly and there is
+// nothing left to bridge.
+
 import { describe, it, expect } from "vitest";
 import {
   handleBlock,
@@ -381,50 +388,6 @@ describe("friend requests", () => {
   });
 });
 
-describe("removing by device friendId", () => {
-  const del = (token: string, friendId: string) =>
-    new Request(`https://flickto.app/api/friends/by-friend/${friendId}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${token}` },
-    });
-
-  /**
-   * The 2026-07-28 device bug: the client could not name B's account id, gave up
-   * silently, and the friendship outlived the unfriend on the server.
-   */
-  it("deletes the friendship without the caller knowing the account id", async () => {
-    const env = await env0();
-    env.DB.users.find((u: any) => u.id === B).friend_id = "FRIENDIDBBBB";
-    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
-    await handleFriendAccept(post("tok-b", "/api/friends/accept", { userId: A }), env);
-
-    expect((await handleFriendRemoveByFriendId("FRIENDIDBBBB", del("tok-a", "FRIENDIDBBBB"), env)).status).toBe(204);
-
-    const after = (await (await handleGetFriends(get("tok-a", "/api/friends"), env)).json()) as any;
-    expect(after.accepted).toEqual([]);
-    const theirs = (await (await handleGetFriends(get("tok-b", "/api/friends"), env)).json()) as any;
-    // Both sides must lose it, or a re-add resolves straight to accepted.
-    expect(theirs.accepted).toEqual([]);
-  });
-
-  it("answers 204 for an unknown friendId, revealing nothing", async () => {
-    const env = await env0();
-    expect((await handleFriendRemoveByFriendId("FRIENDIDZZZZ", del("tok-a", "FRIENDIDZZZZ"), env)).status).toBe(204);
-  });
-
-  it("still requires a session", async () => {
-    const env = await env0();
-    expect((await handleFriendRemoveByFriendId("FRIENDIDBBBB", del("nope", "FRIENDIDBBBB"), env)).status).toBe(401);
-  });
-
-  /** A removal must never resolve to the caller's own row. */
-  it("ignores my own friendId", async () => {
-    const env = await env0();
-    env.DB.users.find((u: any) => u.id === A).friend_id = "FRIENDIDAAAA";
-    expect((await handleFriendRemoveByFriendId("FRIENDIDAAAA", del("tok-a", "FRIENDIDAAAA"), env)).status).toBe(204);
-  });
-});
-
 describe("friend cards", () => {
   // Cards live in R2; the handler takes a loader so this module stays D1-only.
   const card = (friendId: string, name: string, n: string) => ({
@@ -754,44 +717,6 @@ describe("picture auto-hide", () => {
     env.REPORT_AUTOHIDE = "1";
     expect((await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env)).status).toBe(204);
     expect(env.DB.reports.length).toBe(1);
-  });
-});
-
-describe("bridging legacy device pairings", () => {
-  it("claims a friendId, and refuses one already owned by someone else", async () => {
-    const env = await env0();
-    expect((await handleClaimFriendId(post("tok-a", "/api/me/friend-id", { friendId: "4S5SJK151CNQ6XHC0J" }), env)).status).toBe(200);
-    expect((await handleClaimFriendId(post("tok-b", "/api/me/friend-id", { friendId: "4S5SJK151CNQ6XHC0J" }), env)).status).toBe(409);
-    // Re-claiming your own is idempotent, not a conflict.
-    expect((await handleClaimFriendId(post("tok-a", "/api/me/friend-id", { friendId: "4S5SJK151CNQ6XHC0J" }), env)).status).toBe(200);
-  });
-
-  it("links known friendIds as ACCEPTED and skips ids with no account", async () => {
-    const env = await env0();
-    await handleClaimFriendId(post("tok-b", "/api/me/friend-id", { friendId: "BBBBBB151CNQ6XHC0J" }), env);
-    const res = (await (
-      await handleLinkLegacyFriends(post("tok-a", "/api/friends/link-legacy", {
-        friendIds: ["BBBBBB151CNQ6XHC0J", "NOACCOUNT151CNQ6XH"],
-      }), env)
-    ).json()) as any;
-
-    expect(res.linked).toBe(1);
-    expect(res.pendingSignup).toBe(1);
-    // The client cannot address a friend server-side without this pairing.
-    expect(res.mapping).toEqual([{ friendId: "BBBBBB151CNQ6XHC0J", userId: B }]);
-    // Already mutually agreed on the old system — re-confirming would be a regression.
-    const after = (await (await handleGetFriends(get("tok-a", "/api/friends"), env)).json()) as any;
-    expect(after.accepted).toEqual([B]);
-  });
-
-  it("never links a blocked pair", async () => {
-    const env = await env0();
-    await handleClaimFriendId(post("tok-b", "/api/me/friend-id", { friendId: "BBBBBB151CNQ6XHC0J" }), env);
-    await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env);
-    const res = (await (
-      await handleLinkLegacyFriends(post("tok-a", "/api/friends/link-legacy", { friendIds: ["BBBBBB151CNQ6XHC0J"] }), env)
-    ).json()) as any;
-    expect(res.linked).toBe(0);
   });
 });
 

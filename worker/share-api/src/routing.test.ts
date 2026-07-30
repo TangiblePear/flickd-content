@@ -83,9 +83,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", "/api/friends/request", { userId: USER_ID }],
   ["POST", "/api/friends/accept", { userId: USER_ID }],
   ["POST", "/api/friends/cards", { userIds: [USER_ID] }],
-  ["POST", "/api/friends/link-legacy", { friendIds: [FRIEND_ID] }],
   ["DELETE", `/api/friends/${USER_ID}`],
-  ["DELETE", `/api/friends/by-friend/${FRIEND_ID}`],
   ["GET", "/api/blocks"],
   ["POST", `/api/blocks/${USER_ID}`],
   ["DELETE", `/api/blocks/${USER_ID}`],
@@ -163,7 +161,6 @@ describe("route wiring", () => {
     const authed: Array<[string, string]> = [
       ["GET", "/api/friends"],
       ["DELETE", `/api/friends/${USER_ID}`],
-      ["DELETE", `/api/friends/by-friend/${FRIEND_ID}`],
       ["POST", "/api/friends/cards"],
       ["GET", "/api/lists/shared"],
       ["GET", "/api/match"],

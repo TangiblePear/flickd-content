@@ -255,48 +255,6 @@ export async function handleFriendRemove(
   return noContent();
 }
 
-/**
- * DELETE /api/friends/by-friend/{friendId} — the same removal, addressed by the
- * **device friendId** the client actually holds.
- *
- * `DELETE /api/friends/{userId}` needs the caller to already know the other side's
- * account id, which it learns from a cache populated by `link-legacy` and card
- * lookups. On device 2026-07-28 that cache was cold at the moment of the unfriend,
- * the client gave up silently, and the friendship survived on the server — which
- * then resurrected it locally and made a later re-add resolve straight to
- * `accepted`. Removal must not depend on a warm cache.
- *
- * Safe to expose: this only ever deletes an edge **the caller is part of**, and it
- * answers `204` whether or not anything matched, so it reveals nothing about
- * whether a given friendId has an account.
- */
-export async function handleFriendRemoveByFriendId(
-  friendId: string,
-  req: Request,
-  env: FriendsEnv,
-  ctx?: ExecutionContext,
-  notify?: (userId: string) => void,
-): Promise<Response> {
-  const session = await requireSession(req, env, ctx);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  if (!FRIEND_ID_RE.test(friendId)) return noContent();
-
-  const other = await env.DB.prepare("SELECT id FROM users WHERE friend_id = ?")
-    .bind(friendId)
-    .first<{ id: string }>();
-  if (!other || other.id === session.userId) return noContent();
-
-  const [a, b] = friendshipKey(session.userId, other.id);
-  const res = await env.DB.prepare("DELETE FROM friendships WHERE user_a = ? AND user_b = ?").bind(a, b).run();
-  // Tell the other side, or they keep showing a friend who has removed them until
-  // some unrelated sync happens -- up to 24h, since the client only converges the
-  // graph inside SocialSyncWorker and nothing else was waking it. Measured on device
-  // 2026-07-28: the removal was correct server-side and simply never arrived.
-  // Only on an actual delete, so a repeated DELETE cannot be used to spam someone.
-  if (res.meta?.changes) notify?.(other.id);
-  return noContent();
-}
-
 // ── Blocking ─────────────────────────────────────────────────────────────────
 
 /**
@@ -476,7 +434,7 @@ async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Prom
  * PUT /api/me/friend-id `{ friendId }` — claim this account's device friendId.
  *
  * Existing friendships live only on devices, keyed by that id. Claiming it is what
- * lets [handleLinkLegacyFriends] turn old pairings into real rows. Idempotent, and
+ * turned old pairings into real rows before that endpoint was retired. Idempotent, and
  * refuses to steal an id already claimed by a different account.
  */
 export async function handleClaimFriendId(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
@@ -494,67 +452,6 @@ export async function handleClaimFriendId(req: Request, env: FriendsEnv, ctx?: E
     await env.DB.prepare("UPDATE users SET friend_id = ? WHERE id = ?").bind(friendId, session.userId).run();
   }
   return json({ friendId });
-}
-
-/**
- * POST /api/friends/link-legacy `{ friendIds: [...] }` — migration step.
- *
- * The client posts the device friendIds it is already paired with; any that belong
- * to an account become **accepted** friendships (the pairing was already mutually
- * agreed on the old system, so re-confirming would be a regression for the user).
- * Ids with no account yet are simply skipped and stay device-local until that
- * person signs in. Blocked pairs are never linked.
- */
-export async function handleLinkLegacyFriends(
-  req: Request,
-  env: FriendsEnv,
-  ctx?: ExecutionContext,
-): Promise<Response> {
-  const session = await requireSession(req, env, ctx);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  const payload = await body(req);
-  const raw = Array.isArray(payload?.friendIds) ? payload!.friendIds : null;
-  if (!raw) return json({ error: "invalid_payload" }, 400);
-
-  const ids = raw
-    .filter((v): v is string => typeof v === "string" && FRIEND_ID_RE.test(v))
-    .slice(0, MAX_LEGACY_FRIEND_IDS);
-  if (ids.length === 0) return json({ linked: 0, pendingSignup: 0, mapping: [] });
-
-  const placeholders = ids.map(() => "?").join(",");
-  const { results } = await env.DB.prepare(
-    `SELECT id, friend_id FROM users WHERE friend_id IN (${placeholders}) AND status = 'active'`,
-  )
-    .bind(...ids)
-    .all<{ id: string; friend_id: string }>();
-
-  const now = Date.now();
-  const statements = [];
-  // The caller needs this: it knows its friends by device friendId, but every
-  // server-side operation (blocks, profile reads) keys on users.id. Without
-  // returning the pairs, the client can never address a friend server-side, and
-  // there is deliberately no friendId -> userId lookup endpoint — that would let
-  // anyone probe whether a given friendId has an account.
-  const mapping: { friendId: string; userId: string }[] = [];
-  let linked = 0;
-  for (const row of results ?? []) {
-    if (row.id === session.userId) continue;
-    if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
-    mapping.push({ friendId: row.friend_id, userId: row.id });
-    const [a, b] = friendshipKey(session.userId, row.id);
-    statements.push(
-      env.DB
-        .prepare(
-          `INSERT INTO friendships (user_a, user_b, state, requested_by, created_at, updated_at)
-           VALUES (?, ?, 'accepted', ?, ?, ?)
-           ON CONFLICT(user_a, user_b) DO UPDATE SET state = 'accepted', updated_at = excluded.updated_at`,
-        )
-        .bind(a, b, session.userId, now, now),
-    );
-    linked++;
-  }
-  if (statements.length > 0) await env.DB.batch(statements);
-  return json({ linked, pendingSignup: ids.length - linked, mapping });
 }
 
 // ── Friend cards (pairing off the E2EE inbox) ────────────────────────────────
