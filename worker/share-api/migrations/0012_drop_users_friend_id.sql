@@ -16,10 +16,16 @@
 --
 -- ⚠️ EIGHT TABLES CARRY `REFERENCES users(id)`: identities, sessions, profiles,
 -- profile_stats, feed_events, comments, comment_reactions, episode_votes. None uses
--- ON DELETE CASCADE — checked before writing this — so there is no cascade-delete
--- risk. `defer_foreign_keys` holds enforcement until the transaction commits, by
--- which point `users_new` has been renamed into place and every reference resolves
--- again.
+-- ON DELETE CASCADE — checked, so there is no cascade-delete risk.
+--
+-- ⚠️ `defer_foreign_keys` IS NOT ENOUGH, and the second attempt failed on that. It
+-- postpones ROW-level checks to commit; dropping a parent table that eight tables
+-- reference is a SCHEMA violation deferral does not cover, so the commit reported
+-- "the application left the database in a state where constraints were violated".
+-- Reproduced in a local SQLite loaded with this exact schema, where all three were
+-- tried: `defer_foreign_keys` FAILS, `foreign_keys=OFF` re-asserted per statement
+-- FAILS, and `foreign_keys=OFF` held across the whole file SUCCEEDS with the column
+-- gone, zero `foreign_key_check` violations and the UNIQUE index intact.
 --
 -- ⚠️ WHAT DROPPING THE COLUMN COSTS, recorded because it is a real trade.
 --
@@ -35,7 +41,7 @@
 --
 -- NB the behavioural half of 8c-3 is already live without this: no deployed code
 -- reads `friend_id`. This migration only reclaims the column.
-PRAGMA defer_foreign_keys = true;
+PRAGMA foreign_keys = OFF;
 
 CREATE TABLE users_new (
   id         TEXT PRIMARY KEY,
