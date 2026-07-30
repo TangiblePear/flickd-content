@@ -43,8 +43,6 @@ const TOPIC_RE = /^[a-zA-Z0-9-_.~%]{1,900}$/;
 export interface AccountPush {
   selfTopic: string | null;
   friendTopic: string | null;
-  /** Still needed to fall back to `{friendId}/push.json`. Goes at step 8. */
-  friendId: string | null;
 }
 
 /**
@@ -85,7 +83,7 @@ export async function handlePutMyPush(req: Request, env: PushEnv, ctx?: Executio
 }
 
 /**
- * The account's push topics, plus its `friend_id` for the relay fallback.
+ * The account's push topics.
  *
  * ⚠️ **Null topics are NOT "unreachable".** Every install that predates this endpoint
  * has published to `{friendId}/push.json` and nothing else, so a caller that treats
@@ -98,14 +96,13 @@ export async function handlePutMyPush(req: Request, env: PushEnv, ctx?: Executio
 export async function readAccountPush(db: D1Database, userId: string): Promise<AccountPush | null> {
   try {
     const row = await db
-      .prepare("SELECT push_self_topic, push_friend_topic, friend_id FROM users WHERE id = ?")
+      .prepare("SELECT push_self_topic, push_friend_topic FROM users WHERE id = ?")
       .bind(userId)
-      .first<{ push_self_topic: string | null; push_friend_topic: string | null; friend_id: string | null }>();
+      .first<{ push_self_topic: string | null; push_friend_topic: string | null }>();
     if (!row) return null;
     return {
       selfTopic: row.push_self_topic ?? null,
       friendTopic: row.push_friend_topic ?? null,
-      friendId: row.friend_id ?? null,
     };
   } catch {
     return null;

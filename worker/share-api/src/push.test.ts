@@ -131,21 +131,21 @@ describe("PUT /api/me/push", () => {
 });
 
 describe("readAccountPush", () => {
-  it("returns the stored topics and the friendId for the fallback", async () => {
+  it("returns the stored topics", async () => {
     const env = await env0();
     await put(env, { selfTopic: "s_abc123", friendTopic: "f_abc123" });
     const rec = await readAccountPush(env.DB, OWNER);
-    expect(rec).toEqual({ selfTopic: "s_abc123", friendTopic: "f_abc123", friendId: "FRIENDIDAAAA" });
+    expect(rec).toEqual({ selfTopic: "s_abc123", friendTopic: "f_abc123" });
   });
 
-  // ⚠️ The migration's whole risk. An account that has never called /api/me/push must
-  // report null TOPICS but still hand back its friendId, so the caller can fall back to
-  // the relay record. Collapsing this to "no push" would make every existing install
-  // silently unreachable.
-  it("reports null topics but still yields the friendId when nothing was published", async () => {
+  // The friendId this used to return went with `users.friend_id` (8c-3), and the
+  // relay fallback it fed went in 9a. An account that never published now reports null
+  // topics and is simply unreachable by directed push until its client publishes — the
+  // row still EXISTS, which is what distinguishes "nothing published" from "no account".
+  it("reports null topics when nothing was published, without inventing a row", async () => {
     const env = await env0();
     const rec = await readAccountPush(env.DB, OWNER);
-    expect(rec).toEqual({ selfTopic: null, friendTopic: null, friendId: "FRIENDIDAAAA" });
+    expect(rec).toEqual({ selfTopic: null, friendTopic: null });
   });
 
   it("returns null for an unknown account", async () => {

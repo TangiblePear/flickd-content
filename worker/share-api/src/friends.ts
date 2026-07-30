@@ -400,8 +400,8 @@ export async function handleReport(req: Request, env: FriendsEnv, ctx?: Executio
  *
  * Best-effort by design: a Worker with no bucket means no takedown — but the report
  * itself is already recorded, and failing the request would lose the report to keep a
- * picture up. A target with no claimed `friend_id` is no longer an obstacle: the
- * account-keyed tombstone does not need one, so those accounts are now coverable too.
+ * picture up. The account-keyed tombstone needs no device id, so every account is
+ * coverable.
  */
 async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Promise<void> {
   const bucket = env.BUCKET;
@@ -422,37 +422,13 @@ async function maybeAutoHidePicture(env: FriendsEnv, targetUserId: string): Prom
   const opts = { httpMetadata: { contentType: "application/json" } };
   await bucket.put(`_moderation/u/${targetUserId}.json`, body, opts);
 
-  const owner = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
-    .bind(targetUserId)
-    .first<{ friend_id: string | null }>();
-  if (owner?.friend_id) await bucket.put(`_moderation/${owner.friend_id}.json`, body, opts);
+  // The legacy `_moderation/{friend_id}.json` twin is gone with `users.friend_id`
+  // (8c-3). It made the relay picture route return 410 for a taken-down photo; that
+  // route is read-only and on its way out, and the account-keyed tombstone above is
+  // what the account route checks.
 }
 
 // ── Bridging the existing device-identity pairings ───────────────────────────
-
-/**
- * PUT /api/me/friend-id `{ friendId }` — claim this account's device friendId.
- *
- * Existing friendships live only on devices, keyed by that id. Claiming it is what
- * turned old pairings into real rows before that endpoint was retired. Idempotent, and
- * refuses to steal an id already claimed by a different account.
- */
-export async function handleClaimFriendId(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
-  const session = await requireSession(req, env, ctx);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  const payload = await body(req);
-  const friendId = typeof payload?.friendId === "string" ? payload.friendId : "";
-  if (!FRIEND_ID_RE.test(friendId)) return json({ error: "invalid_payload" }, 400);
-
-  const owner = await env.DB.prepare("SELECT id FROM users WHERE friend_id = ?")
-    .bind(friendId)
-    .first<{ id: string }>();
-  if (owner && owner.id !== session.userId) return json({ error: "conflict" }, 409);
-  if (!owner) {
-    await env.DB.prepare("UPDATE users SET friend_id = ? WHERE id = ?").bind(friendId, session.userId).run();
-  }
-  return json({ friendId });
-}
 
 // ── Friend cards (pairing off the E2EE inbox) ────────────────────────────────
 
@@ -468,7 +444,7 @@ export async function handleClaimFriendId(req: Request, env: FriendsEnv, ctx?: E
  * pointer, used only for an account that has not republished its card since the code
  * moved into D1. The second argument goes at step 8.
  */
-export type CardLoader = (friendCode: string | null, friendId: string) => Promise<PublicCard | null>;
+export type CardLoader = (friendCode: string | null) => Promise<PublicCard | null>;
 
 /**
  * Exactly the fields a local friend row needs, and nothing else.
@@ -560,20 +536,27 @@ export async function handleGetFriendCards(
   // 2026-07-30: 1 of 5 active accounts was in exactly that state. The column is on its
   // way out (8c-3) and was never what authorised the card — the friendship edge is.
   const { results } = await env.DB.prepare(
-    `SELECT id, friend_id, friend_code, push_friend_topic FROM users
+    `SELECT id, friend_code, push_friend_topic FROM users
       WHERE id IN (${placeholders}) AND status = 'active'`,
   )
     .bind(...allowed)
-    .all<{ id: string; friend_id: string; friend_code: string | null; push_friend_topic: string | null }>();
+    .all<{ id: string; friend_code: string | null; push_friend_topic: string | null }>();
 
   const cards: FriendCardWithTopic[] = [];
   for (const row of results ?? []) {
     if (await isBlockedEitherWay(env, session.userId, row.id)) continue;
     // The code rides the query above, so the common path costs no extra read.
-    const card = await loadCard(row.friend_code ?? null, row.friend_id);
-    // A card whose friendId disagrees with the claimed one is not this user's, and
-    // `users.friend_id` is the claim-checked side — trust it over the R2 blob.
-    if (!card || card.friendId !== row.friend_id) continue;
+    const card = await loadCard(row.friend_code ?? null);
+    // ⚠⚠ THE CLAIM-CHECK THAT STOOD HERE IS GONE WITH `users.friend_id` (8c-3), AND
+    // THIS IS THE ONE THING THAT DECISION COST. It compared the card's self-declared
+    // friendId against the claim-checked column, so a client could not publish a card
+    // asserting somebody else's friendId. Nothing verifies that now.
+    //
+    // The blast radius is bounded but real: `social_friends.friendId` carries a UNIQUE
+    // index since 8b, so a spoofed duplicate fails the row insert on the victim's
+    // device. It needs a hostile client, and it closes for good when the client stops
+    // trusting the card's friendId at all — the friendId->userId migration.
+    if (!card) continue;
     cards.push({ userId: row.id, ...card, friendTopic: row.push_friend_topic ?? "" });
   }
   return json({ cards });

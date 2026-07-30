@@ -128,14 +128,13 @@ class FakeStmt {
     if (s.startsWith("SELECT blocked_id, created_at, display_name, avatar_id FROM blocks")) {
       return { results: this.db.blocks.filter((b) => b.blocker_id === a[0]) as T[] };
     }
-    if (s.startsWith("SELECT id, friend_id FROM users WHERE friend_id IN")) {
-      return { results: this.db.users.filter((u) => a.includes(u.friend_id) && u.status === "active") as T[] };
-    }
-    if (s.startsWith("SELECT id, friend_id, friend_code, push_friend_topic FROM users WHERE id IN")) {
+    // NB the old fake ALSO applied `u.friend_id != null` here, which meant the
+    // "omits a friend who never claimed a friendId" case was being produced by the
+    // FAKE rather than by the handler. The real filter went in 9a and the column in
+    // 8c-3; a card is now located by `friend_code` alone.
+    if (s.startsWith("SELECT id, friend_code, push_friend_topic FROM users WHERE id IN")) {
       return {
-        results: this.db.users.filter(
-          (u) => a.includes(u.id) && u.status === "active" && u.friend_id != null,
-        ) as T[],
+        results: this.db.users.filter((u) => a.includes(u.id) && u.status === "active") as T[],
       };
     }
     throw new Error(`FakeD1: unhandled all() ${s}`);
@@ -399,23 +398,24 @@ describe("friend cards", () => {
     publicKeyset: `ks-${n}`,
     feedReadToken: `rt-${n}`,
   });
+  // Keyed by FRIEND CODE since 8c-3: `users.friend_id` is gone, so a card is located
+  // by `users.friend_code` and nothing else. The card still CARRIES a friendId — the
+  // client keys its local row on it — but that value is now self-declared and
+  // unverified, which is the trade migration 0012 documents.
   const cards: Record<string, any> = {
-    "FRIENDIDAAAA": card("FRIENDIDAAAA", "Ada", "a"),
-    "FRIENDIDBBBB": card("FRIENDIDBBBB", "Bo", "b"),
-    "FRIENDIDCCCC": card("FRIENDIDCCCC", "Cy", "c"),
+    CODEAAA: card("FRIENDIDAAAA", "Ada", "a"),
+    CODEBBB: card("FRIENDIDBBBB", "Bo", "b"),
+    CODECCC: card("FRIENDIDCCCC", "Cy", "c"),
   };
-  // Mirrors the real loader: the account's friend_code when it has one, else the
-  // legacy friendId pointer. Both resolve to the same card here, so a test that does
-  // not care which path ran reads the same either way.
-  const loader = async (friendCode: string | null, friendId: string) =>
-    cards[friendCode ?? friendId] ?? cards[friendId] ?? null;
+  const loader = async (friendCode: string | null) => (friendCode ? (cards[friendCode] ?? null) : null);
 
-  /** Everyone has claimed a friendId and published a card. */
+  /** Everyone has published a card under a friend code. */
   const seeded = async () => {
     const env = await env0();
-    env.DB.users.find((u: any) => u.id === A).friend_id = "FRIENDIDAAAA";
-    env.DB.users.find((u: any) => u.id === B).friend_id = "FRIENDIDBBBB";
-    env.DB.users.find((u: any) => u.id === C).friend_id = "FRIENDIDCCCC";
+    env.DB.users.find((u: any) => u.id === A).friend_code = "CODEAAA";
+    env.DB.users.find((u: any) => u.id === B).friend_code = "CODEBBB";
+    const c = env.DB.users.find((u: any) => u.id === C);
+    if (c) c.friend_code = "CODECCC";
     return env;
   };
 
@@ -427,7 +427,7 @@ describe("friend cards", () => {
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
     // feedReadToken must ride along: without it the new friend's feed is unreadable.
-    expect(res.cards).toEqual([{ userId: A, ...cards["FRIENDIDAAAA"], friendTopic: "" }]);
+    expect(res.cards).toEqual([{ userId: A, ...cards.CODEAAA, friendTopic: "" }]);
   });
 
   /**
@@ -471,24 +471,33 @@ describe("friend cards", () => {
     expect(res.cards).toEqual([]);
   });
 
-  it("omits a friend who has never claimed a friendId or published a card", async () => {
+  it("omits a friend who has never published a card", async () => {
     const env = await seeded();
-    env.DB.users.find((u: any) => u.id === A).friend_id = null;
+    // No friend_code => nothing to locate a card with. This used to be expressed as
+    // "never claimed a friendId"; since 8c-3 the code is the only locator.
+    env.DB.users.find((u: any) => u.id === A).friend_code = null;
     await handleFriendRequest(post("tok-b", "/api/friends/request", { userId: A }), env);
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
     expect(res.cards).toEqual([]);
   });
 
-  /** users.friend_id is claim-checked; the R2 blob is client-written. */
-  it("rejects a card whose friendId disagrees with the claimed one", async () => {
-    const env = await seeded();
-    await handleFriendRequest(post("tok-a", "/api/friends/request", { userId: B }), env);
-    const lying = async (_code: string | null, _friendId: string) => ({ ...cards["FRIENDIDCCCC"] });
-
-    const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, lying)).json()) as any;
-    expect(res.cards).toEqual([]);
-  });
+  /**
+   * ⚠️ "rejects a card whose friendId disagrees with the claimed one" WAS HERE, AND ITS
+   * REMOVAL IS THE ONE THING 8c-3 COST.
+   *
+   * It pinned the claim-check: the R2 card blob is client-written, and comparing its
+   * self-declared `friendId` against `users.friend_id` was the only thing stopping a
+   * client publishing a card that asserts somebody else's. That column is gone, so the
+   * check is gone, and this test cannot be rewritten — there is nothing left to check
+   * against.
+   *
+   * The trade, taken knowingly at 4 known accounts pre-launch: a spoofed friendId is
+   * bounded by `social_friends.friendId`'s UNIQUE index (8b), so it fails an insert on
+   * the victim's device rather than impersonating anyone. It closes properly when the
+   * client stops trusting the card's friendId at all — the friendId→userId migration.
+   * Restore a test here when that lands.
+   */
 
   it("requires a session and a well-formed body", async () => {
     const env = await seeded();
@@ -663,7 +672,6 @@ describe("picture auto-hide", () => {
     env.BUCKET = makeBucket();
     env.REPORT_AUTOHIDE = autohide;
     // The tombstone is keyed on the device friendId, so the target needs one claimed.
-    env.DB.users.find((u: any) => u.id === B).friend_id = "BBBBBB151CNQ6XHC0J";
     return env;
   };
 
@@ -676,17 +684,16 @@ describe("picture auto-hide", () => {
   });
 
   /**
-   * The picture is reachable by two routes — account-keyed and legacy friendId — and
-   * each checks only its own key. Writing one and not the other leaves the image up on
-   * the other route, which is this control silently not working. Drop the legacy half
-   * of this assertion when the legacy route goes, not before.
+   * One key now. The legacy `_moderation/{friendId}.json` twin went with
+   * `users.friend_id` (8c-3): it existed so the relay picture route would 410 for a
+   * taken-down photo, and there is no longer any way to resolve which legacy key an
+   * account would have used. The account-keyed tombstone covers the route that still
+   * accepts writes.
    */
-  it("writes BOTH tombstone keys while the legacy picture route still serves", async () => {
+  it("writes the account-keyed tombstone when the threshold trips", async () => {
     const env = await withBucket("1");
     await handleReport(post("tok-a", "/api/report", { userId: B, kind: "picture" }), env);
-    expect([...env.BUCKET.puts.keys()].sort()).toEqual(
-      [`_moderation/BBBBBB151CNQ6XHC0J.json`, `_moderation/u/${B}.json`].sort(),
-    );
+    expect([...env.BUCKET.puts.keys()]).toEqual([`_moderation/u/${B}.json`]);
   });
 
   it("does not let ONE reporter trip the threshold by reporting repeatedly", async () => {

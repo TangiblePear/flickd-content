@@ -9,7 +9,6 @@ import { describe, it, expect } from "vitest";
 import {
   PERMANENT_UNTIL,
   postingSuspendedUntil,
-  postingSuspendedUntilForFriend,
   suspendedBody,
   suspensionUntil,
 } from "./suspension";
@@ -92,15 +91,6 @@ describe("postingSuspendedUntil", () => {
   it("fails open when D1 throws", async () => {
     const d = db([{ id: A, friend_id: null, posting_suspended_until: PERMANENT_UNTIL }], true);
     expect(await postingSuspendedUntil(d, A)).toBe(0);
-  });
-});
-
-describe("postingSuspendedUntilForFriend", () => {
-  it("resolves through friend_id", async () => {
-    const until = Date.now() + DAY;
-    const d = db([{ id: A, friend_id: "FRIEND12345X", posting_suspended_until: until }]);
-    expect(await postingSuspendedUntilForFriend(d, "FRIEND12345X")).toBe(until);
-    expect(await postingSuspendedUntilForFriend(d, "NOSUCHFRIEND")).toBe(0);
   });
 });
 

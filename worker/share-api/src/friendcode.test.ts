@@ -22,7 +22,6 @@ const TOKEN = "session-token";
 const TOKEN_HASH = "d3a4f2f0e30a0c5f0a4d3d6a1e1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c";
 
 interface Row {
-  friend_id: string | null;
   friend_code: string | null;
 }
 
@@ -44,7 +43,7 @@ class FakeD1 {
       // is not what these tests are about.
       return { user_id: USER, expires_at: Date.now() + 60_000, revoked_at: null } as T;
     }
-    if (this.sql.startsWith("SELECT friend_id, friend_code FROM users")) return { ...this.user } as T;
+    if (this.sql.startsWith("SELECT friend_code FROM users")) return { ...this.user } as T;
     return null;
   }
   async run() {
@@ -103,7 +102,7 @@ const publish = (db: FakeD1, bucket: FakeBucket, body: unknown = card) =>
 
 describe("friend code on the account", () => {
   it("preserves a code already stored on the account", async () => {
-    const db = new FakeD1({ friend_id: FRIEND, friend_code: "OLDCODE" });
+    const db = new FakeD1({ friend_code: "OLDCODE" });
     const res = await publish(db, new FakeBucket());
 
     expect(res.status).toBe(200);
@@ -111,25 +110,29 @@ describe("friend code on the account", () => {
   });
 
   /**
-   * The migration case, and the one a backfill job would have had to get right. The
-   * account has no `friend_code` yet, so the value has to come off the legacy R2
-   * pointer rather than the mint — and be adopted into D1 so the next publish is a
-   * single lookup.
+   * Was "adopts the legacy R2 code instead of minting a new one". The
+   * `{friendId}/friendcode.json` pointer went with `users.friend_id` (8c-3), so an
+   * account with no `friend_code` mints a fresh one instead of inheriting.
+   *
+   * Measured before removing rather than assumed: the two production accounts that
+   * would have used that pointer had no such object — step 7's purge had already taken
+   * them — so the adoption path was resolving to nothing for everyone it existed for.
    */
-  it("adopts the legacy R2 code instead of minting a new one", async () => {
-    const db = new FakeD1({ friend_id: FRIEND, friend_code: null });
+  it("mints a fresh code when the account has none, ignoring any legacy pointer", async () => {
+    const db = new FakeD1({ friend_code: null });
     const bucket = new FakeBucket();
     bucket.store.set(`${FRIEND}/friendcode.json`, JSON.stringify({ c: "LEGACY1" }));
 
     const res = await publish(db, bucket);
 
-    expect(((await res.json()) as any).code).toBe("LEGACY1");
-    expect(db.user.friend_code).toBe("LEGACY1");
-    expect(bucket.store.has("fc/LEGACY1.json")).toBe(true);
+    const code = ((await res.json()) as any).code;
+    expect(code).not.toBe("LEGACY1");
+    expect(db.user.friend_code).toBe(code);
+    expect(bucket.store.has(`fc/${code}.json`)).toBe(true);
   });
 
   it("mints only when the account has no code anywhere", async () => {
-    const db = new FakeD1({ friend_id: FRIEND, friend_code: null });
+    const db = new FakeD1({ friend_code: null });
     const res = await publish(db, new FakeBucket());
 
     const code = ((await res.json()) as any).code;
@@ -144,7 +147,7 @@ describe("friend code on the account", () => {
    * possible because the endpoint is session-authed now.
    */
   it("stamps serverUserId from the session, ignoring the body", async () => {
-    const db = new FakeD1({ friend_id: FRIEND, friend_code: "OLDCODE" });
+    const db = new FakeD1({ friend_code: "OLDCODE" });
     const bucket = new FakeBucket();
 
     await publish(db, bucket, { ...card, serverUserId: "C3VXH73X7P55T48R4CFHDED9CW" });
@@ -159,7 +162,7 @@ describe("friend code on the account", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(card),
       }),
-      { DB: new FakeD1({ friend_id: FRIEND, friend_code: null }), BUCKET: new FakeBucket() } as any,
+      { DB: new FakeD1({ friend_code: null }), BUCKET: new FakeBucket() } as any,
       { waitUntil: () => {} } as any,
     );
     expect(res.status).toBe(401);

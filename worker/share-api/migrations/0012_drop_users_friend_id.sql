@@ -1,0 +1,37 @@
+-- Step 8c-3 of the friendId retirement: drop the device friendId from `users`.
+--
+-- The column bridged two id spaces while pairing, pictures, push and friend codes all
+-- addressed a device rather than an account. Every one of those has moved:
+--   * push topics are columns on this table (step 2)
+--   * pictures are keyed on `users.id` (step 3)
+--   * friend codes are `users.friend_code` (step 4)
+--   * pairing, blocks and the graph are D1 rows keyed on `users.id`
+--   * `social_friends` is keyed on `users.id` client-side (step 8b)
+--
+-- ⚠️ WHAT THIS COSTS, recorded because it is a real trade and not a cleanup.
+--
+-- `handleGetFriendCards` compared the friend card's self-declared `friendId` against
+-- this column before returning it. The card blob is CLIENT-WRITTEN, so that comparison
+-- was the only thing stopping a client publishing a card that asserts somebody else's
+-- friendId. Nothing verifies it now.
+--
+-- The blast radius is bounded: `social_friends.friendId` carries a UNIQUE index since
+-- 8b, so a spoofed duplicate fails an insert on the victim's device rather than
+-- impersonating anyone. It needs a hostile client, and it closes properly when the
+-- client stops trusting the card's friendId at all — the friendId→userId migration
+-- still ahead. Taken deliberately at 4 known accounts, pre-launch.
+--
+-- Everything else that read the column was already dead or already covered:
+--   * the `{friendId}/friendcode.json` legacy pointer resolved to nothing — measured
+--     2026-07-30, both accounts that would have used it had no such object, step 7's
+--     purge having taken them
+--   * `_moderation/{friend_id}.json` was the relay picture route's takedown marker;
+--     `_moderation/u/{userId}.json` covers the account route, which is the only one
+--     that still accepts writes
+--   * `postingSuspendedUntilForFriend` lost its caller when the relay picture PUT went
+--   * `needsFriendId` told clients to claim an id nothing reads
+--
+-- SQLite has supported DROP COLUMN since 3.35 and D1 is well past that, so this needs
+-- no table rebuild. The index on the column goes with it automatically.
+DROP INDEX IF EXISTS idx_users_friend_id;
+ALTER TABLE users DROP COLUMN friend_id;

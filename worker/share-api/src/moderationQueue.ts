@@ -67,8 +67,6 @@ export interface ReportItem {
     /** What it says now. Divergence is itself a signal. */
     currentBody: string;
     shareUrl: string;
-    /** Device friendId — what a picture tombstone is still keyed on. */
-    friendId: string;
   };
   reporterCount: number;
   reasons: string[];
@@ -108,7 +106,6 @@ interface QueueRow {
   author_suspended_until: number | null;
   target_name: string | null;
   target_picture: string | null;
-  friend_id: string | null;
   posting_suspended_until: number | null;
 }
 
@@ -168,7 +165,7 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
             cp.display_name AS author_name,
             cu.posting_suspended_until AS author_suspended_until,
             p.display_name AS target_name, p.picture_url AS target_picture,
-            u.friend_id, u.posting_suspended_until
+            u.posting_suspended_until
        FROM reports r
        LEFT JOIN comments c  ON c.id = r.target_id
        LEFT JOIN profiles cp ON cp.user_id = c.author_id
@@ -207,7 +204,6 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
         bodySnapshot: r.reported_body ?? "",
         currentBody: r.body ?? "",
         shareUrl: "",
-        friendId: r.friend_id ?? "",
       },
       reporterCount: r.reporters,
       reasons: (r.reasons ?? "").split(",").filter(Boolean),
@@ -224,16 +220,14 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
 }
 
 /**
- * A picture takedown is an R2 object, not a D1 column. Checks the account-keyed key
- * first and only then the legacy friendId one — a takedown recorded before pictures
- * moved onto `users.id` exists under the legacy key alone, and reading it as "not
- * hidden" would invite an admin to restore a picture that is already down.
+ * A picture takedown is an R2 object, not a D1 column. Only the account-keyed key is
+ * checked now: the legacy friendId twin went with `users.friend_id` (8c-3), and there
+ * is no longer any way to resolve which legacy key an account would have used.
  */
 async function pictureTombstoned(env: ModerationEnv, r: QueueRow): Promise<boolean> {
   if (r.kind !== "picture" || !env.BUCKET) return false;
   if ((await env.BUCKET.head(`_moderation/u/${r.target_id}.json`)) !== null) return true;
-  if (!r.friend_id) return false;
-  return (await env.BUCKET.head(`_moderation/${r.friend_id}.json`)) !== null;
+  return false;
 }
 
 interface ShareRecord {
@@ -305,7 +299,6 @@ async function loadR2(env: ModerationEnv): Promise<ReportItem[]> {
         bodySnapshot: "",
         currentBody: "",
         shareUrl: `https://flickto.app/share/${code}`,
-        friendId: "",
       },
       reporterCount: g.reporters.size,
       reasons: [...g.reasons],
@@ -424,9 +417,9 @@ async function actOnUser(
 ): Promise<Response> {
   if (!ALLOWED.user.has(action)) return json({ error: "unsupported_action" }, 400);
 
-  const owner = await env.DB.prepare("SELECT id, friend_id FROM users WHERE id = ?")
+  const owner = await env.DB.prepare("SELECT id FROM users WHERE id = ?")
     .bind(userId)
-    .first<{ id: string; friend_id: string | null }>();
+    .first<{ id: string }>();
   if (!owner) return json({ error: "not_found" }, 404);
 
   const dismissAll = () =>
@@ -441,7 +434,6 @@ async function actOnUser(
   // so a hide that wrote one would leave the other route still serving the image.
   // The legacy entry drops out when the legacy route does.
   const tombstones = [`_moderation/u/${userId}.json`];
-  if (owner.friend_id) tombstones.push(`_moderation/${owner.friend_id}.json`);
 
   switch (action) {
     // Writes the SAME objects the automatic threshold writes, so a manual takedown and

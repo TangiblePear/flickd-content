@@ -49,17 +49,6 @@ export async function postingSuspendedUntil(db: D1Database, userId: string): Pro
   return lookup(db, "SELECT posting_suspended_until AS until FROM users WHERE id = ?", userId);
 }
 
-/**
- * The same check keyed on the device `friendId`.
- *
- * Needed because `PUT /api/user/{friendId}/picture` is authenticated by a relay-issued
- * owner secret, not a session, so there is no `users.id` in hand. This extra hop
- * disappears when pictures move onto `users.id` (step 3 of the friendId retirement).
- */
-export async function postingSuspendedUntilForFriend(db: D1Database, friendId: string): Promise<number> {
-  return lookup(db, "SELECT posting_suspended_until AS until FROM users WHERE friend_id = ?", friendId);
-}
-
 async function lookup(db: D1Database, sql: string, key: string): Promise<number> {
   try {
     const row = await db.prepare(sql).bind(key).first<{ until: number | null }>();

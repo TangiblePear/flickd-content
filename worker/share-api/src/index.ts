@@ -87,7 +87,6 @@ import { handleGiphy } from "./giphy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
-  handleClaimFriendId,
   handleDeleteAccount,
   handleFriendAccept,
   handleFriendRemove,
@@ -108,7 +107,7 @@ import {
   handlePutMyStats,
   minSocialVersion,
 } from "./profiles";
-import { postingSuspendedUntil, postingSuspendedUntilForFriend, suspendedBody } from "./suspension";
+import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { handlePutMyPush, readAccountPush } from "./push";
 
 interface ShareItem {
@@ -356,13 +355,12 @@ export default {
     const wake = (userId: string) => ctx.waitUntil(notifyAccount(env, userId));
 
     // ── Friendships, blocks, reports (Phase 3/4). Session-authenticated. ──
-    if (p === "/api/me/friend-id" && req.method === "PUT") return handleClaimFriendId(req, env, ctx);
     if (p === "/api/me/account" && req.method === "DELETE") return handleDeleteAccount(req, env, ctx);
     if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
     if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx, wake);
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);
     if (p === "/api/friends/cards" && req.method === "POST") {
-      return handleGetFriendCards(req, env, (code, friendId) => loadPublicCard(env, code, friendId), ctx);
+      return handleGetFriendCards(req, env, (code) => loadPublicCard(env, code), ctx);
     }
 
     const friendTarget = p.match(/^\/api\/friends\/([0-9A-HJKMNP-TV-Z]{26})$/);
@@ -841,7 +839,6 @@ async function handlePutMyPicture(req: Request, env: Env, ctx: ExecutionContext)
   // A new image supersedes any earlier auto/admin takedown — both spellings of it,
   // since either hide path may have written either key.
   await env.BUCKET.delete(accountTombstoneKey(session.userId));
-  ctx.waitUntil(clearLegacyTombstone(env, session.userId));
 
   ctx.waitUntil(fanOutAccountProfileUpdate(env, session.userId));
 
@@ -883,23 +880,6 @@ async function handleDeleteMyPicture(req: Request, env: Env, ctx: ExecutionConte
 }
 
 /**
- * Clear the legacy friendId-keyed tombstone too, so a fresh upload is not
- * immediately re-hidden should the account ever be read back through the old route.
- * Best-effort and off the response path — the account-keyed clear above is the one
- * that has to happen.
- */
-async function clearLegacyTombstone(env: Env, userId: string): Promise<void> {
-  try {
-    const row = await env.DB.prepare("SELECT friend_id FROM users WHERE id = ?")
-      .bind(userId)
-      .first<{ friend_id: string | null }>();
-    if (row?.friend_id) await env.BUCKET.delete(tombstoneKey(row.friend_id));
-  } catch {
-    // Nothing to do: the account-keyed tombstone is already gone.
-  }
-}
-
-/**
  * One FCM message to the owner's
  * friend topic so friends refetch the profile and pick up the new picture URL.
  *
@@ -918,7 +898,7 @@ async function fanOutAccountProfileUpdate(env: Env, userId: string): Promise<voi
     if (!target) return;
     // The friendId while one exists: it is the tag the client correlates on, not an
     // addressing decision. Same rule as notifyAccount.
-    await sendFcmMessage(config, target, account.friendId ?? userId, "social_update");
+    await sendFcmMessage(config, target, userId, "social_update");
   } catch (e) {
     console.error("Failed to fan out account profile update", e);
   }
@@ -1188,28 +1168,24 @@ async function handlePublishFriendCode(req: Request, env: Env, ctx?: ExecutionCo
   card.serverUserId = session.userId;
   const body = JSON.stringify(card);
 
-  const owner = await env.DB.prepare("SELECT friend_id, friend_code FROM users WHERE id = ?")
+  const owner = await env.DB.prepare("SELECT friend_code FROM users WHERE id = ?")
     .bind(session.userId)
-    .first<{ friend_id: string | null; friend_code: string | null }>();
+    .first<{ friend_code: string | null }>();
 
-  // ⚠️ Order matters, and every branch PRESERVES an existing code. D1 first, then the
-  // legacy R2 pointer, and only then mint. Reversing those two — or skipping the
-  // fallback — hands an existing user a brand-new code and silently breaks every link
-  // and QR code they have already shared. That is why this reads before it writes.
-  const legacy = owner?.friend_code
-    ? null
-    : owner?.friend_id
-      ? await getJson<FcOwnerRecord>(env, `${owner.friend_id}/friendcode.json`)
-      : null;
-  const code = owner?.friend_code ?? legacy?.c ?? (await generateUniqueFriendCode(env));
+  // ⚠️ PRESERVES an existing code. An account that already has one keeps it; only a
+  // genuinely new account mints. Minting over an existing code silently breaks every
+  // link and QR the user has already shared, which is why this reads before it writes.
+  //
+  // The `{friendId}/friendcode.json` legacy pointer that sat between these two is gone
+  // with `users.friend_code`'s predecessor (8c-3). It was already resolving to nothing:
+  // measured 2026-07-30, the two accounts that would have used it had no such object —
+  // step 7's purge had taken them. They mint a fresh code on their next publish.
+  const code = owner?.friend_code ?? (await generateUniqueFriendCode(env));
 
   const existingCard = await getText(env, `fc/${code}.json`);
   if (existingCard !== body) await putRaw(env, `fc/${code}.json`, body);
-  // Adopts the legacy code into D1 on the first republish, so the backfill needs no
-  // separate job. Still writes the legacy pointer while the relay purge path reads it.
   if (owner?.friend_code !== code) {
     await env.DB.prepare("UPDATE users SET friend_code = ? WHERE id = ?").bind(code, session.userId).run();
-    if (owner?.friend_id) await putJson(env, `${owner.friend_id}/friendcode.json`, { c: code });
   }
 
   return json({
@@ -1231,13 +1207,14 @@ async function handleGetFriendCode(code: string, env: Env): Promise<Response> {
  * the friendId-keyed pointer for an account that has not republished since the code
  * moved to D1. Subrequests are the binding constraint, so the common case is halved.
  *
- * Returns only the pairing fields. The stored card is client-written, so nothing
- * here may be trusted beyond being public — `handleGetFriendCards` re-checks the
- * friendId against the claim-checked `users.friend_id`.
+ * Returns only the pairing fields. ⚠️ The stored card is CLIENT-WRITTEN and nothing
+ * here may be trusted beyond being public. The claim-check against
+ * `users.friend_id` that `handleGetFriendCards` used to apply went with that column
+ * (8c-3), so a card's self-declared friendId is now unverified — see the note there.
  */
-async function loadPublicCard(env: Env, friendCode: string | null, friendId: string): Promise<PublicCard | null> {
-  const code = friendCode ?? (await getJson<FcOwnerRecord>(env, `${friendId}/friendcode.json`))?.c ?? null;
-  if (!code) return null;
+async function loadPublicCard(env: Env, friendCode: string | null): Promise<PublicCard | null> {
+  if (!friendCode) return null;
+  const code = friendCode;
   const card = await getJson<Record<string, unknown>>(env, `fc/${code}.json`);
   if (!card || typeof card.friendId !== "string" || typeof card.publicKeyset !== "string") return null;
   const str = (v: unknown) => (typeof v === "string" ? v : "");
@@ -1282,10 +1259,9 @@ async function loadPublicCard(env: Env, friendCode: string | null, friendId: str
 /**
  * Wake a user's own devices.
  *
- * ⚠️ **Addressing a user has never required a friendship.** `users.friend_id` maps
- * the account to its device folder and the record's `selfTopic` is subscribed to by
- * that user's own devices, so this reaches anyone — friend or stranger's target
- * alike. That is why comment-reaction notifications needed no new addressing
+ * ⚠️ **Addressing a user has never required a friendship.** `users.push_self_topic`
+ * is subscribed to by that user's own devices, so this reaches anyone — friend or
+ * stranger's target alike. That is why comment-reaction notifications needed no new addressing
  * mechanism, only a caller.
  *
  * The push record itself still lives in **R2**, which is the last relay dependency
@@ -1305,9 +1281,6 @@ async function notifyAccount(
   collapseKey?: string,
 ): Promise<void> {
   try {
-    // One row for BOTH the topics and the legacy friendId — the same query that used
-    // to fetch `friend_id` alone, so the account-keyed path costs nothing extra and
-    // saves the R2 read the relay path needs.
     const account = await readAccountPush(env.DB, userId);
     if (!account) return;
     const config = fcmConfig(env);
@@ -1322,7 +1295,7 @@ async function notifyAccount(
     if (!target) return;
     // Still the friendId while one exists: it is the FCM message tag the client
     // correlates on, not an addressing decision.
-    const friendId = account.friendId ?? userId;
+    const friendId = userId;
     // `kind` distinguishes a rendered notification from the bare "sync now" wake
     // every other caller sends; the client switches on it.
     const type = data.kind ? data.kind : "inbox_update";

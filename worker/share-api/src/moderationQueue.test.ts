@@ -85,7 +85,6 @@ class FakeD1 {
               author_suspended_until: authorUser?.posting_suspended_until ?? null,
               target_name: p?.display_name ?? null,
               target_picture: p?.picture_url ?? null,
-              friend_id: u?.friend_id ?? null,
               posting_suspended_until: u?.posting_suspended_until ?? null,
             } as T;
           }),
@@ -205,7 +204,10 @@ describe("handleModerationQueue", () => {
       { target_id: B, kind: "picture", reporter_id: A, context: "", state: "open", created_at: NOW, body_snapshot: null },
     ];
     const bucket = new FakeBucket();
-    bucket.store.set("_moderation/FRIEND12345X.json", "{}");
+    // Account-keyed only since 8c-3. The legacy `_moderation/{friendId}.json` key it
+    // used to also accept went with `users.friend_id`, and nothing can resolve which
+    // legacy key an account would have had.
+    bucket.store.set(`_moderation/u/${B}.json`, "{}");
     const list = await items(await get(env(db, bucket)));
     expect(list[0].tombstoned).toBe(true);
   });
@@ -280,7 +282,7 @@ class ActFakeD1 extends FakeD1 {
         if (s.startsWith("SELECT id, tmdb_id")) {
           return (self.comments.find((c) => c.id === args[0]) as T) ?? null;
         }
-        if (s.startsWith("SELECT id, friend_id")) {
+        if (s.startsWith("SELECT id FROM users")) {
           return (self.users.find((u) => u.id === args[0]) as T) ?? null;
         }
         return null;
@@ -402,22 +404,21 @@ describe("handleModerationAct", () => {
   // legacy friendId one, and each read path checks only its own key — so a takedown
   // that wrote one and a restore that cleared the other would each be half-applied,
   // with no error either time.
-  it("takes a picture down by writing the same tombstones the threshold writes", async () => {
+  it("takes a picture down by writing the same tombstone the threshold writes", async () => {
     const db = withUser();
     const bucket = new ActFakeBucket();
     await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "hide" });
     expect(bucket.store.has(`_moderation/u/${B}.json`)).toBe(true);
-    expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(true);
+    // The legacy friendId-keyed twin is gone with the column (8c-3).
+    expect([...bucket.store.keys()]).toEqual([`_moderation/u/${B}.json`]);
   });
 
-  it("restoring a picture clears BOTH tombstones AND dismisses its reports", async () => {
+  it("restoring a picture clears the tombstone AND dismisses its reports", async () => {
     const db = withUser();
     const bucket = new ActFakeBucket();
     bucket.store.set(`_moderation/u/${B}.json`, "{}");
-    bucket.store.set("_moderation/FRIEND12345X.json", "{}");
     await act(env(db, bucket), { itemId: `${B}:picture`, source: "d1", action: "restore" });
     expect(bucket.store.has(`_moderation/u/${B}.json`)).toBe(false);
-    expect(bucket.store.has("_moderation/FRIEND12345X.json")).toBe(false);
     expect(db.reports[0].state).toBe("dismissed");
   });
 
