@@ -135,7 +135,6 @@ const ROUTES: Array<[string, string, unknown?]> = [
   // Relay + public surfaces
   ["POST", "/api/friendcode", { friendId: FRIEND_ID }],
   ["GET", "/api/friendcode/ABCDEF"],
-  ["POST", "/api/social/freshness", { items: [] }],
   ["PUT", "/api/social/backup", {}],
   ["POST", "/api/opinions/batch", { items: [] }],
 ];
@@ -205,6 +204,31 @@ describe("route wiring", () => {
 
     const acted = await worker.fetch(request("POST", "/api/moderation/act", {}), env(), ctx);
     expect(acted.status).toBe(403);
+  });
+
+  /**
+   * Step 7 retired the E2EE relay profile. These must 404, and the ONE that must not is
+   * `push` — it shares the `/api/user/*` pattern, so a matcher edit that took it out with
+   * the others would silently stop every directed notification with nothing failing.
+   */
+  it("no longer serves the relay profile, access bundle or freshness scan", async () => {
+    const gone: Array<[string, string]> = [
+      ["PUT", `/api/user/${FRIEND_ID}/profile`],
+      ["GET", `/api/user/${FRIEND_ID}/profile`],
+      ["PUT", `/api/user/${FRIEND_ID}/access`],
+      ["GET", `/api/user/${FRIEND_ID}/access`],
+      ["POST", "/api/social/freshness"],
+    ];
+    for (const [method, path] of gone) {
+      const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);
+      expect(`${method} ${path} -> ${res.status}`).toBe(`${method} ${path} -> 404`);
+    }
+  });
+
+  it("still routes PUT push, which shares that pattern", async () => {
+    const res = await worker.fetch(request("PUT", `/api/user/${FRIEND_ID}/push`, { selfTopic: "t_a" }), env(), ctx);
+    // 403 = the matcher ran and owner auth rejected it. 404 would mean the kind was lost.
+    expect(res.status).toBe(403);
   });
 
   it("no longer serves the stopgap person-report endpoints", async () => {

@@ -84,7 +84,6 @@ export interface RelayRequest {
 }
 
 export interface RelayResponse {
-  freshness: unknown[];
   /** Null when not asked for, or when nothing has been published yet (the 404 case). */
   self: { ciphertext: string; version: number } | null;
 }
@@ -160,9 +159,10 @@ export async function handleSync(
   const lists = body.lists ? await loadSharedLists(env, session.userId) : null;
   const match = body.match ? await loadMatches(env, session.userId) : null;
 
-  // 4. R2, if the caller asked for it. This half now carries only `freshness` and
-  //    the friends record; the E2EE inbox that used to ride along was retired with
-  //    the last message type it carried (Part C).
+  // 4. R2, if the caller asked for it. This half now carries ONLY the live friends+block
+  //    record. The E2EE inbox went with the last message type it carried (Part C), and the
+  //    freshness scan went at step 7 with the profile.json it reported on — so `friends`
+  //    below is vestigial and kept solely to cap what an older client may still send.
   let relay: RelayResponse | null = null;
   if (body.relay && loadRelay) {
     relay = await loadRelay(env, session.userId, {

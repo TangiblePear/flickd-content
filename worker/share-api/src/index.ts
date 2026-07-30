@@ -248,7 +248,11 @@ export default {
     // ── User-scoped objects: access keys, profile, per-title opinions, push ──
     // `push` (was `fcm-token`) carries the owner's topic names for O(1) fan-out;
     // both are accepted during rollout and neither is client-readable (GET refused).
-    const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(access|profile|fcm-token|push)$`));
+    // `access` and `profile` are GONE (step 7) — see the note above handleGetUserObject.
+    // ⚠️ The route PATTERN stays: `push` serves through it, as do `picture` and
+    // `opinions/*` below. Removing a pattern that still has traffic is a silent 405, and
+    // `wrangler deploy --dry-run` cannot see it.
+    const userObj = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/(fcm-token|push)$`));
     if (userObj) {
       const [, friendId, kind] = userObj;
       // The E2EE profile/access path is being retired. Once MIN_SOCIAL_VERSION is
@@ -259,20 +263,13 @@ export default {
       //
       // `push` is NOT gated: it is the delivery path for the very notifications that
       // tell a user to come back, and it is moving to /api/me/push independently.
-      const floor = minSocialVersion(env);
-      if (floor > 0 && (kind === "access" || kind === "profile")) {
-        const v = appVersion(req);
-        // v === 0 means "did not say" (the PWA, pre-gate builds). Only refuse a
-        // client that positively identifies itself as too old.
-        if (v > 0 && v < floor) {
-          return new Response(JSON.stringify({ error: "update_required", minSocialVersion: floor }), {
-            status: 426,
-            headers: { "Content-Type": "application/json", ...CORS },
-          });
-        }
-      }
+      // The MIN_SOCIAL_VERSION check went with those two kinds. It existed to refuse an old
+      // build that would otherwise keep reading the relay after the writes stopped, and
+      // there is nothing left here to refuse it from. The floor stays in wrangler.toml for
+      // the CLIENT gate — see the note there on why it is still "0".
+      //
+      // PUT only. A push record is never client-readable, which is why there is no GET.
       if (req.method === "PUT") return handlePutUserObject(friendId, kind, req, env, ctx);
-      if (req.method === "GET" && kind !== "fcm-token" && kind !== "push") return handleGetUserObject(friendId, kind, req, env);
     }
 
     const userOpinion = p.match(new RegExp(`^/api/user/(${FRIEND_ID})/opinions/(${HASH})$`));
@@ -314,10 +311,8 @@ export default {
     // on a bound read token; its picture auto-hide now runs in friends.ts, against
     // the same tombstone and the same REPORT_AUTOHIDE threshold.
 
-    // ── Freshness Check (Batch) ──
-    if (p === "/api/social/freshness" && req.method === "POST") {
-      return handleFreshness(req, env);
-    }
+    // `POST /api/social/freshness` is retired (step 7). No client calls it, and the objects
+    // it reported on — `profile.json`, `access.json` — are no longer written or read.
 
     // ── Friend code → public friend card ──
     if (p === "/api/friendcode" && req.method === "POST") {
@@ -1408,19 +1403,18 @@ async function loadRelay(env: Env, relay: RelayRequest): Promise<RelayResponse> 
     typeof relay.requesterId === "string" && new RegExp(`^${FRIEND_ID}$`).test(relay.requesterId)
       ? relay.requesterId
       : "";
-  const queries = (relay.friends ?? []) as FreshnessQuery[];
-
-  // Both in parallel: they touch different objects and neither depends on the other,
-  // so the request costs one round trip's worth of latency rather than two.
-  const [freshness, self] = await Promise.all([
-    queries.length ? freshnessItems(env, queries, requesterId) : Promise.resolve([]),
+  // The freshness scan is gone (step 7). It reported which friends' `profile.json` had
+  // changed and handed back a sealed key-rotation slot; nothing publishes or reads those
+  // objects now, and the slot's last live payload — the friend push topic — rides the
+  // friend card. What remains is the live friends+block record, which is unrelated to it.
+  void requesterId;
+  const self =
     relay.selfLookupKey && new RegExp(`^${LOOKUP_KEY}$`).test(relay.selfLookupKey)
-      ? getJson<SelfRecord>(env, `self/${relay.selfLookupKey}.json`).then((r) =>
+      ? await getJson<SelfRecord>(env, `self/${relay.selfLookupKey}.json`).then((r) =>
           r ? { ciphertext: r.ciphertext, version: r.version } : null,
         )
-      : Promise.resolve(null),
-  ]);
-  return { freshness, self };
+      : null;
+  return { self };
 }
 
 
@@ -1429,80 +1423,13 @@ async function accessSlotHash(friendId: string): Promise<string> {
   return sha256hex(`access-slot:${friendId}`);
 }
 
-async function handleFreshness(req: Request, env: Env): Promise<Response> {
-  let body: { items?: unknown; requesterId?: unknown };
-  try {
-    body = (await req.json()) as { items?: unknown; requesterId?: unknown };
-  } catch {
-    return invalidJson();
-  }
-  const items = Array.isArray(body.items) ? (body.items as FreshnessQuery[]) : null;
-  if (!items) return json({ error: "invalid_payload" }, { status: 400 });
-
-  // The caller's own friendId — lets us return their freshly-sealed access slot
-  // inline when an author rotated (0a-3), so they re-key without an extra request.
-  const requesterId =
-    typeof body.requesterId === "string" && new RegExp(`^${FRIEND_ID}$`).test(body.requesterId)
-      ? body.requesterId
-      : "";
-  return json({ items: await freshnessItems(env, items, requesterId) });
-}
-
-/**
- * The freshness scan itself, split out of [handleFreshness] so `POST /api/sync` can
- * fold it into the same request as the D1 reads. Subrequests are free; the inbound
- * request is what Cloudflare bills.
- */
-async function freshnessItems(env: Env, items: FreshnessQuery[], requesterId: string) {
-  const slotHash = requesterId ? await accessSlotHash(requesterId) : "";
-
-  const out: Array<{ friendId: string; modifiedAt: number; profile?: unknown; slot?: unknown; keyEpoch?: number }> = [];
-  for (const it of items.slice(0, MAX_BATCH_ITEMS)) {
-    const friendId = typeof it.friendId === "string" ? it.friendId : "";
-    const readToken = typeof it.readToken === "string" ? it.readToken : "";
-    const since = typeof it.since === "number" ? it.since : 0;
-    const sentEpoch = typeof it.keyEpoch === "number" ? it.keyEpoch : 0;
-
-    if (!new RegExp(`^${FRIEND_ID}$`).test(friendId)) continue;
-
-    // Single get() yields body + uploaded + customMetadata — no separate owner.json
-    // read or head() (0a-2). The plaintext header carries the author's keyEpoch.
-    const obj = await env.BUCKET.get(`${friendId}/profile.json`);
-    if (!obj) continue;
-    const uploaded = obj.uploaded.getTime();
-    let profile: any = null;
-    try {
-      profile = await obj.json();
-    } catch {
-      profile = null;
-    }
-    const authorEpoch =
-      profile && profile.header && typeof profile.header.keyEpoch === "number" ? profile.header.keyEpoch : 0;
-
-    // Rotation: the author bumped keyEpoch since the requester last synced. Return
-    // the requester's re-sealed access slot inline so they pick up the new feed key,
-    // tc, and topic in this same call. Membership in access.json is the authorization
-    // (the slot is sealed to their public keyset); a removed friend has no slot and
-    // receives nothing here — actually revoked.
-    if (slotHash && authorEpoch > sentEpoch) {
-      const access = await getJson<{ keys?: Record<string, unknown> }>(env, `${friendId}/access.json`);
-      const slot = access?.keys?.[slotHash];
-      if (slot !== undefined && profile) {
-        out.push({ friendId, modifiedAt: uploaded, profile, slot, keyEpoch: authorEpoch });
-      }
-      continue;
-    }
-
-    // Normal path: fresh + authorized by the rotatable tc (customMetadata, or the
-    // live owner.json for a profile written before the token was stamped).
-    if (uploaded <= since) continue;
-    const rt = obj.customMetadata?.rt;
-    const authed = rt ? rt === readToken : await verifyReadToken(env, friendId, readToken, "c");
-    if (!authed) continue;
-    out.push({ friendId, modifiedAt: uploaded, profile: profile ?? undefined });
-  }
-  return out;
-}
+// `handleFreshness` and `freshnessItems` are gone (step 7), with the objects they read.
+// The scan reported which friends' profile.json had changed and returned a sealed
+// key-rotation slot. Nothing publishes or reads a relay profile now, and the slot's last
+// live payload -- the friend push topic -- rides the friend card instead.
+//
+// The `/api/social/*` route pattern stays: `self`, `backup` and `delete` still serve
+// through it.
 
 interface FcOwnerRecord {
   c: string;
