@@ -187,36 +187,49 @@ describe("canView", () => {
   it("always allows the owner, without touching blocks or friendships", async () => {
     const env = await env0();
     env.DB.blocks.push({ blocker_id: OWNER, blocked_id: OWNER, created_at: 1 });
-    expect(await canView(env, OWNER, OWNER, "private")).toBe(true);
+    expect(await canView(env, OWNER, OWNER, "private")).toBe("owner");
   });
 
   it("allows a stranger to read a public profile", async () => {
-    expect(await canView(await env0(), OTHER, OWNER, "public")).toBe(true);
+    expect(await canView(await env0(), OTHER, OWNER, "public")).toBe("public");
   });
 
   it("denies a stranger on a friends-only profile", async () => {
-    expect(await canView(await env0(), OTHER, OWNER, "friends")).toBe(false);
+    expect(await canView(await env0(), OTHER, OWNER, "friends")).toBeNull();
   });
 
   it("allows an accepted friend on a friends-only profile", async () => {
     const env = await env0();
     const [a, b] = friendshipKey(OWNER, OTHER);
     env.DB.friendships.push({ user_a: a, user_b: b, state: "accepted" });
-    expect(await canView(env, OTHER, OWNER, "friends")).toBe(true);
+    expect(await canView(env, OTHER, OWNER, "friends")).toBe("friend");
+  });
+
+  /**
+   * The friendship is checked BEFORE `public`, so a friend reading a public profile keeps
+   * the friend-scoped layout instead of being downgraded to the stranger view. Getting
+   * this backwards would silently strip friends of the blocks they are entitled to see the
+   * moment the owner went public.
+   */
+  it("grants friend, not public, when a friend reads a PUBLIC profile", async () => {
+    const env = await env0();
+    const [a, b] = friendshipKey(OWNER, OTHER);
+    env.DB.friendships.push({ user_a: a, user_b: b, state: "accepted" });
+    expect(await canView(env, OTHER, OWNER, "public")).toBe("friend");
   });
 
   it("treats a pending request as NOT a friend", async () => {
     const env = await env0();
     const [a, b] = friendshipKey(OWNER, OTHER);
     env.DB.friendships.push({ user_a: a, user_b: b, state: "pending" });
-    expect(await canView(env, OTHER, OWNER, "friends")).toBe(false);
+    expect(await canView(env, OTHER, OWNER, "friends")).toBeNull();
   });
 
   it("denies an accepted friend on a private profile", async () => {
     const env = await env0();
     const [a, b] = friendshipKey(OWNER, OTHER);
     env.DB.friendships.push({ user_a: a, user_b: b, state: "accepted" });
-    expect(await canView(env, OTHER, OWNER, "private")).toBe(false);
+    expect(await canView(env, OTHER, OWNER, "private")).toBeNull();
   });
 
   // The ordering test that matters: blocks are evaluated before visibility, so a
@@ -224,13 +237,13 @@ describe("canView", () => {
   it("denies a blocked viewer even on a PUBLIC profile", async () => {
     const env = await env0();
     env.DB.blocks.push({ blocker_id: OWNER, blocked_id: OTHER, created_at: 1 });
-    expect(await canView(env, OTHER, OWNER, "public")).toBe(false);
+    expect(await canView(env, OTHER, OWNER, "public")).toBeNull();
   });
 
   it("denies when the VIEWER blocked the owner, not just the reverse", async () => {
     const env = await env0();
     env.DB.blocks.push({ blocker_id: OTHER, blocked_id: OWNER, created_at: 1 });
-    expect(await canView(env, OTHER, OWNER, "public")).toBe(false);
+    expect(await canView(env, OTHER, OWNER, "public")).toBeNull();
   });
 
   it("blocks override an accepted friendship", async () => {
@@ -238,7 +251,7 @@ describe("canView", () => {
     const [a, b] = friendshipKey(OWNER, OTHER);
     env.DB.friendships.push({ user_a: a, user_b: b, state: "accepted" });
     env.DB.blocks.push({ blocker_id: OWNER, blocked_id: OTHER, created_at: 1 });
-    expect(await canView(env, OTHER, OWNER, "friends")).toBe(false);
+    expect(await canView(env, OTHER, OWNER, "friends")).toBeNull();
   });
 });
 

@@ -51,31 +51,44 @@ export async function areFriends(env: AuthzEnv, a: string, b: string): Promise<b
 }
 
 /**
- * May [viewerId] read [ownerId]'s profile at [visibility]?
+ * Why a viewer may read a profile — `null` when they may not.
+ *
+ * A boolean is not enough once profiles can be public: the layout and stats served
+ * depend on *which* rule granted access, not merely that one did.
+ */
+export type ViewGrant = "owner" | "friend" | "public" | null;
+
+/**
+ * May [viewerId] read [ownerId]'s profile at [visibility], and on what grounds?
  *
  * ```
- * blocked either way        → DENY   (always evaluated first)
- * viewer is the owner       → ALLOW
- * visibility = public       → ALLOW
- * visibility = friends      → ALLOW iff an accepted friendship exists
- * otherwise (private)       → DENY
+ * blocked either way        → null      (always evaluated first)
+ * viewer is the owner       → "owner"
+ * accepted friendship       → "friend"  (on a friends OR public profile)
+ * visibility = public       → "public"
+ * otherwise (private)       → null
  * ```
+ *
+ * **The friendship is checked before `public`** so a friend reading a public profile
+ * grants "friend" and keeps the richer friend-scoped layout, rather than being
+ * downgraded to the stranger view.
  *
  * Cost for a foreign profile: one indexed read for the block pair, one for the
- * friendship — plus the profile row itself. Self and public reads skip the
- * friendship lookup; a self read skips both.
+ * friendship — plus the profile row itself. A self read skips both; a private
+ * profile skips the friendship lookup.
  */
 export async function canView(
   env: AuthzEnv,
   viewerId: string,
   ownerId: string,
   visibility: Visibility,
-): Promise<boolean> {
+): Promise<ViewGrant> {
   // Own profile is always readable, and a self-block is meaningless — check it
   // before touching the database so the owner path costs nothing.
-  if (viewerId === ownerId) return true;
-  if (await isBlockedEitherWay(env, viewerId, ownerId)) return false;
-  if (visibility === "public") return true;
-  if (visibility === "friends") return areFriends(env, viewerId, ownerId);
-  return false;
+  if (viewerId === ownerId) return "owner";
+  if (await isBlockedEitherWay(env, viewerId, ownerId)) return null;
+  // A private profile reaches nobody but its owner, so there is nothing to look up.
+  if (visibility === "private") return null;
+  if (await areFriends(env, viewerId, ownerId)) return "friend";
+  return visibility === "public" ? "public" : null;
 }

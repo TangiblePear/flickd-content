@@ -536,7 +536,7 @@ describe("blocking", () => {
     expect((await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env)).status).toBe(204);
     const after = (await (await handleGetFriends(get("tok-a", "/api/friends"), env)).json()) as any;
     expect(after.accepted).toEqual([]);
-    expect(await canView(env, B, A, "public")).toBe(false);
+    expect(await canView(env, B, A, "public")).toBeNull();
   });
 
   // The whole point of moving blocks server-side: enforcement is immediate, not
@@ -544,8 +544,8 @@ describe("blocking", () => {
   it("denies the blocked user immediately, in both directions", async () => {
     const env = await env0();
     await handleBlock(B, post("tok-a", `/api/blocks/${B}`), env);
-    expect(await canView(env, B, A, "public")).toBe(false);
-    expect(await canView(env, A, B, "public")).toBe(false);
+    expect(await canView(env, B, A, "public")).toBeNull();
+    expect(await canView(env, A, B, "public")).toBeNull();
   });
 
   // Otherwise this endpoint is a block detector.
