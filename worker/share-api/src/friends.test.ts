@@ -227,6 +227,7 @@ class FakeStmt {
       ["UPDATE comment_counts", "comment_counts", null],
       ["DELETE FROM comments", "comments", null],
       ["DELETE FROM episode_votes", "episode_votes", "user_id"],
+      ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
@@ -776,5 +777,27 @@ describe("account deletion", () => {
     }), env);
 
     expect(env.DB.episode_votes.map((v: any) => v.user_id)).toEqual([B]);
+  });
+
+  /**
+   * Same silent-gap trap as the votes above. `user_telemetry` holds device model, OS,
+   * country and which integrations were configured, all keyed on `users.id`, so leaving
+   * it behind would keep a profile of a deleted person. `telemetry_daily` is deliberately
+   * NOT asserted here — it is aggregate, holds no user id, and is meant to survive.
+   */
+  it("erases per-device telemetry", async () => {
+    const env = await env0();
+    env.DB.user_telemetry = [
+      { user_id: A, device_id: "dev-1", model: "Pixel 8" },
+      { user_id: A, device_id: "dev-2", model: "Pixel Tablet" },
+      { user_id: B, device_id: "dev-3", model: "Galaxy S24" },
+    ];
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect(env.DB.user_telemetry.map((t: any) => t.user_id)).toEqual([B]);
   });
 });

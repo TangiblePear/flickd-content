@@ -18,8 +18,9 @@ import { loadFriendships, loadFriendTopics } from "./friends";
 import { loadSharedLists, type ListsEnv } from "./lists";
 import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEnv } from "./match";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
+import { maybeRollup, recordTelemetry, type TelemetryBlock, type TelemetryEnv } from "./telemetry";
 
-export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv;
+export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv & TelemetryEnv;
 
 export interface RetirementEnv {
 }
@@ -69,6 +70,16 @@ export interface SyncRequest {
    */
   lists?: boolean;
   match?: boolean;
+  /**
+   * Product telemetry. Absent from every client that predates it — and that costs
+   * nothing, because the version and country halves come from the request itself, so
+   * the fleet already in the field still lands a row. See `telemetry.ts`.
+   *
+   * The client sends the cheap identity half on every sync and the expensive half
+   * (Room counts, integration flags) only on the first sync of a UTC day, which is
+   * why the first write of a day is always the rich one.
+   */
+  telemetry?: TelemetryBlock;
 }
 
 export interface RelayRequest {
@@ -182,6 +193,18 @@ export async function handleSync(
     ctx?.waitUntil(sweepOnceMatchPayloads(env).catch(() => {}));
     ctx?.waitUntil(sweepTerminalMatches(env).catch(() => {}));
   }
+
+  // Product telemetry, riding the same ambient traffic for the same reason. Run
+  // UNCONDITIONALLY — not gated on `body.telemetry` — because the version and country
+  // halves are read off the request, so a client that has never heard of this field
+  // still records one. That is what makes fleet version data work on deploy rather
+  // than on the next release.
+  //
+  // Both are `waitUntil` + `catch`: telemetry must never fail, delay, or change the
+  // shape of a sync. The rollup is a single PK lookup on all but the first call of a
+  // day; see `maybeRollup` for why it is not a cron.
+  ctx?.waitUntil(recordTelemetry(env, session.userId, req, body.telemetry).catch(() => {}));
+  ctx?.waitUntil(maybeRollup(env).catch(() => {}));
 
   return json({
     written,

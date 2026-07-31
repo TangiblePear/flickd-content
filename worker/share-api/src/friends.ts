@@ -707,6 +707,11 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     //
     // Both leave a dangling id pointing at a row in `users` that no longer exists. That
     // is already true of every retained `target_id` and is what a safety record is for.
+    // Per-device telemetry. `telemetry_daily` is deliberately NOT touched: it holds
+    // aggregate counts and no user ids, so there is nothing in it to erase — and
+    // subtracting this account from a historical total would corrupt the series
+    // rather than protect anyone.
+    env.DB.prepare("DELETE FROM user_telemetry WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profiles WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),
