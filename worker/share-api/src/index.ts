@@ -83,6 +83,7 @@ import {
 import { handleGetPoll, handlePutVote } from "./poll";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
+import { handleInsights } from "./insights";
 import { handleGiphy } from "./giphy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
@@ -484,6 +485,13 @@ export default {
     // — those were the temporary reader, not a second surface to keep alive.
     if (p === "/api/moderation/reports" && req.method === "GET") return handleModerationQueue(req, env);
     if (p === "/api/moderation/act" && req.method === "POST") return handleModerationAct(req, env);
+
+    // Fleet insights for the admin panel. Read-only, ADMIN_KEY-gated like moderation.
+    //
+    // ⚠️ Its own route pattern (`flickto.app/api/insights*`), NOT under `/api/admin/*` —
+    // that prefix belongs to flickto-scoring-api, and Cloudflare gives a route to exactly
+    // one worker, so reusing it REJECTS the whole deploy rather than merging.
+    if (p === "/api/insights" && req.method === "GET") return handleInsights(req, env);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);

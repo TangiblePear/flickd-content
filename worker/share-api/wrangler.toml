@@ -88,6 +88,11 @@ routes = [
   # rather than the routes being merged. Found on the first real deploy, 2026-07-28;
   # `wrangler deploy --dry-run` cannot see it because it never contacts the zone.
   { pattern = "flickto.app/api/moderation/*", zone_name = "flickto.app" },
+  # Fleet insights (src/insights.ts), called by the /admin Pages function with
+  # X-Admin-Key. Same ADMIN_KEY gate as moderation, and the same reason it is NOT
+  # under `/api/admin/*`: that prefix is already flickto-scoring-api's, and a route
+  # belongs to exactly one worker, so reusing it rejects the deploy outright.
+  { pattern = "flickto.app/api/insights*", zone_name = "flickto.app" },
   # GIF picker (src/giphy.ts). Trailing `*` is load-bearing as always — routes
   # match the full URL including the query string, and every call carries `?q=`
   # or `?limit=`.
