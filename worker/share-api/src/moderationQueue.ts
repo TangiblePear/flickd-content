@@ -382,8 +382,8 @@ async function actOnComment(id: string, action: Action, env: ModerationEnv): Pro
 
   switch (action) {
     case "hide":
-      // `setHidden` moves comment_counts.n_public in the same batch. That invariant has
-      // exactly one implementation and this is not a second one.
+      // Hiding goes through `setHidden` rather than a raw UPDATE here so the auto-hide
+      // threshold and this admin action share one implementation.
       if (row.hidden_at == null) await setHidden(env as unknown as CommentsEnv, row, true);
       return json({ ok: true });
 

@@ -664,58 +664,27 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // Your activity feed. Erasing the account while leaving these would keep every
     // title you watched readable by anyone still friends with the deleted row.
     env.DB.prepare("DELETE FROM feed_events WHERE author_id = ?").bind(id),
-    // Comments, and the three tables hanging off them. Order matters: the
-    // children go first, because once `comments` is gone nothing can name the
-    // rows that pointed at it and they become unreachable data no erasure can
-    // ever reach.
+    // Comments, and the tables hanging off them. Order matters: the children go
+    // first, because once `comments` is gone nothing can name the rows that
+    // pointed at it and they become unreachable data no erasure can ever reach.
     //
     // Reactions are deleted in BOTH directions — the reactions you made on other
-    // people's comments are your data too, and their counts have to come down
-    // with them or every comment you ever reacted to keeps an inflated number.
-    env.DB
-      .prepare(
-        `UPDATE comment_reaction_counts SET n = MAX(n - 1, 0)
-          WHERE (comment_id, emoji) IN
-            (SELECT comment_id, emoji FROM comment_reactions WHERE user_id = ?)`,
-      )
-      .bind(id),
+    // people's comments are your data too. Reaction and comment counts are derived
+    // from these rows on read, so removing the rows removes them from every total
+    // automatically; there is no counter left to adjust.
     env.DB.prepare("DELETE FROM comment_reactions WHERE user_id = ?").bind(id),
     env.DB
       .prepare("DELETE FROM comment_reactions WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)")
       .bind(id),
     env.DB
-      .prepare("DELETE FROM comment_reaction_counts WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)")
-      .bind(id),
-    env.DB
       .prepare("DELETE FROM comment_translations WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)")
       .bind(id),
-    // The public counters the deleted comments were contributing to, before the
-    // rows they are derived from go away and the delta can no longer be computed.
-    env.DB
-      .prepare(
-        `UPDATE comment_counts SET n_public = MAX(n_public - (
-           SELECT COUNT(*) FROM comments c
-            WHERE c.author_id = ? AND c.visibility = 'public'
-              AND c.hidden_at IS NULL AND c.deleted_at IS NULL
-              AND (c.body <> '' OR c.media_id IS NOT NULL)
-              AND c.tmdb_id = comment_counts.tmdb_id AND c.media_type = comment_counts.media_type
-              AND c.season = comment_counts.season AND c.episode = comment_counts.episode
-         ), 0)
-         WHERE (tmdb_id, media_type, season, episode) IN
-           (SELECT tmdb_id, media_type, season, episode FROM comments WHERE author_id = ?)`,
-      )
-      .bind(id, id),
     env.DB.prepare("DELETE FROM comments WHERE author_id = ?").bind(id),
     // Episode poll votes. This row is the ONLY thing linking a person to what they
     // voted, so removing it is what makes the vote anonymous rather than merely
-    // unattributed.
-    //
-    // ⚠️ `episode_vote_counts` and `episode_option_counts` are deliberately NOT
-    // adjusted. They hold nothing but numbers — no user id, no way back to a person —
-    // so they are not this account's data to erase, and unpicking them would mean one
-    // statement per episode this user ever voted on, unbounded, inside a batch that has
-    // to stay transactional. The privacy policy says this plainly rather than implying
-    // the totals are recalculated.
+    // unattributed. Poll totals are now derived from these rows on read, so deleting
+    // them also drops this account's contribution from every total automatically —
+    // no separate counter to unpick.
     env.DB.prepare("DELETE FROM episode_votes WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),

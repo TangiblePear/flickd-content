@@ -14,7 +14,6 @@ const A = "AAAAH73X7P55T48R4CFHDED9CW";
 
 class FakeD1 {
   comments: any[] = [];
-  comment_counts: any[] = [];
   reports: any[] = [];
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -24,8 +23,13 @@ class FakeD1 {
     for (const s of stmts) out.push(await s.run());
     return out;
   }
+  /** The public count is now DERIVED from the comment row, as the app reads it. */
   count() {
-    return this.comment_counts[0]?.n_public ?? 0;
+    const c = this.comments[0];
+    if (!c) return 0;
+    const renderable =
+      c.visibility === "public" && c.hidden_at == null && c.deleted_at == null && (c.body !== "" || c.media_id != null);
+    return renderable ? 1 : 0;
   }
 }
 
@@ -93,17 +97,6 @@ class FakeStmt {
       }
       return { success: true, meta: { changes: n } };
     }
-    if (s.startsWith("INSERT INTO comment_counts")) {
-      const row = this.db.comment_counts[0];
-      if (row) row.n_public += a[5];
-      else this.db.comment_counts.push({ n_public: a[4] });
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.startsWith("UPDATE comment_counts SET n_public")) {
-      const row = this.db.comment_counts[0];
-      if (row) row.n_public = Math.max(row.n_public + a[0], 0);
-      return { success: true, meta: { changes: row ? 1 : 0 } };
-    }
     throw new Error(`FakeD1: unhandled run() ${s}`);
   }
 }
@@ -117,7 +110,6 @@ function seed(db: FakeD1, over: Record<string, unknown> = {}) {
     id: "C1", tmdb_id: 603, media_type: "movie", season: -1, episode: -1, author_id: A,
     body: "text", visibility: "public", spoiler: 0, hidden_at: null, deleted_at: null, media_id: null, ...over,
   });
-  db.comment_counts.push({ n_public: 1 });
 }
 
 describe("admin authorization", () => {
@@ -141,7 +133,7 @@ describe("admin authorization", () => {
 });
 
 describe("admin actions", () => {
-  it("hides and restores, moving the public counter both ways", async () => {
+  it("hides and restores, and the derived public count follows both ways", async () => {
     const e = env();
     seed(e.DB);
     await handleAdminCommentAction("C1", "hide", req(), e);

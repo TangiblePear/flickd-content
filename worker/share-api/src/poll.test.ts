@@ -1,8 +1,9 @@
-// Episode community poll — the counter arithmetic.
+// Episode community poll — the read-time aggregation.
 //
 // Everything pinned here fails SILENTLY rather than visibly: a wrong denominator
-// still renders a plausible percentage, and a missed decrement still renders a
-// plausible bar. Nothing throws, so only assertions catch it.
+// still renders a plausible percentage, and a miscounted emotion still renders a
+// plausible bar. Nothing throws, so only assertions catch it. Counts are DERIVED
+// from episode_votes now, so these assert the derivation, not a counter table.
 
 import { describe, it, expect } from "vitest";
 import { handleGetPoll, handlePutVote, parseVote } from "./poll";
@@ -21,8 +22,6 @@ const EP = { tmdbId: 1396, mediaType: "show" as const, season: 2, episode: 5 };
 class FakeD1 {
   sessions = new Map<string, string>();
   episode_votes: any[] = [];
-  episode_vote_counts: any[] = [];
-  episode_option_counts: any[] = [];
 
   prepare(sql: string) {
     return new FakeStmt(this, sql);
@@ -36,6 +35,8 @@ class FakeD1 {
 const sameSubject = (r: any, a: any[]) =>
   r.tmdb_id === a[0] && r.media_type === a[1] && r.season === a[2] && r.episode === a[3];
 
+const splitEmotions = (csv: string | null): string[] => (csv ? csv.split(",").filter(Boolean) : []);
+
 class FakeStmt {
   args: any[] = [];
   constructor(
@@ -48,64 +49,53 @@ class FakeStmt {
   }
 
   async first<T>(): Promise<T | null> {
-    const s = this.sql;
+    const s = this.sql.trimStart();
     const a = this.args;
     if (s.startsWith("SELECT user_id, expires_at, revoked_at FROM sessions")) {
       const u = this.db.sessions.get(a[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
     }
-    if (s.trimStart().startsWith("SELECT n_voters")) {
-      return (this.db.episode_vote_counts.find((r) => sameSubject(r, a)) ?? null) as T;
+    // Totals are now derived from episode_votes with COUNT/SUM, so this always
+    // returns a row (zeroes for an unvoted episode), never null.
+    if (s.startsWith("SELECT COUNT(*) AS n_voters")) {
+      const rows = this.db.episode_votes.filter((r) => sameSubject(r, a));
+      return {
+        n_voters: rows.length,
+        n_ratings: rows.filter((r) => r.rating != null).length,
+        rating_sum: rows.reduce((sum, r) => sum + (r.rating ?? 0), 0),
+      } as T;
     }
-    if (s.trimStart().startsWith("SELECT rating, emotions, favourite_option_id")) {
-      const row = this.db.episode_votes.find((r) => r.user_id === a[0] && sameSubject(r, a.slice(1)));
-      return (row ?? null) as T;
-    }
-    throw new Error(`FakeD1: unhandled first() ${s}`);
+    throw new Error(`FakeD1: unhandled first() ${this.sql}`);
   }
 
   async all<T>(): Promise<{ results: T[] }> {
-    const s = this.sql;
+    const s = this.sql.trimStart();
     const a = this.args;
-    if (s.trimStart().startsWith("SELECT kind, option_id, n")) {
-      return { results: this.db.episode_option_counts.filter((r) => sameSubject(r, a) && r.n > 0) as T[] };
+    // Character options: GROUP BY favourite_option_id.
+    if (s.startsWith("SELECT 'person' AS kind")) {
+      const by = new Map<string, number>();
+      for (const r of this.db.episode_votes) {
+        if (!sameSubject(r, a) || r.favourite_option_id == null) continue;
+        by.set(r.favourite_option_id, (by.get(r.favourite_option_id) ?? 0) + 1);
+      }
+      return { results: [...by.entries()].map(([option_id, n]) => ({ kind: "person", option_id, n })) as T[] };
     }
-    throw new Error(`FakeD1: unhandled all() ${s}`);
+    // Emotions: the recursive-CTE split, emulated by splitting each vote's CSV.
+    if (s.startsWith("WITH split")) {
+      const by = new Map<string, number>();
+      for (const r of this.db.episode_votes) {
+        if (!sameSubject(r, a)) continue;
+        for (const em of splitEmotions(r.emotions)) by.set(em, (by.get(em) ?? 0) + 1);
+      }
+      return { results: [...by.entries()].map(([option_id, n]) => ({ kind: "emotion", option_id, n })) as T[] };
+    }
+    throw new Error(`FakeD1: unhandled all() ${this.sql}`);
   }
 
   async run() {
-    const s = this.sql;
+    const s = this.sql.trimStart();
     const a = this.args;
-    if (s.trimStart().startsWith("INSERT INTO episode_vote_counts")) {
-      const [tmdb_id, media_type, season, episode, iv, ir, isum, dv, dr, dsum] = a;
-      const row = this.db.episode_vote_counts.find((r) => sameSubject(r, a));
-      if (row) {
-        row.n_voters = Math.max(0, row.n_voters + dv);
-        row.n_ratings = Math.max(0, row.n_ratings + dr);
-        row.rating_sum = Math.max(0, row.rating_sum + dsum);
-      } else {
-        this.db.episode_vote_counts.push({
-          tmdb_id,
-          media_type,
-          season,
-          episode,
-          n_voters: iv,
-          n_ratings: ir,
-          rating_sum: isum,
-        });
-      }
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.trimStart().startsWith("INSERT INTO episode_option_counts")) {
-      const [tmdb_id, media_type, season, episode, kind, option_id, insertN, delta] = a;
-      const row = this.db.episode_option_counts.find(
-        (r) => sameSubject(r, a) && r.kind === kind && r.option_id === option_id,
-      );
-      if (row) row.n = Math.max(0, row.n + delta);
-      else this.db.episode_option_counts.push({ tmdb_id, media_type, season, episode, kind, option_id, n: insertN });
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.trimStart().startsWith("INSERT INTO episode_votes")) {
+    if (s.startsWith("INSERT INTO episode_votes")) {
       const [user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_option_id, updated_at] = a;
       const row = this.db.episode_votes.find((r) => r.user_id === user_id && sameSubject(r, a.slice(1)));
       if (row) Object.assign(row, { rating, emotions, favourite_option_id, updated_at });
@@ -123,7 +113,7 @@ class FakeStmt {
         });
       return { success: true, meta: { changes: 1 } };
     }
-    throw new Error(`FakeD1: unhandled run() ${s}`);
+    throw new Error(`FakeD1: unhandled run() ${this.sql}`);
   }
 }
 
@@ -147,9 +137,24 @@ const vote = (token: string, body: unknown) =>
 
 const read = () => new Request("https://flickto.app/api/titles/show/1396/poll?season=2&episode=5");
 
-const counts = (e: any) => e.DB.episode_vote_counts[0];
-const option = (e: any, kind: string, id: string) =>
-  e.DB.episode_option_counts.find((r: any) => r.kind === kind && r.option_id === id);
+const SUBJ = [EP.tmdbId, EP.mediaType, EP.season, EP.episode];
+// Both DERIVE from episode_votes now, exactly as loadPoll does on read.
+const counts = (e: any) => {
+  const rows = e.DB.episode_votes.filter((r: any) => sameSubject(r, SUBJ));
+  return {
+    n_voters: rows.length,
+    n_ratings: rows.filter((r: any) => r.rating != null).length,
+    rating_sum: rows.reduce((sum: number, r: any) => sum + (r.rating ?? 0), 0),
+  };
+};
+const option = (e: any, kind: string, id: string) => {
+  const rows = e.DB.episode_votes.filter((r: any) => sameSubject(r, SUBJ));
+  const n =
+    kind === "emotion"
+      ? rows.filter((r: any) => splitEmotions(r.emotions).includes(id)).length
+      : rows.filter((r: any) => r.favourite_option_id === id).length;
+  return { n };
+};
 
 describe("episode poll", () => {
   it("an episode nobody voted on reads as zeroes, not an error", async () => {

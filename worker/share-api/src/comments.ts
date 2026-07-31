@@ -369,9 +369,10 @@ export async function loadFriendCommentEvents(
  * Reaction counts for a page of comments — one extra query per page, not per
  * comment, and reader-independent so it caches with the public list.
  *
- * Rows with `n = 0` are skipped rather than deleted when a reaction is removed:
- * deleting would need a second statement in the batch to establish that the row
- * hit zero, and an emoji at zero is indistinguishable from an absent one here.
+ * Counts are derived from `comment_reactions` with `COUNT(*)` + `GROUP BY` rather
+ * than kept in a materialised table: reacting is the noisiest write in the app, and
+ * a counter row per emoji doubled every one of those writes. The source table has a
+ * covering `(comment_id, emoji)` index so this is an index-only scan.
  */
 export async function loadReactionCounts(
   env: CommentsEnv,
@@ -381,7 +382,10 @@ export async function loadReactionCounts(
   if (ids.length === 0) return out;
   const placeholders = ids.map(() => "?").join(",");
   const { results } = await env.DB.prepare(
-    `SELECT comment_id, emoji, n FROM comment_reaction_counts WHERE comment_id IN (${placeholders}) AND n > 0`,
+    `SELECT comment_id, emoji, COUNT(*) AS n
+       FROM comment_reactions
+      WHERE comment_id IN (${placeholders})
+      GROUP BY comment_id, emoji`,
   )
     .bind(...ids)
     .all<{ comment_id: string; emoji: string; n: number }>();
@@ -743,52 +747,6 @@ async function loadMyReactions(env: CommentsEnv, s: Subject, userId: string): Pr
 
 // ── Writing ─────────────────────────────────────────────────────────────────
 
-/**
- * Does this row contribute to `comment_counts.n_public`?
- *
- * Public only. Including friends-only comments leaks that private ones exist and
- * shows a number the reader cannot reconcile with what they see.
- */
-function countable(r: {
-  visibility: string;
-  hidden_at: number | null;
-  deleted_at: number | null;
-  body: string;
-  media_id: string | null;
-}): boolean {
-  return (
-    r.visibility === "public" &&
-    r.hidden_at == null &&
-    r.deleted_at == null &&
-    (r.body !== "" || r.media_id != null)
-  );
-}
-
-/**
- * The `comment_counts` upsert for a ±1 change, or null when nothing moved.
- *
- * **Always batched with the write it accounts for.** D1 batches are transactional,
- * so the counter cannot diverge from the rows — and a counter that drifts is worse
- * than no counter, because nothing ever recomputes it.
- */
-export function countStatement(env: CommentsEnv, s: Subject, delta: number): D1PreparedStatement | null {
-  if (delta === 0) return null;
-  if (delta > 0) {
-    return env.DB.prepare(
-      `INSERT INTO comment_counts (tmdb_id, media_type, season, episode, n_public)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(tmdb_id, media_type, season, episode)
-       DO UPDATE SET n_public = n_public + ?`,
-    ).bind(s.tmdbId, s.mediaType, s.season, s.episode, delta, delta);
-  }
-  // `MAX(…, 0)` is a floor, not a fix: a negative count would be a bug, but one
-  // that renders as "-1 comments" rather than staying invisible until someone looks.
-  return env.DB.prepare(
-    `UPDATE comment_counts SET n_public = MAX(n_public + ?, 0)
-      WHERE tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?`,
-  ).bind(delta, s.tmdbId, s.mediaType, s.season, s.episode);
-}
-
 /** Per-author hourly cap, the same shape as the friend-request limiter. */
 async function rateLimited(env: CommentsEnv, userId: string): Promise<boolean> {
   const limit = Number(env.COMMENTS_PER_HOUR ?? DEFAULT_COMMENTS_PER_HOUR);
@@ -900,19 +858,6 @@ export async function handlePostComment(
   if (!existing && (await rateLimited(env, session.userId))) return json({ error: "rate_limited" }, 429);
 
   const now = Date.now();
-  // A hidden comment stays hidden through an edit: letting an author clear
-  // `hidden_at` by editing would make moderation a suggestion.
-  const after = {
-    visibility,
-    hidden_at: existing?.hidden_at ?? null,
-    deleted_at: null,
-    body,
-    media_id: media.id,
-  };
-  const before = existing
-    ? countable(existing)
-    : false;
-  const delta = (countable(after) ? 1 : 0) - (before ? 1 : 0);
 
   const statements: D1PreparedStatement[] = [];
   if (existing) {
@@ -971,8 +916,6 @@ export async function handlePostComment(
     );
   }
 
-  const count = countStatement(env, subject, delta);
-  if (count) statements.push(count);
   await env.DB.batch(statements);
 
   // ⚠️ **Only on a NEW comment.** Editing is allowed forever, so notifying on every
@@ -1065,12 +1008,6 @@ export async function handleDeleteComment(
   // 204 even for an unknown id, so this cannot be used to probe which ids exist.
   if (!row) return noContent();
 
-  const subject: Subject = {
-    tmdbId: row.tmdb_id,
-    mediaType: row.media_type as "movie" | "show",
-    season: row.season,
-    episode: row.episode,
-  };
   const statements: D1PreparedStatement[] = [
     env.DB.prepare("UPDATE comments SET deleted_at = ?, updated_at = ? WHERE id = ? AND author_id = ?").bind(
       Date.now(),
@@ -1079,10 +1016,7 @@ export async function handleDeleteComment(
       session.userId,
     ),
     env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM comment_reaction_counts WHERE comment_id = ?").bind(id),
   ];
-  const count = countStatement(env, subject, countable(row) ? -1 : 0);
-  if (count) statements.push(count);
   await env.DB.batch(statements);
   return noContent();
 }
@@ -1094,12 +1028,9 @@ export async function handleDeleteComment(
  * reaction. `DELETE` on the same path removes it.
  *
  * One reaction per user per comment, changeable, which is why the PK is
- * `(comment_id, user_id)` and a change is a decrement plus an increment rather
- * than a second row.
- *
- * **Counts move by atomic upsert, never a JSON blob.** `ON CONFLICT DO UPDATE SET
- * n = n + 1` is atomic; a `reactions_json` column on `comments` would be a
- * read-modify-write and WILL lose reactions under concurrency.
+ * `(comment_id, user_id)` and a change overwrites the row rather than adding a
+ * second one. Counts are not stored — they are derived on read from these rows
+ * (see [loadReactionCounts]), so a reaction is a single row write and nothing more.
  *
  * You may only react to a comment you may read — otherwise reacting becomes an
  * oracle for the existence and id of friends-only comments.
@@ -1142,16 +1073,6 @@ export async function handleReactToComment(
   if (mine?.emoji === emoji) return noContent(); // idempotent re-tap
 
   const statements: D1PreparedStatement[] = [];
-  // The old count comes down first. Doing it after the insert would be fine
-  // inside a transaction, but reading it in this order keeps the no-change case
-  // (handled above) from ever emitting a statement pair that nets to zero.
-  if (mine) {
-    statements.push(
-      env.DB
-        .prepare("UPDATE comment_reaction_counts SET n = MAX(n - 1, 0) WHERE comment_id = ? AND emoji = ?")
-        .bind(id, mine.emoji),
-    );
-  }
   if (removing) {
     statements.push(
       env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ? AND user_id = ?").bind(id, session.userId),
@@ -1165,12 +1086,6 @@ export async function handleReactToComment(
            ON CONFLICT(comment_id, user_id) DO UPDATE SET emoji = excluded.emoji, created_at = excluded.created_at`,
         )
         .bind(id, session.userId, emoji, Date.now()),
-      env.DB
-        .prepare(
-          `INSERT INTO comment_reaction_counts (comment_id, emoji, n) VALUES (?, ?, 1)
-           ON CONFLICT(comment_id, emoji) DO UPDATE SET n = n + 1`,
-        )
-        .bind(id, emoji),
     );
   }
   await env.DB.batch(statements);
@@ -1221,7 +1136,7 @@ async function notifyReaction(
   if (!claimed.meta?.changes) return;
 
   const tally = await env.DB.prepare(
-    "SELECT COALESCE(SUM(n), 0) AS n FROM comment_reaction_counts WHERE comment_id = ?",
+    "SELECT COUNT(*) AS n FROM comment_reactions WHERE comment_id = ?",
   )
     .bind(comment.id)
     .first<{ n: number }>();
@@ -1373,27 +1288,15 @@ export async function handleReportComment(
 }
 
 /**
- * Hide or restore a comment, moving `n_public` with it in the same batch.
+ * Hide or restore a comment.
  *
- * Shared by the auto-hide threshold and the admin action, because getting the
- * counter right in one of those two places and not the other is exactly how a
- * counter drifts.
+ * Shared by the auto-hide threshold and the admin action so the two paths cannot
+ * diverge.
  */
 export async function setHidden(env: CommentsEnv, row: CommentRow, hidden: boolean): Promise<void> {
-  const subject: Subject = {
-    tmdbId: row.tmdb_id,
-    mediaType: row.media_type as "movie" | "show",
-    season: row.season,
-    episode: row.episode,
-  };
-  const was = countable(row);
-  const now = countable({ ...row, hidden_at: hidden ? Date.now() : null });
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare("UPDATE comments SET hidden_at = ? WHERE id = ?").bind(hidden ? Date.now() : null, row.id),
-  ];
-  const count = countStatement(env, subject, (now ? 1 : 0) - (was ? 1 : 0));
-  if (count) statements.push(count);
-  await env.DB.batch(statements);
+  await env.DB.prepare("UPDATE comments SET hidden_at = ? WHERE id = ?")
+    .bind(hidden ? Date.now() : null, row.id)
+    .run();
 }
 
 /**

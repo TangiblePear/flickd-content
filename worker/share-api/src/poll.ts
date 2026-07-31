@@ -2,14 +2,14 @@
  * Episode community poll — an app-wide average rating, plus the share of voters who
  * picked each emotion and each character.
  *
- * ## Why there are three tables and not one
+ * ## One table, aggregated on read
  *
- * `episode_votes` exists so a vote is changeable and one-per-user; it is **never read
- * by the display**. The display reads `episode_vote_counts` (one row) and
- * `episode_option_counts` (one row per option with at least one vote). `COUNT(*)`
- * would scan every vote on the episode, on every page open, for every reader who
- * never votes — which is the cost this design exists to avoid, the same argument the
- * comments counters were built on.
+ * `episode_votes` is the whole poll: one changeable row per user, and every total is
+ * derived from it with `COUNT`/`GROUP BY` at read time. The materialised counter
+ * tables that used to front this were dropped — voting is a hot write and each vote
+ * touched several counter rows, which is exactly the D1 write volume this removes. The
+ * read is protected by the 60-second edge cache below and an index on the subject, so
+ * the aggregate scan runs at most once per subject per minute per colo.
  *
  * ## The percentages are computed on the CLIENT
  *
@@ -76,12 +76,6 @@ export interface VoteInput {
   favouriteOptionId: string | null;
 }
 
-interface VoteRow {
-  rating: number | null;
-  emotions: string;
-  favourite_option_id: string | null;
-}
-
 // ── Reading ─────────────────────────────────────────────────────────────────
 
 export async function loadPoll(
@@ -89,7 +83,10 @@ export async function loadPoll(
   s: Subject,
 ): Promise<{ totals: PollTotals; options: PollOption[] }> {
   const totalsRow = await env.DB.prepare(
-    `SELECT n_voters, n_ratings, rating_sum FROM episode_vote_counts
+    `SELECT COUNT(*) AS n_voters,
+            COUNT(rating) AS n_ratings,
+            COALESCE(SUM(rating), 0) AS rating_sum
+       FROM episode_votes
       WHERE tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?`,
   )
     .bind(s.tmdbId, s.mediaType, s.season, s.episode)
@@ -104,18 +101,50 @@ export async function loadPoll(
   };
   if (totals.nVoters === 0) return { totals, options: [] };
 
-  const { results } = await env.DB.prepare(
-    `SELECT kind, option_id, n FROM episode_option_counts
-      WHERE tmdb_id = ? AND media_type = ? AND season = ? AND episode = ? AND n > 0`,
+  // Character/person options: one GROUP BY over the favourite column.
+  const { results: personResults } = await env.DB.prepare(
+    `SELECT 'person' AS kind, favourite_option_id AS option_id, COUNT(*) AS n
+       FROM episode_votes
+      WHERE tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?
+        AND favourite_option_id IS NOT NULL
+      GROUP BY favourite_option_id`,
   )
     .bind(s.tmdbId, s.mediaType, s.season, s.episode)
     .all<{ kind: string; option_id: string; n: number }>();
 
-  const options = (results ?? []).map((r) => ({
-    kind: r.kind as OptionKind,
-    optionId: r.option_id,
-    n: r.n,
-  }));
+  // Emotions are stored comma-joined in one column, so counting each one means
+  // splitting the string. A recursive CTE peels one emotion off the front per step;
+  // the leading '' seed row is filtered out by `emotion <> ''`.
+  const { results: emotionResults } = await env.DB.prepare(
+    `WITH split(emotion, rest) AS (
+       SELECT '', emotions || ','
+         FROM episode_votes
+        WHERE tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?
+          AND emotions IS NOT NULL AND emotions <> ''
+       UNION ALL
+       SELECT SUBSTR(rest, 1, INSTR(rest, ',') - 1),
+              SUBSTR(rest, INSTR(rest, ',') + 1)
+         FROM split WHERE rest <> ''
+     )
+     SELECT 'emotion' AS kind, emotion AS option_id, COUNT(*) AS n
+       FROM split WHERE emotion <> ''
+      GROUP BY emotion`,
+  )
+    .bind(s.tmdbId, s.mediaType, s.season, s.episode)
+    .all<{ kind: string; option_id: string; n: number }>();
+
+  const options: PollOption[] = [
+    ...(emotionResults ?? []).map((r) => ({
+      kind: r.kind as OptionKind,
+      optionId: r.option_id,
+      n: r.n,
+    })),
+    ...(personResults ?? []).map((r) => ({
+      kind: r.kind as OptionKind,
+      optionId: r.option_id,
+      n: r.n,
+    })),
+  ];
   return { totals, options };
 }
 
@@ -218,37 +247,15 @@ export function parseVote(payload: unknown): VoteInput | null {
   let favouriteOptionId: string | null = null;
   if (p.favouriteOptionId != null) {
     if (typeof p.favouriteOptionId !== "string") return null;
-    // ⚠️ Validated, not trusted: it becomes a PRIMARY KEY value in
-    // `episode_option_counts`, and the client is not the only thing that can send it.
-    // The charset is also what keeps the key bounded -- an unbounded id would be an
-    // unbounded index entry. (The kind/id packing below joins on NUL, which no input
-    // can contain, so that separator is not what this is defending.)
+    // ⚠️ Validated, not trusted: it is stored on `episode_votes` and grouped
+    // on to derive the per-character counts, and the client is not the only thing that
+    // can send it. The charset is also what keeps the value bounded -- an unbounded id
+    // would be an unbounded index entry.
     if (!/^[A-Z]{2,12}:[cp][0-9]{1,12}$/.test(p.favouriteOptionId)) return null;
     favouriteOptionId = p.favouriteOptionId;
   }
 
   return { rating, emotions, favouriteOptionId };
-}
-
-/** The options a vote contributes, as `kind`/`id` pairs. */
-function optionsOf(v: { emotions: string[]; favouriteOptionId: string | null }): Array<[OptionKind, string]> {
-  const out: Array<[OptionKind, string]> = v.emotions.map((e) => ["emotion" as OptionKind, e]);
-  // Still `person` as the kind: it is the slot for "the one thing you picked out of the
-  // cast", and renaming it would orphan every emotion-free reader for no gain.
-  if (v.favouriteOptionId != null) out.push(["person", v.favouriteOptionId]);
-  return out;
-}
-
-function optionDelta(env: PollEnv, s: Subject, kind: OptionKind, id: string, delta: number) {
-  // Upsert rather than UPDATE: the first vote for an option has no row yet, and
-  // `MAX(0, …)` keeps a decrement from ever going negative if a vote is somehow
-  // retracted twice.
-  return env.DB.prepare(
-    `INSERT INTO episode_option_counts (tmdb_id, media_type, season, episode, kind, option_id, n)
-     VALUES (?,?,?,?,?,?,?)
-     ON CONFLICT(tmdb_id, media_type, season, episode, kind, option_id)
-       DO UPDATE SET n = MAX(0, n + ?)`,
-  ).bind(s.tmdbId, s.mediaType, s.season, s.episode, kind, id, Math.max(0, delta), delta);
 }
 
 /**
@@ -258,20 +265,11 @@ function optionDelta(env: PollEnv, s: Subject, kind: OptionKind, id: string, del
  * together, because they are captured on one screen and splitting them would make
  * three round trips out of one intent.
  *
- * ## Counters are adjusted by DIFF, in the same batch as the vote
+ * ## One write, no counters
  *
- * Changing a vote needs the old one, so this reads the existing row first and then
- * issues one `DB.batch()` of decrement-old → increment-new → upsert-vote. D1 batches
- * are transactional, so the counts cannot drift from the votes they summarise.
- *
- * The read-then-batch has a theoretical race when the same user votes from two of
- * their own devices at once. Accepted rather than defended against: the blast radius
- * is one user's own counts being off by one, and locking costs more than that is
- * worth.
- *
- * ⚠️ `n_voters` increments only when the vote row is **new**. Incrementing on an edit
- * would inflate the denominator every time someone changed their mind, which is
- * exactly the number every percentage is divided by.
+ * The vote row is the only write. Totals and per-option shares are derived from
+ * `episode_votes` on read ([loadPoll]), so changing a vote is a single upsert with no
+ * counter arithmetic to keep in sync - and no read-then-batch race to reason about.
  */
 export async function handlePutVote(
   req: Request,
@@ -281,92 +279,35 @@ export async function handlePutVote(
 ): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
-  // A movie has no episodes; a title-level vote would fork a counter nothing reads.
+  // A movie has no episodes; a title-level vote would fork a poll nothing reads.
   if (s.season < 0 || s.episode < 0) return json({ error: "invalid_payload" }, 400);
 
   const vote = parseVote(await req.json().catch(() => null));
   if (!vote) return json({ error: "invalid_payload" }, 400);
 
-  const key = [s.tmdbId, s.mediaType, s.season, s.episode] as const;
-  const existing = await env.DB.prepare(
-    `SELECT rating, emotions, favourite_option_id FROM episode_votes
-      WHERE user_id = ? AND tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?`,
+  // Single upsert - the only D1 write. Everything else is derived on read.
+  await env.DB.prepare(
+    `INSERT INTO episode_votes
+       (user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_option_id, updated_at)
+     VALUES (?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(user_id, tmdb_id, media_type, season, episode) DO UPDATE SET
+       rating = excluded.rating,
+       emotions = excluded.emotions,
+       favourite_option_id = excluded.favourite_option_id,
+       updated_at = excluded.updated_at`,
   )
-    .bind(session.userId, ...key)
-    .first<VoteRow>();
-
-  const old = existing
-    ? {
-        rating: existing.rating,
-        emotions: existing.emotions ? existing.emotions.split(",").filter(Boolean) : [],
-        favouriteOptionId: existing.favourite_option_id,
-      }
-    : null;
-
-  const now = Date.now();
-  const statements: D1PreparedStatement[] = [];
-
-  // ── Totals ──
-  const voterDelta = old ? 0 : 1;
-  const ratingCountDelta = (vote.rating != null ? 1 : 0) - (old?.rating != null ? 1 : 0);
-  const ratingSumDelta = (vote.rating ?? 0) - (old?.rating ?? 0);
-  statements.push(
-    env.DB.prepare(
-      `INSERT INTO episode_vote_counts (tmdb_id, media_type, season, episode, n_voters, n_ratings, rating_sum)
-       VALUES (?,?,?,?,?,?,?)
-       ON CONFLICT(tmdb_id, media_type, season, episode) DO UPDATE SET
-         n_voters   = MAX(0, n_voters + ?),
-         n_ratings  = MAX(0, n_ratings + ?),
-         rating_sum = MAX(0, rating_sum + ?)`,
-    ).bind(
-      ...key,
-      Math.max(0, voterDelta),
-      Math.max(0, ratingCountDelta),
-      Math.max(0, ratingSumDelta),
-      voterDelta,
-      ratingCountDelta,
-      ratingSumDelta,
-    ),
-  );
-
-  // ── Options, by set difference so an unchanged pick costs nothing ──
-  const before = new Set(optionsOf(old ?? { emotions: [], favouriteOptionId: null }).map((o) => o.join(" ")));
-  const after = new Set(optionsOf(vote).map((o) => o.join(" ")));
-  for (const k of before) {
-    if (!after.has(k)) {
-      const [kind, id] = k.split(" ");
-      statements.push(optionDelta(env, s, kind as OptionKind, id, -1));
-    }
-  }
-  for (const k of after) {
-    if (!before.has(k)) {
-      const [kind, id] = k.split(" ");
-      statements.push(optionDelta(env, s, kind as OptionKind, id, 1));
-    }
-  }
-
-  // ── The vote itself ──
-  statements.push(
-    env.DB.prepare(
-      `INSERT INTO episode_votes
-         (user_id, tmdb_id, media_type, season, episode, rating, emotions, favourite_option_id, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)
-       ON CONFLICT(user_id, tmdb_id, media_type, season, episode) DO UPDATE SET
-         rating = excluded.rating,
-         emotions = excluded.emotions,
-         favourite_option_id = excluded.favourite_option_id,
-         updated_at = excluded.updated_at`,
-    ).bind(
+    .bind(
       session.userId,
-      ...key,
+      s.tmdbId,
+      s.mediaType,
+      s.season,
+      s.episode,
       vote.rating,
       vote.emotions.join(","),
       vote.favouriteOptionId,
-      now,
-    ),
-  );
-
-  await env.DB.batch(statements);
+      Date.now(),
+    )
+    .run();
 
   // ⚠️ Drop the edge copy, or the voter can be served their own pre-vote numbers.
   // Device-found 2026-07-29: open an episode (the read is cached for 60s), vote, come

@@ -33,9 +33,7 @@ const MOVIE = { tmdbId: 603, mediaType: "movie" as const, season: -1, episode: -
  */
 class FakeD1 {
   comments: any[] = [];
-  comment_counts: any[] = [];
   comment_reactions: any[] = [];
-  comment_reaction_counts: any[] = [];
   friendships: any[] = [];
   blocks: any[] = [];
   profiles: any[] = [];
@@ -50,12 +48,19 @@ class FakeD1 {
     for (const s of stmts) out.push(await s.run());
     return out;
   }
+  /** The public comment count, now DERIVED from `comments` exactly as the app reads it. */
   count(tmdbId: number, mediaType: string, season = -1, episode = -1) {
-    return (
-      this.comment_counts.find(
-        (c) => c.tmdb_id === tmdbId && c.media_type === mediaType && c.season === season && c.episode === episode,
-      )?.n_public ?? 0
-    );
+    return this.comments.filter(
+      (c) =>
+        c.tmdb_id === tmdbId &&
+        c.media_type === mediaType &&
+        c.season === season &&
+        c.episode === episode &&
+        c.visibility === "public" &&
+        c.hidden_at == null &&
+        c.deleted_at == null &&
+        (c.body !== "" || c.media_id != null),
+    ).length;
   }
 }
 
@@ -120,10 +125,8 @@ class FakeStmt {
       const p = this.db.profiles.find((x) => x.user_id === a[0]);
       return p ? ({ display_name: p.display_name } as T) : null;
     }
-    if (s.startsWith("SELECT COALESCE(SUM(n), 0) AS n FROM comment_reaction_counts")) {
-      const n = this.db.comment_reaction_counts
-        .filter((r) => r.comment_id === a[0])
-        .reduce((sum, r) => sum + r.n, 0);
+    if (s.startsWith("SELECT COUNT(*) AS n FROM comment_reactions")) {
+      const n = this.db.comment_reactions.filter((r) => r.comment_id === a[0]).length;
       return { n } as T;
     }
     if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, author_id, body")) {
@@ -183,9 +186,17 @@ class FakeStmt {
       const ids = new Set(a.slice(1));
       return { results: this.db.comment_translations.filter((t) => t.lang === a[0] && ids.has(t.comment_id)) as T[] };
     }
-    if (s.startsWith("SELECT comment_id, emoji, n FROM comment_reaction_counts")) {
+    if (s.startsWith("SELECT comment_id, emoji, COUNT(*) AS n FROM comment_reactions")) {
       const ids = new Set(a);
-      return { results: this.db.comment_reaction_counts.filter((r) => ids.has(r.comment_id) && r.n > 0) as T[] };
+      const by = new Map<string, { comment_id: string; emoji: string; n: number }>();
+      for (const r of this.db.comment_reactions) {
+        if (!ids.has(r.comment_id)) continue;
+        const k = `${r.comment_id} ${r.emoji}`;
+        const row = by.get(k) ?? { comment_id: r.comment_id, emoji: r.emoji, n: 0 };
+        row.n += 1;
+        by.set(k, row);
+      }
+      return { results: [...by.values()] as T[] };
     }
     if (s.startsWith("SELECT r.comment_id, r.emoji")) {
       const ids = new Set(this.db.comments.filter(this.onSubject(a.slice(1))).map((c) => c.id));
@@ -260,17 +271,6 @@ class FakeStmt {
       else this.db.comment_reactions.push({ comment_id: a[0], user_id: a[1], emoji: a[2], created_at: a[3] });
       return { success: true, meta: { changes: 1 } };
     }
-    if (s.startsWith("INSERT INTO comment_reaction_counts")) {
-      const row = this.db.comment_reaction_counts.find((r) => r.comment_id === a[0] && r.emoji === a[1]);
-      if (row) row.n += 1;
-      else this.db.comment_reaction_counts.push({ comment_id: a[0], emoji: a[1], n: 1 });
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.startsWith("UPDATE comment_reaction_counts SET n = MAX(n - 1, 0)")) {
-      const row = this.db.comment_reaction_counts.find((r) => r.comment_id === a[0] && r.emoji === a[1]);
-      if (row) row.n = Math.max(row.n - 1, 0);
-      return { success: true, meta: { changes: row ? 1 : 0 } };
-    }
     if (s.startsWith("DELETE FROM comment_reactions WHERE comment_id = ? AND user_id")) {
       this.db.comment_reactions = this.db.comment_reactions.filter(
         (r) => !(r.comment_id === a[0] && r.user_id === a[1]),
@@ -280,25 +280,6 @@ class FakeStmt {
     if (s.startsWith("DELETE FROM comment_reactions")) {
       this.db.comment_reactions = this.db.comment_reactions.filter((r) => r.comment_id !== a[0]);
       return { success: true, meta: { changes: 1 } };
-    }
-    if (s.startsWith("DELETE FROM comment_reaction_counts")) {
-      this.db.comment_reaction_counts = this.db.comment_reaction_counts.filter((r) => r.comment_id !== a[0]);
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.startsWith("INSERT INTO comment_counts")) {
-      const row = this.db.comment_counts.find(
-        (c) => c.tmdb_id === a[0] && c.media_type === a[1] && c.season === a[2] && c.episode === a[3],
-      );
-      if (row) row.n_public += a[5];
-      else this.db.comment_counts.push({ tmdb_id: a[0], media_type: a[1], season: a[2], episode: a[3], n_public: a[4] });
-      return { success: true, meta: { changes: 1 } };
-    }
-    if (s.startsWith("UPDATE comment_counts SET n_public")) {
-      const row = this.db.comment_counts.find(
-        (c) => c.tmdb_id === a[1] && c.media_type === a[2] && c.season === a[3] && c.episode === a[4],
-      );
-      if (row) row.n_public = Math.max(row.n_public + a[0], 0);
-      return { success: true, meta: { changes: row ? 1 : 0 } };
     }
     throw new Error(`FakeD1: unhandled run() ${s}`);
   }
@@ -631,10 +612,9 @@ describe("writing", () => {
     expect(e.DB.comments).toHaveLength(1);
   });
 
-  it("moves the counter when an edit changes visibility, in both directions", async () => {
+  it("drops from the public count when an edit changes visibility, in both directions", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: A, visibility: "public" });
-    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
 
     await handlePostComment(post("/api/comments", body({ visibility: "friends" }), "tok-a"), e, ctx);
     expect(e.DB.count(603, "movie")).toBe(0);
@@ -735,15 +715,16 @@ describe("reacting", () => {
     });
   const unreact = (e: any, id: string, token: string) =>
     handleReactToComment(id, unreactRequest(id, token), e, ctx);
+  // Counts are DERIVED from the reaction rows now, exactly as loadReactionCounts does.
   const countOf = (e: any, emoji: string) =>
-    e.DB.comment_reaction_counts.find((r: any) => r.emoji === emoji)?.n ?? 0;
+    e.DB.comment_reactions.filter((r: any) => r.emoji === emoji).length;
 
-  it("records the reaction and its count together", async () => {
+  it("records the reaction, and its count derives from the row", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: B });
     expect((await react(e, "C1", "🔥", "tok-a")).status).toBe(204);
     expect(e.DB.comment_reactions).toHaveLength(1);
-    expect(e.DB.comment_reaction_counts).toEqual([{ comment_id: "C1", emoji: "🔥", n: 1 }]);
+    expect(countOf(e, "🔥")).toBe(1);
   });
 
   it("moves the count when the reaction CHANGES, rather than adding a second row", async () => {
@@ -801,7 +782,10 @@ describe("reacting", () => {
   it("notifies the author with a COUNT and no reactor identity", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: B });
-    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "🔥", n: 7 });
+    // Seven prior reactions from other users; the eighth arrives below.
+    for (let i = 0; i < 7; i++) {
+      e.DB.comment_reactions.push({ comment_id: "C1", user_id: `seed-${i}`, emoji: "🔥", created_at: 0 });
+    }
     const n = spy();
 
     await handleReactToComment("C1", post("/api/comments/C1/reaction", { emoji: "🔥" }, "tok-a"), e, ctx, n.notify);
@@ -877,7 +861,9 @@ describe("reacting", () => {
   it("surfaces counts on the public list without revealing who reacted", async () => {
     const e = env();
     seed(e.DB, { id: "C1" });
-    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "❤️", n: 3 });
+    for (let i = 0; i < 3; i++) {
+      e.DB.comment_reactions.push({ comment_id: "C1", user_id: `u-${i}`, emoji: "❤️", created_at: 0 });
+    }
     const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
     const [c] = (await res.json()).comments;
     expect(c.reactions).toEqual({ "❤️": 3 });
@@ -914,7 +900,6 @@ describe("reporting", () => {
     const e = await withSessions(env());
     e.REPORT_AUTOHIDE = "3";
     seed(e.DB, { id: "C1", author_id: B });
-    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
 
     await report(e, "C1", "abuse", "tok-a");
     // The same reporter again is a no-op, not a second vote.
@@ -934,7 +919,6 @@ describe("reporting", () => {
   it("BLURS at two spoiler reports instead of hiding — the counts never mix", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: B });
-    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
 
     await report(e, "C1", "spoiler", "tok-a");
     expect(e.DB.comments[0].spoiler).toBe(0);
@@ -993,17 +977,14 @@ describe("deleting", () => {
     expect(e.DB.comments[0].body).toBe("the reported text");
   });
 
-  it("decrements the counter and drops the comment's reactions", async () => {
+  it("removes the comment from the public count and drops its reactions", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: A });
-    e.DB.comment_counts.push({ tmdb_id: 603, media_type: "movie", season: -1, episode: -1, n_public: 1 });
     e.DB.comment_reactions.push({ comment_id: "C1", user_id: B, emoji: "👍", created_at: 0 });
-    e.DB.comment_reaction_counts.push({ comment_id: "C1", emoji: "👍", n: 1 });
 
     await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
     expect(e.DB.count(603, "movie")).toBe(0);
     expect(e.DB.comment_reactions).toEqual([]);
-    expect(e.DB.comment_reaction_counts).toEqual([]);
   });
 
   it("answers 204 for someone else's comment, so ids cannot be probed", async () => {
