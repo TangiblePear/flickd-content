@@ -46,6 +46,12 @@ export interface TelemetryBlock {
   gate?: unknown;
   adsConsent?: unknown;
   integrations?: unknown;
+  /**
+   * Sent as its own field rather than inside `integrations` because Kotlin cannot type
+   * a mixed boolean/string map. Folded into the same column here, as a slug value, so
+   * the rollup keeps WHICH provider was chosen instead of flattening it to "one was".
+   */
+  aiProvider?: unknown;
   features?: unknown;
 }
 
@@ -87,18 +93,22 @@ const MAX_KEYS = 64;
 const SLUG_RE = /^[A-Za-z0-9_.-]{1,24}$/;
 
 /** `{plex: true, trakt: true, aiProvider: "gemini"}` — booleans and slugs only. */
-function integrationsJson(v: unknown): string | null {
-  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+function integrationsJson(v: unknown, aiProvider: unknown): string | null {
   const out: Record<string, boolean | string> = {};
   let n = 0;
-  for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
-    if (n >= MAX_KEYS || !KEY_RE.test(k)) continue;
-    if (typeof raw === "boolean") out[k] = raw;
-    else if (typeof raw === "string" && SLUG_RE.test(raw.trim())) out[k] = raw.trim();
-    else continue;
-    n++;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    for (const [k, raw] of Object.entries(v as Record<string, unknown>)) {
+      if (n >= MAX_KEYS || !KEY_RE.test(k)) continue;
+      // Strings are accepted here too, even though the Android client sends them in
+      // their own field — a future platform may not have that type constraint.
+      if (typeof raw === "boolean") out[k] = raw;
+      else if (typeof raw === "string" && SLUG_RE.test(raw.trim())) out[k] = raw.trim();
+      else continue;
+      n++;
+    }
   }
-  return n > 0 ? JSON.stringify(out) : null;
+  if (typeof aiProvider === "string" && SLUG_RE.test(aiProvider.trim())) out.aiProvider = aiProvider.trim();
+  return Object.keys(out).length > 0 ? JSON.stringify(out) : null;
 }
 
 /** `{used: [...], counts: {...}}` — a set of surfaces touched, plus lifetime totals. */
@@ -200,7 +210,7 @@ export async function recordTelemetry(
       bool(b.premium),
       str(b.gate, 16),
       str(b.adsConsent, 16),
-      integrationsJson(b.integrations),
+      integrationsJson(b.integrations, b.aiProvider),
       featuresJson(b.features),
     )
     .run();

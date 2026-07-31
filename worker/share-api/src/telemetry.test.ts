@@ -111,7 +111,8 @@ const richBlock = {
   premium: true,
   gate: "consented",
   adsConsent: "obtained",
-  integrations: { plex: true, trakt: true, simkl: false, aiProvider: "gemini" },
+  integrations: { plex: true, trakt: true, simkl: false },
+  aiProvider: "gemini",
   features: { used: ["discover", "catchup"], counts: { watched: 412, saved: 30 } },
 };
 
@@ -245,8 +246,8 @@ describe("recordTelemetry", () => {
           trakt: "a".repeat(64),
           "bad-key!": true,
           nested: { a: 1 },
-          aiProvider: "gemini",
         },
+        aiProvider: "gemini",
         features: {
           used: ["discover", "not a key", "discover", 7],
           counts: { watched: 10, broken: -5, alsoBroken: "many" },
@@ -285,6 +286,7 @@ describe("maybeRollup", () => {
         premium: false,
         language: "en",
         integrations: { plex: true, jellyfin: true },
+        aiProvider: undefined,
         features: { used: ["discover"], counts: { watched: 88 } },
       },
       DAY1,
