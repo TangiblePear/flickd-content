@@ -69,6 +69,10 @@ class FakeStmt {
       const row = this.db.profile_stats.find((p) => p.user_id === this.args[0]);
       return row ? ({ stats: row.stats } as T) : null;
     }
+    if (s.startsWith("SELECT public_stats FROM profile_stats")) {
+      const row = this.db.profile_stats.find((p) => p.user_id === this.args[0]);
+      return row ? ({ public_stats: row.public_stats ?? null } as T) : null;
+    }
     if (s.startsWith("SELECT 1 AS hit FROM blocks")) {
       const [ba, bb, ca, cb] = this.args as string[];
       const hit = this.db.blocks.some(
@@ -139,10 +143,20 @@ class FakeStmt {
       else this.db.profiles.push(row);
       return { success: true };
     }
+    if (s.startsWith("INSERT INTO profile_stats (user_id, stats, public_stats, updated_at)")) {
+      const [user_id, stats, public_stats, updated_at] = this.args;
+      const at = this.db.profile_stats.findIndex((p) => p.user_id === user_id);
+      const row = { user_id, stats, public_stats, updated_at };
+      if (at >= 0) this.db.profile_stats[at] = row;
+      else this.db.profile_stats.push(row);
+      return { success: true };
+    }
     if (s.startsWith("INSERT INTO profile_stats")) {
       const [user_id, stats, updated_at] = this.args;
       const at = this.db.profile_stats.findIndex((p) => p.user_id === user_id);
-      const row = { user_id, stats, updated_at };
+      // Legacy path: public_stats is left as it was, never blanked.
+      const prev = this.db.profile_stats[at];
+      const row = { user_id, stats, public_stats: prev?.public_stats ?? null, updated_at };
       if (at >= 0) this.db.profile_stats[at] = row;
       else this.db.profile_stats.push(row);
       return { success: true };
@@ -469,6 +483,47 @@ describe("owner stats", () => {
     );
     expect(res.status).toBe(413);
   });
+
+  const putStats = (env: any, body: unknown) =>
+    handlePutMyStats(
+      authed("tok-owner", "/api/me/stats", { method: "PUT", body: JSON.stringify(body) }),
+      env,
+    );
+
+  it("stores both blobs from one envelope", async () => {
+    const env = await env0();
+    await putStats(env, { stats: { uniqueShows: 5 }, publicStats: { uniqueShows: 0 } });
+    const row = env.DB.profile_stats[0];
+    expect(JSON.parse(row.stats as string).uniqueShows).toBe(5);
+    expect(JSON.parse(row.public_stats as string).uniqueShows).toBe(0);
+  });
+
+  it("clears public_stats when sent null", async () => {
+    const env = await env0();
+    await putStats(env, { stats: { uniqueShows: 5 }, publicStats: { uniqueShows: 0 } });
+    await putStats(env, { stats: { uniqueShows: 5 }, publicStats: null });
+    expect(env.DB.profile_stats[0].public_stats).toBeNull();
+  });
+
+  /**
+   * Shipped Android builds send the bare snapshot and must keep working between the
+   * worker deploy and the app release. It is the friend stats; public_stats stays
+   * untouched, because those builds publish no public layout to match it to.
+   */
+  it("accepts a bare legacy body as the friend stats, leaving public_stats alone", async () => {
+    const env = await env0();
+    await putStats(env, { stats: { uniqueShows: 5 }, publicStats: { uniqueShows: 0 } });
+    await putStats(env, { uniqueShows: 7 });
+    const row = env.DB.profile_stats[0];
+    expect(JSON.parse(row.stats as string).uniqueShows).toBe(7);
+    expect(JSON.parse(row.public_stats as string).uniqueShows).toBe(0);
+  });
+
+  it("rejects an oversize publicStats", async () => {
+    const env = await env0();
+    const res = await putStats(env, { stats: { a: 1 }, publicStats: { blob: "x".repeat(20_000) } });
+    expect(res.status).toBe(413);
+  });
 });
 
 // ── Foreign profile reads ────────────────────────────────────────────────────
@@ -483,6 +538,82 @@ describe("foreign profile", () => {
     const res = await handleGetProfile(OWNER, authed("tok-other", `/api/profile/${OWNER}`), env);
     expect(res.status).toBe(200);
     expect((await res.json()).profile.displayName).toBe("Pear");
+  });
+
+  // ── The friend / stranger split ────────────────────────────────────────────
+  // A stranger and a friend read the same row and must receive different things.
+
+  const seedBothLayouts = async (env: any) => {
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "bio" }, { type: "recent_activity" }, { type: "owner_secret" }],
+        friendLayout: [{ type: "bio" }, { type: "recent_activity" }],
+        publicLayout: [{ type: "bio" }],
+      }),
+      env,
+    );
+    await handlePutMyStats(
+      authed("tok-owner", "/api/me/stats", {
+        method: "PUT",
+        body: JSON.stringify({
+          stats: { uniqueShows: 42, recentWatches: [{ tmdbId: 1, mediaType: "SHOW" }] },
+          publicStats: { uniqueShows: 0, recentWatches: [] },
+        }),
+      }),
+      env,
+    );
+  };
+
+  const foreignBody = async (env: any, token: string) =>
+    (await (await handleGetProfile(OWNER, authed(token, `/api/profile/${OWNER}`), env)).json()) as any;
+
+  it("serves public_layout and public_stats to a stranger", async () => {
+    const env = await env0();
+    await seedBothLayouts(env);
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.layout).toEqual([{ type: "bio" }]);
+    expect(body.stats.recentWatches).toEqual([]);
+    expect(body.stats.uniqueShows).toBe(0);
+  });
+
+  it("serves friend_layout and the full stats to a friend of a PUBLIC profile", async () => {
+    const env = await env0();
+    const [fa, fb] = friendshipKey(OWNER, OTHER);
+    env.DB.friendships.push({ user_a: fa, user_b: fb, state: "accepted" });
+    await seedBothLayouts(env);
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.layout).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(body.stats.uniqueShows).toBe(42);
+    expect(body.stats.recentWatches).toHaveLength(1);
+  });
+
+  it("never leaks the owner's unfiltered layout to a stranger", async () => {
+    const env = await env0();
+    await seedBothLayouts(env);
+    expect(JSON.stringify(await foreignBody(env, "tok-other"))).not.toContain("owner_secret");
+  });
+
+  /**
+   * NULL public_layout means "this client predates the field", so identity-only. Falling
+   * back to friend_layout would serve strangers a layout filtered under a consent given
+   * for FRIENDS — the exact thing the third column exists to prevent.
+   */
+  it("does NOT fall back to friend_layout when public_layout is null", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "bio" }],
+        friendLayout: [{ type: "bio" }],
+      }),
+      env,
+    );
+    const body = await foreignBody(env, "tok-other");
+    expect(env.DB.profiles[0].public_layout).toBeNull();
+    expect(body.profile.layout).toBeNull();
   });
 
   // The non-enumeration property: these two responses must be indistinguishable.
@@ -529,6 +660,10 @@ describe("foreign profile", () => {
    */
   it("serves a friend the FILTERED layout, and never the owner's", async () => {
     const env = await env0();
+    // OTHER must actually BE a friend now that the grant distinguishes them: a stranger
+    // on a public profile would correctly receive `public_layout` instead.
+    const [fa, fb] = friendshipKey(OWNER, OTHER);
+    env.DB.friendships.push({ user_a: fa, user_b: fb, state: "accepted" });
     await handlePutMyProfile(
       put("tok-owner", {
         displayName: "Pear",

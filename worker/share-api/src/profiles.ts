@@ -140,23 +140,32 @@ export function toWire(row: ProfileRow) {
   };
 }
 
+/** Which filtered view of a profile a foreign reader receives. */
+export type ForeignAudience = "friend" | "public";
+
 /**
  * Row → wire **for someone who is not the owner**.
  *
- * The only difference is `layout`, and it is the whole point: a foreign reader gets
- * `friend_layout` — already stripped of owner-only and unconsented-sensitive blocks by
- * the client that published it — under the same field name. The unfiltered `layout` is
- * not in the response at all, so no caller can read it by mistake. That is the safety
- * property; a flag saying "don't read this one" would not be.
+ * The only difference is `layout`, and it is the whole point: a foreign reader gets the
+ * layout matching their [audience] — `friend_layout` for a friend, `public_layout` for a
+ * stranger — both already stripped by the client that published them, under the same
+ * field name. The unfiltered `layout` is not in the response at all, so no caller can
+ * read it by mistake. That is the safety property; a flag saying "don't read this one"
+ * would not be.
  *
  * `null` when the owner's client predates the field, which is NOT "they have no blocks".
  * Readers must keep whatever they already had, or every friend of an un-updated client
  * flips to the default layout the first time this is read.
+ *
+ * **A null `public_layout` must never fall back to `friend_layout`.** That would serve
+ * strangers a layout filtered under a consent given for friends, which is the single
+ * outcome this split exists to prevent.
  */
-export function toForeignWire(row: ProfileRow) {
+export function toForeignWire(row: ProfileRow, audience: ForeignAudience) {
+  const raw = audience === "friend" ? row.friend_layout : row.public_layout;
   return {
     ...toWire(row),
-    layout: row.friend_layout == null ? null : jsonColumn<unknown[]>(row.friend_layout, []),
+    layout: raw == null ? null : jsonColumn<unknown[]>(raw, []),
   };
 }
 
@@ -171,6 +180,22 @@ async function readStats(env: ProfileEnv, userId: string): Promise<unknown | nul
     .bind(userId)
     .first<{ stats: string | null }>();
   return row ? jsonColumn<unknown | null>(row.stats, null) : null;
+}
+
+/**
+ * The stats blob matching a foreign reader's [audience].
+ *
+ * Serving `stats` to everyone who passes `canView` was safe only while friends were the
+ * sole foreign readers. A stranger's client would otherwise receive `topRated`,
+ * `currentlyWatching` and `recentWatches` in the JSON even though its layout hides them —
+ * putting the privacy boundary in the viewer's renderer rather than on the server.
+ */
+async function readStatsFor(env: ProfileEnv, userId: string, audience: ForeignAudience): Promise<unknown | null> {
+  if (audience === "friend") return readStats(env, userId);
+  const row = await env.DB.prepare("SELECT public_stats FROM profile_stats WHERE user_id = ?")
+    .bind(userId)
+    .first<{ public_stats: string | null }>();
+  return row ? jsonColumn<unknown | null>(row.public_stats, null) : null;
 }
 
 // ── Incoming payload validation ──────────────────────────────────────────────
@@ -362,7 +387,16 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   return json({ version, updatedAt: now }, 200, { ETag: `"${version}"` });
 }
 
-/** PUT /api/me/stats — derived data, versionless. Rewritten wholesale by the owner. */
+/**
+ * PUT /api/me/stats — derived data, versionless. Rewritten wholesale by the owner.
+ *
+ * Takes `{ stats, publicStats }`. Both blobs travel in ONE request so the friend and
+ * public views cannot diverge; two endpoints would let one land without the other.
+ *
+ * **A bare snapshot is a pre-public-profiles client.** Those builds are in the wild and
+ * keep sending the unwrapped object, so it is stored as the friend stats and
+ * `public_stats` is left untouched — they have no public layout to match it to.
+ */
 export async function handlePutMyStats(req: Request, env: ProfileEnv, ctx?: ExecutionContext): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return unauthorized();
@@ -372,8 +406,38 @@ export async function handlePutMyStats(req: Request, env: ProfileEnv, ctx?: Exec
   } catch {
     return json({ error: "invalid_json" }, 400);
   }
-  const serialized = JSON.stringify(body ?? null);
+
+  const has = (key: string) =>
+    body != null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, key);
+  const isEnvelope = has("stats") || has("publicStats");
+  const envelope = body as Record<string, unknown> | null;
+
+  const serialized = JSON.stringify((isEnvelope ? envelope!.stats : body) ?? null);
   if (serialized.length > MAX_STATS_BYTES) return json({ error: "too_large" }, 413);
+
+  // `undefined` = leave the column alone (legacy client). `null` = clear it, which is what
+  // a profile leaving public sends.
+  const publicSerialized = !isEnvelope
+    ? undefined
+    : envelope!.publicStats == null
+      ? null
+      : JSON.stringify(envelope!.publicStats);
+  if (publicSerialized != null && publicSerialized.length > MAX_STATS_BYTES) {
+    return json({ error: "too_large" }, 413);
+  }
+
+  if (isEnvelope) {
+    const at = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO profile_stats (user_id, stats, public_stats, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET stats = excluded.stats,
+         public_stats = excluded.public_stats, updated_at = excluded.updated_at`,
+    )
+      .bind(session.userId, serialized, publicSerialized, at)
+      .run();
+    return json({ updatedAt: at });
+  }
+
   const now = Date.now();
   await env.DB.prepare(
     `INSERT INTO profile_stats (user_id, stats, updated_at) VALUES (?, ?, ?)
@@ -402,10 +466,15 @@ export async function handleGetProfile(
 
   const row = await readProfileRow(env, userId);
   if (!row) return notFound();
-  if (!(await canView(env, session.userId, userId, parseVisibility(row.visibility)))) return notFound();
+  const grant = await canView(env, session.userId, userId, parseVisibility(row.visibility));
+  if (grant === null) return notFound();
 
+  // "owner" only reaches here if the owner uses the foreign route (they normally read
+  // /api/me/profile). Mapping it explicitly keeps it out of the `public` branch, which
+  // would otherwise show them the stranger view of themselves.
+  const audience: ForeignAudience = grant === "public" ? "public" : "friend";
   // toForeignWire, NOT toWire: the latter carries the owner's unfiltered layout.
-  return json({ profile: toForeignWire(row), stats: await readStats(env, userId) });
+  return json({ profile: toForeignWire(row, audience), stats: await readStatsFor(env, userId, audience) });
 }
 
 /**
