@@ -97,7 +97,8 @@ const DEFAULT_COMMENTS_PER_HOUR = 30;
 export const PUBLIC_CACHE_SECONDS = 60;
 
 const MEDIA_KINDS = new Set(["gif", "image"]);
-const MEDIA_PROVIDERS = new Set(["giphy", "r2"]);
+// "giphy" stays valid for historical rows; "klipy" is the current GIF provider.
+const MEDIA_PROVIDERS = new Set(["giphy", "klipy", "r2"]);
 
 /**
  * The six. Fixed, not a picker.

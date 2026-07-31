@@ -41,10 +41,11 @@ interface Env {
   // Per-author hourly comment cap. Config rather than a constant so it tunes
   // without a deploy, the same shape as RATE_LIMIT_PER_HOUR.
   COMMENTS_PER_HOUR?: string;
-  // GIF picker upstream. A SECRET (`wrangler secret put GIPHY_API_KEY`), never a
-  // var, and never in the APK: the key is attached to a paid negotiated tier and
-  // an APK key is trivially extractable. Unset ⇒ /api/giphy/* answers 503.
-  GIPHY_API_KEY?: string;
+  // GIF picker upstream (KLIPY). A SECRET (`wrangler secret put KLIPY_API_KEY`),
+  // never a var, and never in the APK: KLIPY puts the key in the URL path, so a
+  // direct client would ship it, and an APK key is trivially extractable. The
+  // route path stays /api/giphy/* for old-build compatibility. Unset ⇒ 503.
+  KLIPY_API_KEY?: string;
   // Shared with the Pages admin panel, which proxies comment moderation here
   // rather than reaching into D1 itself. A SECRET:
   //   wrangler secret put ADMIN_KEY
@@ -84,7 +85,7 @@ import { handleGetPoll, handlePutVote } from "./poll";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
-import { handleGiphy } from "./giphy";
+import { handleKlipy } from "./klipy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
   handleBlock,
@@ -467,8 +468,9 @@ export default {
     if (commentReport && req.method === "POST") return handleReportComment(commentReport[1], req, env, ctx);
 
     // ── GIF picker, proxied so the key never ships in the APK ──
-    if (p === "/api/giphy/trending" && req.method === "GET") return handleGiphy("trending", req, env, ctx);
-    if (p === "/api/giphy/search" && req.method === "GET") return handleGiphy("search", req, env, ctx);
+    // Legacy path names, KLIPY behind them — builds already installed call these.
+    if (p === "/api/giphy/trending" && req.method === "GET") return handleKlipy("trending", req, env, ctx);
+    if (p === "/api/giphy/search" && req.method === "GET") return handleKlipy("search", req, env, ctx);
 
     // Comment moderation, proxied here by the admin panel rather than reading D1
     // itself: `n_public` moves with `hidden_at`, and that invariant has exactly one
