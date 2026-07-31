@@ -102,6 +102,7 @@ class FakeStmt {
         header_backdrop_url,
         layout,
         friend_layout,
+        public_layout,
         bio,
         favourite_movies,
         favourite_shows,
@@ -122,6 +123,7 @@ class FakeStmt {
         header_backdrop_url,
         layout,
         friend_layout,
+        public_layout,
         bio,
         favourite_movies,
         favourite_shows,
@@ -328,6 +330,47 @@ describe("owner profile", () => {
     const env = await env0();
     const huge = Array.from({ length: 40 }, () => ({ type: "X".repeat(400) }));
     expect((await handlePutMyProfile(put("tok-owner", { layout: huge }), env)).status).toBe(413);
+  });
+
+  it("rejects an oversize publicLayout", async () => {
+    const env = await env0();
+    const huge = Array.from({ length: 40 }, () => ({ type: "X".repeat(400) }));
+    expect((await handlePutMyProfile(put("tok-owner", { publicLayout: huge }), env)).status).toBe(413);
+  });
+
+  it("stores publicLayout independently of friendLayout", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", {
+        layout: [{ type: "bio" }, { type: "recent_activity" }],
+        friendLayout: [{ type: "bio" }, { type: "recent_activity" }],
+        publicLayout: [{ type: "bio" }],
+      }),
+      env,
+    );
+    const row = env.DB.profiles[0];
+    expect(JSON.parse(row.friend_layout)).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(JSON.parse(row.public_layout)).toEqual([{ type: "bio" }]);
+  });
+
+  it("treats an omitted publicLayout as leave-unchanged", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { publicLayout: [{ type: "bio" }] }), env);
+    await handlePutMyProfile(put("tok-owner", { bio: "hello" }, "1"), env);
+    expect(JSON.parse(env.DB.profiles[0].public_layout)).toEqual([{ type: "bio" }]);
+  });
+
+  /**
+   * The clear path, and the reason `publicLayout` is always sent rather than omitted when
+   * a profile stops being public. Omitting it would strand the stale public payload here,
+   * ready to go live again the moment the owner flips back — possibly showing blocks they
+   * have since removed.
+   */
+  it("treats an empty publicLayout as clear", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { publicLayout: [{ type: "bio" }] }), env);
+    await handlePutMyProfile(put("tok-owner", { publicLayout: [] }, "1"), env);
+    expect(JSON.parse(env.DB.profiles[0].public_layout)).toEqual([]);
   });
 
   it("clamps an overlong bio instead of rejecting it", async () => {

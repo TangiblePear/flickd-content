@@ -86,6 +86,11 @@ interface ProfileRow {
   layout: string | null;
   /** The owner's layout with owner-only and unconsented blocks already stripped. */
   friend_layout: string | null;
+  /**
+   * The owner's layout filtered for NON-FRIENDS — a strict subset of `friend_layout`
+   * unless the owner has turned on public activity. NULL = the client predates the field.
+   */
+  public_layout: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -99,7 +104,7 @@ interface ProfileRow {
 
 const PROFILE_COLUMNS =
   "user_id, display_name, avatar_id, border_id, picture_url, header_color, header_backdrop_url, " +
-  "layout, friend_layout, bio, favourite_movies, favourite_shows, favourite_people, " +
+  "layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows, favourite_people, " +
   "featured_achievements, personality_id, visibility, version, updated_at";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
@@ -191,6 +196,7 @@ interface ValidatedProfile {
   header_backdrop_url: string | null;
   layout: string | null;
   friend_layout: string | null;
+  public_layout: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -218,6 +224,10 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
   // unchecked one would be a way straight past the limit the line above enforces.
   const friendLayout = has("friendLayout") ? jsonList(body.friendLayout) : (existing?.friend_layout ?? null);
   if (friendLayout != null && friendLayout.length > MAX_LAYOUT_BYTES) return null;
+  // Same cap, same reasoning: it arrives as its own field, so an unchecked one would be a
+  // way straight past the limit enforced above.
+  const publicLayout = has("publicLayout") ? jsonList(body.publicLayout) : (existing?.public_layout ?? null);
+  if (publicLayout != null && publicLayout.length > MAX_LAYOUT_BYTES) return null;
 
   const text = (key: string, column: keyof ProfileRow, max: number) =>
     has(key) ? str(body[key], max) : ((existing?.[column] as string | null) ?? null);
@@ -233,6 +243,7 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
     header_backdrop_url: text("headerBackdropUrl", "header_backdrop_url", MAX_URL),
     layout,
     friend_layout: friendLayout,
+    public_layout: publicLayout,
     bio: text("bio", "bio", MAX_BIO),
     favourite_movies: list("favouriteMovies", "favourite_movies"),
     favourite_shows: list("favouriteShows", "favourite_shows"),
@@ -310,14 +321,15 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   const version = currentVersion + 1;
   await env.DB.prepare(
     `INSERT INTO profiles (user_id, display_name, avatar_id, border_id, picture_url, header_color,
-       header_backdrop_url, layout, friend_layout, bio, favourite_movies, favourite_shows,
+       header_backdrop_url, layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows,
        favourite_people, featured_achievements, personality_id, visibility, version, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(user_id) DO UPDATE SET
        display_name = excluded.display_name, avatar_id = excluded.avatar_id,
        border_id = excluded.border_id, picture_url = excluded.picture_url,
        header_color = excluded.header_color, header_backdrop_url = excluded.header_backdrop_url,
-       layout = excluded.layout, friend_layout = excluded.friend_layout, bio = excluded.bio,
+       layout = excluded.layout, friend_layout = excluded.friend_layout,
+       public_layout = excluded.public_layout, bio = excluded.bio,
        favourite_movies = excluded.favourite_movies, favourite_shows = excluded.favourite_shows,
        favourite_people = excluded.favourite_people,
        featured_achievements = excluded.featured_achievements,
@@ -334,6 +346,7 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
       next.header_backdrop_url,
       next.layout,
       next.friend_layout,
+      next.public_layout,
       next.bio,
       next.favourite_movies,
       next.favourite_shows,
