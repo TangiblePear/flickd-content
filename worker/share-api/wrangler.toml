@@ -187,12 +187,21 @@ REPORT_AUTOHIDE = "3"
 # `wrangler secret put ACCOUNT_PEPPER`. Until both are set, the account endpoints
 # return 503 not_configured and the rest of the Worker is unaffected.
 #
-# TWO ids during the OAuth client migration, and BOTH are required:
-#   326222246100-…  the original project — every app already on the Play Store
-#                   sends this; dropping it breaks linking for real users.
+# TWO ids during the OAuth client migration, and BOTH are accepted:
+#   326222246100-…  the original project — what older builds send.
 #   468641021144-…  the Firebase project (flickto-cf7b6) — what new builds send.
-# Drop the first only once the release cutover is done and shipped apps have
-# updated. Order is irrelevant.
+# Order is irrelevant.
+#
+# ⚠️ This comment used to say the first was needed because "every app already on the
+# Play Store sends this; dropping it breaks linking for real users". That claim was
+# never substantiated and the bucket contradicts it — see the R2 note further down:
+# 97 identity folders, SIX with a published profile, 71 two-object shells, and 44
+# that never ran a build after the push-topics cutover. Reconciled 2026-07-31 rather
+# than left standing, because "real users would break" is exactly the kind of
+# unverified claim that stops a cleanup for no reason.
+#
+# Keep both until the version floor (MIN_SOCIAL_VERSION) has been raised and old
+# builds are provably gone — that is the evidence this needs, not the comment.
 GOOGLE_WEB_CLIENT_ID = "326222246100-snpqapsggs1k6j9bnq2ecp37nlpfhe26.apps.googleusercontent.com,468641021144-3s841cgmadpis3qct264k7udicmbrp3r.apps.googleusercontent.com"
 # Firebase Auth (Phase 1). The project **id** — a Firebase ID token's `aud` is the
 # project id, NOT the project number (468641021144). Unset → /api/auth/* 503s.
