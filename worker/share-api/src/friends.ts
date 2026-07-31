@@ -720,7 +720,24 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),
-    env.DB.prepare("DELETE FROM reports WHERE reporter_id = ?").bind(id),
+    // ⚠️ `reports` is NOT deleted here, in EITHER direction, and both halves are
+    // deliberate.
+    //
+    // Reports this account FILED stay because the privacy policy commits to it —
+    // "Reports you filed about other people or content are kept as part of our safety
+    // record" — and because deleting them opens the obvious hole: report someone for
+    // abuse, delete your own account, and the evidence goes with it. This used to run
+    // `DELETE FROM reports WHERE reporter_id = ?`, which did exactly that; the code and
+    // the policy disagreed and the code was the wrong one. Found by auditing the erasure
+    // batch against the live schema, 2026-07-31.
+    //
+    // Reports FILED ABOUT this account stay for the same safety reason, and that is now
+    // disclosed in the policy too — it holds `body_snapshot`, a copy of the reported
+    // content, so silence about it was the one real omission in an otherwise precise
+    // deletion promise.
+    //
+    // Both leave a dangling id pointing at a row in `users` that no longer exists. That
+    // is already true of every retained `target_id` and is what a safety record is for.
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profiles WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),

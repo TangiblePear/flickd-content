@@ -749,7 +749,12 @@ describe("account deletion", () => {
     expect(env.DB.users.find((u: any) => u.id === A)).toBeUndefined();
     expect(env.DB.friendships.length).toBe(0);
     expect(env.DB.blocks.length).toBe(0);
-    expect(env.DB.reports.length).toBe(0);
+    // ⚠️ Reports SURVIVE account deletion, in both directions, and this assertion used
+    // to demand the opposite. The privacy policy says reports you filed "are kept as part
+    // of our safety record", and deleting them let an abuser erase the evidence by
+    // deleting their own account. The code was changed to match the policy 2026-07-31;
+    // this expectation was encoding the bug.
+    expect(env.DB.reports.length).toBe(1);
   });
 
   /**
