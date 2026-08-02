@@ -124,6 +124,17 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["POST", "/api/comments/AAAAAAAA/reaction", { emoji: "🔥" }],
   ["DELETE", "/api/comments/AAAAAAAA/reaction"],
   ["POST", "/api/comments/AAAAAAAA/report", { reason: "spoiler" }],
+  // Watch history. The bare `/api/history` and the two fixed subpaths are three
+  // separate router entries, and the DELETE regex is matched AFTER them — it would
+  // otherwise swallow `/api/history/sync` and `/api/history/stats` whole.
+  ["POST", "/api/history/sync", { events: [], ratings: [], lastSyncTimestamp: 0, deviceId: "dev-1" }],
+  ["GET", "/api/history"],
+  ["GET", "/api/history?limit=50&type=MOVIE"],
+  ["GET", "/api/history/stats"],
+  ["DELETE", "/api/history/watch-EPISODE-1396-s2e5-1753027200"],
+  // Public and unauthenticated by design, which is why it is absent from the 401
+  // list below — it answers 503 without the Analytics Engine credential.
+  ["GET", "/api/stats/global"],
   ["GET", "/api/giphy/trending"],
   ["GET", "/api/giphy/search?q=cat"],
   ["GET", "/api/moderation/comment-reports"],
@@ -180,6 +191,12 @@ describe("route wiring", () => {
       // 401 on a missing session, which is the whole point of the move.
       ["PUT", "/api/me/picture"],
       ["DELETE", "/api/me/picture"],
+      // Watch history. `GET /api/stats/global` is deliberately absent — it is public,
+      // and asserting 401 on it would pin the opposite of the intended behaviour.
+      ["POST", "/api/history/sync"],
+      ["GET", "/api/history"],
+      ["GET", "/api/history/stats"],
+      ["DELETE", "/api/history/watch-MOVIE-550-1753027200"],
     ];
     for (const [method, path] of authed) {
       const res = await worker.fetch(request(method, path, method === "GET" ? undefined : {}), env(), ctx);

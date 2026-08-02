@@ -27,6 +27,13 @@ export interface FriendsEnv {
    */
   BUCKET?: R2Bucket;
   REPORT_AUTOHIDE?: string;
+  /**
+   * Derived watch-history totals. Only account deletion touches it from this module,
+   * and only to drop the erased user's entry — a five-minute cache is still a copy of
+   * how much they watched, and leaving it to expire on its own would mean the erasure
+   * completed while the data was still being served.
+   */
+  HISTORY_STATS_KV?: KVNamespace;
 }
 
 const CORS = {
@@ -686,6 +693,21 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // them also drops this account's contribution from every total automatically —
     // no separate counter to unpick.
     env.DB.prepare("DELETE FROM episode_votes WHERE user_id = ?").bind(id),
+    // Watch history and the two private rating tables (migration 0018).
+    //
+    // ⚠️ A HARD delete, even though `watch_history` has a `deleted_at` tombstone
+    // column. The tombstone exists so a per-event deletion can PROPAGATE to the
+    // user's other devices; using it here would leave every title they ever watched
+    // sitting in the table under an erasure they were told had completed. Account
+    // deletion has no other device to inform — the account is gone.
+    //
+    // `episode_ratings` is the user's PRIVATE per-episode record and goes with them.
+    // It is not the same table as `episode_votes` above, which is the public poll;
+    // both are deleted, for different reasons.
+    env.DB.prepare("DELETE FROM watch_history WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_ratings WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM episode_ratings WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM sync_cursors WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),
@@ -717,6 +739,13 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);
+
+  // The derived-stats cache. Reproducible from `watch_history` and therefore not a
+  // source of truth — but it is a copy of this account's totals, and it must not
+  // outlive the rows it was derived from. Best-effort: a KV failure here must not
+  // turn a completed D1 erasure into an error the client will retry.
+  await env.HISTORY_STATS_KV?.delete(`history:stats:${id}`).catch(() => {});
+
   return noContent();
 }
 

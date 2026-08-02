@@ -96,7 +96,26 @@ routes = [
   # GIF picker (src/giphy.ts). Trailing `*` is load-bearing as always — routes
   # match the full URL including the query string, and every call carries `?q=`
   # or `?limit=`.
-  { pattern = "flickto.app/api/giphy/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/giphy/*", zone_name = "flickto.app" },
+  # Watch history (src/history.ts). ONE pattern covers the whole subtree because a
+  # route `*` matches any string INCLUDING `/`: `/api/history` (the bare list),
+  # `/api/history?cursor=…&limit=50` (the only form the client actually sends),
+  # `/api/history/sync`, `/api/history/stats` and `DELETE /api/history/{id}` all
+  # match `flickto.app/api/history*`.
+  #
+  # That is exactly why it is `…/api/history*` and not `…/api/history/*` — the
+  # latter does NOT match a bare `/api/history`, which is the trap that has now
+  # bitten six times in this file (see /api/friends, /api/match, /api/comments
+  # above). The whole vitest suite and `wrangler deploy --dry-run` stay green
+  # either way; only a live curl tells them apart. 405 means this pattern is
+  # wrong and the static site answered; 401 means the Worker ran.
+  { pattern = "flickto.app/api/history*", zone_name = "flickto.app" },
+  # Platform-wide watch stats. PUBLIC and unauthenticated by design — it is one
+  # aggregate number for everybody, so it is edge-cacheable and identifies nobody.
+  # Its own pattern rather than a bare `/api/stats*`: that prefix is deliberately
+  # left free, and a narrow pattern cannot accidentally swallow a future
+  # per-user `/api/stats/...` route and serve it to the internet.
+  { pattern = "flickto.app/api/stats/global*", zone_name = "flickto.app" }
 ]
 
 
@@ -161,7 +180,43 @@ migrations_dir = "migrations"
 binding = "AI"
 
 
+# Derived watch-history stats (src/history.ts). KV, not D1, and not a counter table:
+# the stats are a GROUP BY over `watch_history` and this is the cache in front of it,
+# so the derivation runs at most once per user per 5 minutes instead of once per open
+# of the History tab. Every write path that could change a total deletes the key.
+#
+# KV rather than `caches.default` because this response is PER USER and must survive
+# a colo change — an edge cache keyed on URL would either be useless (the URL is the
+# same for everyone) or actively wrong (one user's totals served to the next caller).
+#
+# Create with: npx wrangler kv namespace create HISTORY_STATS_KV
+[[kv_namespaces]]
+binding = "HISTORY_STATS_KV"
+id = "1e44ca9d6cc5483ab2b3915e6b4005b6"
+
+
+# One data point per watch event, written with ctx.waitUntil so it never delays the
+# sync response. This is the ONLY source for platform-wide numbers: `watch_history`
+# is per-account and a "how much has everyone watched" query over it would be an
+# unbounded full scan of the hottest table in the database.
+#
+# `dataset` is the name that appears in the SQL API's FROM clause; `binding` is the
+# name in the Worker. They are deliberately different so a rename of one cannot
+# silently retarget the other.
+[[analytics_engine_datasets]]
+binding = "HISTORY_ANALYTICS"
+dataset = "history_events"
+
+
 [vars]
+# Cloudflare account id, for the Analytics Engine SQL API (src/history.ts). Reading a
+# dataset is an ACCOUNT-level HTTP call, not a binding — the `HISTORY_ANALYTICS`
+# binding only writes. The matching credential is a SECRET:
+#   wrangler secret put ANALYTICS_API_TOKEN
+# (a Cloudflare API token with Account Analytics: Read). With either missing,
+# `GET /api/stats/global` answers 503 not_configured; writes are unaffected, so the
+# data still accumulates while the token is outstanding.
+CF_ACCOUNT_ID = "5c474f4f8c165daca8b28eb4a824e512"
 SHARE_TTL_SECONDS = "2592000"
 MAX_ITEMS = "100"
 # Orphan-profile reaper: 365-day inactivity TTL, bounded per run. Triggered

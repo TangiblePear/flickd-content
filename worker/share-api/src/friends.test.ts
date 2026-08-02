@@ -227,6 +227,12 @@ class FakeStmt {
       ["UPDATE comment_counts", "comment_counts", null],
       ["DELETE FROM comments", "comments", null],
       ["DELETE FROM episode_votes", "episode_votes", "user_id"],
+      // Watch history and the private rating tables (migration 0018). A HARD delete
+      // even though `watch_history` carries a tombstone column — see handleDeleteAccount.
+      ["DELETE FROM watch_history", "watch_history", "user_id"],
+      ["DELETE FROM user_ratings", "user_ratings", "user_id"],
+      ["DELETE FROM episode_ratings", "episode_ratings", "user_id"],
+      ["DELETE FROM sync_cursors", "sync_cursors", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
@@ -799,5 +805,72 @@ describe("account deletion", () => {
     }), env);
 
     expect(env.DB.user_telemetry.map((t: any) => t.user_id)).toEqual([B]);
+  });
+
+  /**
+   * Watch history and the two private rating tables (migration 0018) — the same silent
+   * gap as the votes and the telemetry above, and the largest one yet: this is every
+   * title the person ever watched, when, and how they rated it.
+   *
+   * The `deleted_at` assertion is the specific trap. `watch_history` has a tombstone
+   * column because a per-event deletion has to PROPAGATE to the user's other devices,
+   * and reaching for it here — soft-deleting instead of deleting — would look correct,
+   * pass a naive "the app no longer shows it" check, and leave the entire history in
+   * the table under an erasure the user was told had completed. Account deletion has no
+   * other device left to inform.
+   */
+  it("erases watch history and the private rating tables outright, tombstones included", async () => {
+    const env = await env0();
+    env.DB.watch_history = [
+      { user_id: A, id: "watch-MOVIE-550-1000", tmdb_id: 550, deleted_at: null },
+      // Already tombstoned by a per-event delete. A soft-delete-based erasure would
+      // "succeed" on this row by changing nothing at all.
+      { user_id: A, id: "watch-MOVIE-680-2000", tmdb_id: 680, deleted_at: 1_700_000_000_000 },
+      { user_id: B, id: "watch-MOVIE-550-1000", tmdb_id: 550, deleted_at: null },
+    ];
+    env.DB.user_ratings = [
+      { user_id: A, media_type: "MOVIE", tmdb_id: 550, rating: 9 },
+      { user_id: B, media_type: "MOVIE", tmdb_id: 550, rating: 4 },
+    ];
+    env.DB.episode_ratings = [
+      { user_id: A, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 10 },
+      { user_id: B, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 7 },
+    ];
+    env.DB.sync_cursors = [
+      { user_id: A, source: "DEVICE", device_id: "dev-1" },
+      { user_id: B, source: "DEVICE", device_id: "dev-3" },
+    ];
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect(env.DB.watch_history.map((r: any) => r.user_id)).toEqual([B]);
+    expect(env.DB.user_ratings.map((r: any) => r.user_id)).toEqual([B]);
+    expect(env.DB.episode_ratings.map((r: any) => r.user_id)).toEqual([B]);
+    expect(env.DB.sync_cursors.map((r: any) => r.user_id)).toEqual([B]);
+  });
+
+  /**
+   * The derived-stats cache. Reproducible from `watch_history` and therefore not a
+   * source of truth — but it is still a copy of how much this account watched, and it
+   * would otherwise be served for the rest of its five-minute TTL after the rows it was
+   * derived from had been erased.
+   */
+  it("drops the derived-stats cache entry for the erased account and nobody else's", async () => {
+    const env = await env0();
+    const kv = new Map<string, string>([
+      [`history:stats:${A}`, "{}"],
+      [`history:stats:${B}`, "{}"],
+    ]);
+    env.HISTORY_STATS_KV = { delete: async (k: string) => void kv.delete(k) };
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect([...kv.keys()]).toEqual([`history:stats:${B}`]);
   });
 });

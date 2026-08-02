@@ -51,6 +51,20 @@ interface Env {
   //   wrangler secret put ADMIN_KEY
   // Unset ⇒ /api/admin/* answers 403. Closed rather than open when unconfigured.
   ADMIN_KEY?: string;
+  // Derived watch-history totals (src/history.ts). A CACHE, never a source of truth —
+  // every entry is reproducible from `watch_history` with a GROUP BY, so losing the
+  // namespace costs latency and nothing else.
+  HISTORY_STATS_KV?: KVNamespace;
+  // One data point per synced watch event. The only source for platform-wide numbers;
+  // `watch_history` is per-account and counting across it would be a full scan.
+  HISTORY_ANALYTICS?: AnalyticsEngineDataset;
+  // Account id for the Analytics Engine SQL API — reading a dataset is an
+  // account-level HTTP call, not a binding. The credential is a SECRET:
+  //   wrangler secret put ANALYTICS_API_TOKEN
+  // Either missing ⇒ GET /api/stats/global answers 503. Writes are unaffected, so the
+  // data accumulates while the token is outstanding.
+  CF_ACCOUNT_ID?: string;
+  ANALYTICS_API_TOKEN?: string;
 }
 
 import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
@@ -82,6 +96,13 @@ import {
   parseSubject,
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
+import {
+  handleDeleteHistory,
+  handleGetGlobalStats,
+  handleGetHistory,
+  handleGetHistoryStats,
+  handleHistorySync,
+} from "./history";
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
@@ -419,6 +440,24 @@ export default {
       if (req.method === "POST") return handlePublishFeed(req, env, ctx);
       if (req.method === "DELETE") return handleClearFeed(req, env, ctx);
     }
+
+    // ── Watch history (D1 + KV + Analytics Engine). Session-authenticated. ──
+    // The server is an ADDITIVE sync layer: the device's Room database is always the
+    // primary copy, and the client gates every one of these on holding a session, so
+    // an account-free install never reaches them at all.
+    if (p === "/api/history/sync" && req.method === "POST") return handleHistorySync(req, env, ctx);
+    if (p === "/api/history/stats" && req.method === "GET") return handleGetHistoryStats(req, env, ctx);
+    if (p === "/api/history" && req.method === "GET") return handleGetHistory(req, env, ctx);
+
+    // The id is the client's canonical watch-event id (`watch-EPISODE-1396-s2e5-…`),
+    // so the charset is what `HistoryRepository.buildWatchedItemId` emits. Matched
+    // AFTER the two fixed subpaths above, which it would otherwise swallow.
+    const historyEvent = p.match(/^\/api\/history\/([A-Za-z0-9._:-]{1,200})$/);
+    if (historyEvent && req.method === "DELETE") return handleDeleteHistory(historyEvent[1], req, env, ctx);
+
+    // Platform-wide totals. Public and unauthenticated by design — one aggregate
+    // number for everybody, identifying nobody, and therefore edge-cacheable.
+    if (p === "/api/stats/global" && req.method === "GET") return handleGetGlobalStats(req, env, ctx);
 
     // ── Comments (D1). Two read paths, deliberately not one query. ──
     // Path 1 is unauthenticated and edge-cached; path 2 is authenticated and must
