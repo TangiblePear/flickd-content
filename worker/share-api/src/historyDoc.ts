@@ -137,9 +137,17 @@ export function applyToDoc(
     const key = titleKey(mt, e.tmdbId);
 
     // A tombstone removes the watch AND records the deletion, so other devices learn it.
+    //
+    // ⚠️ Its identity comes from the ID, never from the payload. The row is already gone on
+    // the client, so it has no title or watch second left to send and fills those fields
+    // with placeholders (`tmdbId = 1`, `watchedAt` = the deletion time). Trusting them
+    // looked up `titles["MOVIE|1"]`, found nothing, and removed nothing — leaving the
+    // document holding a tombstone AND the watch it was meant to delete. Found on live
+    // data 2026-08-03: `event_count` rose on a deletion instead of falling.
     if (e.deletedAt != null) {
       doc.deleted[e.id] = e.deletedAt;
-      removeWatch(doc, key, e);
+      const real = parseEventId(e.id) ?? e;
+      removeWatch(doc, titleKey(normaliseType(real.mediaType), real.tmdbId), real);
       continue;
     }
 
@@ -173,6 +181,18 @@ export function applyToDoc(
     if (r.watchStatus != null) title.status = r.watchStatus;
     if (r.feedback != null) title.feedback = r.feedback;
     title.rAt = r.updatedAt;
+  }
+
+  // Self-heal: a tombstone whose watch is still present is, by construction, corruption.
+  //
+  // A re-watch clears its own tombstone above, so "tombstoned AND present" cannot arise
+  // legitimately in either arrival order. Documents damaged before the fix above will never
+  // see that tombstone again — it left the client's outbox long ago — so without this pass
+  // they stay wrong forever, and the Phase 4 tombstone sweep would then RESURRECT the
+  // deleted watch on every device. Bounded by the tombstone count, which is small.
+  for (const id of Object.keys(doc.deleted)) {
+    const real = parseEventId(id);
+    if (real) removeWatch(doc, titleKey(normaliseType(real.mediaType), real.tmdbId), real);
   }
 
   doc.updatedAt = now;
@@ -350,4 +370,35 @@ export async function parseDoc(body: ArrayBuffer): Promise<HistoryDoc> {
   } catch {
     return emptyDoc();
   }
+}
+
+/**
+ * Recover a watch's real identity from its canonical client id.
+ *
+ * `watch-EPISODE-1396-s2e5-1753027200` / `watch-MOVIE-550-1753027200`, produced by
+ * `HistoryRepository.buildWatchedItemId`. Parsing rather than storing the id is a large
+ * part of why the document is 59x smaller than the rows it replaced — at 2 billion events
+ * these strings alone were ~70 GB.
+ *
+ * It lives here rather than in `history.ts` because the MERGE depends on it: a tombstone
+ * carries placeholders for everything except the id, so this is the only way to know which
+ * watch it refers to.
+ */
+export function parseEventId(id: string): IncomingEvent | null {
+  const ep = id.match(/^watch-EPISODE-(\d+)-s(\d+)e(\d+)-(\d+)$/);
+  if (ep) {
+    return {
+      id,
+      mediaType: "SHOW",
+      tmdbId: Number(ep[1]),
+      seasonNumber: Number(ep[2]),
+      episodeNumber: Number(ep[3]),
+      watchedAt: Number(ep[4]) * 1000,
+    };
+  }
+  const mv = id.match(/^watch-(MOVIE|SHOW)-(\d+)-(\d+)$/);
+  if (mv) {
+    return { id, mediaType: mv[1], tmdbId: Number(mv[2]), watchedAt: Number(mv[3]) * 1000 };
+  }
+  return null;
 }

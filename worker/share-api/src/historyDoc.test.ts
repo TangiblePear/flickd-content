@@ -252,3 +252,82 @@ describe("serialisation", () => {
     expect(gz).toBeLessThan(raw / 2);
   });
 });
+
+describe("tombstones identify their watch by ID, not by payload", () => {
+  // The client cannot describe the row it just deleted — it is gone. It sends the id and
+  // fills the rest with placeholders. Live 2026-08-03: trusting those placeholders left the
+  // document holding a tombstone AND the watch, and event_count ROSE on a deletion.
+  const tombstone = (id: string, at = 5_000) => ({
+    id,
+    mediaType: id.includes("-MOVIE-") ? "MOVIE" : "SHOW",
+    tmdbId: 1, // ← placeholder the client actually sends
+    watchedAt: at, // ← the DELETION time, not the watch second
+    deletedAt: at,
+  });
+
+  it("removes the movie watch the tombstone refers to", () => {
+    const doc = applyToDoc(emptyDoc(), [
+      { id: "watch-MOVIE-550-1753027200", mediaType: "MOVIE", tmdbId: 550, watchedAt: 1753027200_000 },
+    ], [], 1);
+    expect(statsFor(doc).eventCount).toBe(1);
+
+    applyToDoc(doc, [tombstone("watch-MOVIE-550-1753027200")], [], 2);
+    expect(doc.titles["MOVIE|550"]).toBeUndefined();
+    expect(statsFor(doc).eventCount).toBe(0);
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBe(5_000);
+    // The placeholder tmdbId must not have created a phantom title.
+    expect(doc.titles["MOVIE|1"]).toBeUndefined();
+  });
+
+  it("removes the episode watch the tombstone refers to", () => {
+    const doc = applyToDoc(emptyDoc(), [
+      { id: "watch-EPISODE-1396-s2e5-1753027200", mediaType: "SHOW", tmdbId: 1396,
+        seasonNumber: 2, episodeNumber: 5, watchedAt: 1753027200_000 },
+    ], [], 1);
+    applyToDoc(doc, [tombstone("watch-EPISODE-1396-s2e5-1753027200")], [], 2);
+    expect(statsFor(doc).eventCount).toBe(0);
+    expect(doc.titles["SHOW|1396"]).toBeUndefined();
+  });
+
+  it("keeps a rating when its only watch is tombstoned", () => {
+    const doc = applyToDoc(
+      emptyDoc(),
+      [{ id: "watch-MOVIE-550-1753027200", mediaType: "MOVIE", tmdbId: 550, watchedAt: 1753027200_000 }],
+      [{ mediaType: "MOVIE", tmdbId: 550, rating: 9, updatedAt: 1 }],
+      1,
+    );
+    applyToDoc(doc, [tombstone("watch-MOVIE-550-1753027200")], [], 2);
+    expect(doc.titles["MOVIE|550"]?.rating).toBe(9);
+    expect(doc.titles["MOVIE|550"]?.w).toBeUndefined();
+  });
+
+  it("heals a document already corrupted by the old behaviour", () => {
+    // The stale tombstone never arrives again — it left the outbox long ago — so without a
+    // repair pass these documents stay wrong forever, and the Phase 4 tombstone sweep would
+    // then resurrect the deleted watch on every device.
+    const doc = emptyDoc();
+    doc.titles["MOVIE|550"] = { w: [[1753027200, 100, "TRAKT"]] };
+    doc.deleted["watch-MOVIE-550-1753027200"] = 5_000;
+
+    applyToDoc(doc, [], [], 9);
+    expect(doc.titles["MOVIE|550"]).toBeUndefined();
+    expect(statsFor(doc).eventCount).toBe(0);
+  });
+
+  it("a re-watch still resurrects the id, and is not undone by the repair pass", () => {
+    const live = { id: "watch-MOVIE-550-1753027200", mediaType: "MOVIE", tmdbId: 550, watchedAt: 1753027200_000 };
+    const doc = applyToDoc(emptyDoc(), [live], [], 1);
+    applyToDoc(doc, [tombstone("watch-MOVIE-550-1753027200")], [], 2);
+    expect(statsFor(doc).eventCount).toBe(0);
+
+    applyToDoc(doc, [live], [], 3);
+    expect(statsFor(doc).eventCount).toBe(1);
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBeUndefined();
+  });
+
+  it("an unparseable id still records the tombstone rather than throwing", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [{ ...tombstone("legacy-id-shape"), mediaType: "MOVIE" }], [], 2);
+    expect(doc.deleted["legacy-id-shape"]).toBe(5_000);
+  });
+});

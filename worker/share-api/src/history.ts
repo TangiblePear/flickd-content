@@ -35,6 +35,7 @@ import {
   applyToDoc,
   emptyDoc,
   parseDoc,
+  parseEventId,
   recentEvents,
   serialiseDoc,
   statsFor,
@@ -42,6 +43,10 @@ import {
   type IncomingEvent,
   type IncomingRating,
 } from "./historyDoc";
+
+// Re-exported: it lives with the document model now (the merge needs it to recover a
+// tombstone's real identity), but callers and tests still reach for it here.
+export { parseEventId };
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -635,32 +640,6 @@ export async function handleDeleteHistory(
   return json({ ok: true, deletedAt: now, version: (meta?.version ?? 0) + 1 });
 }
 
-/**
- * Recover the title and watch second from a canonical client event id.
- *
- * `watch-EPISODE-1396-s2e5-1753027200` / `watch-MOVIE-550-1753027200`, produced by
- * `HistoryRepository.buildWatchedItemId`. Parsing rather than storing the id is a large
- * part of why the document is 59x smaller than the rows it replaced — at 2 billion events
- * these strings alone were ~70 GB.
- */
-export function parseEventId(id: string): IncomingEvent | null {
-  const ep = id.match(/^watch-EPISODE-(\d+)-s(\d+)e(\d+)-(\d+)$/);
-  if (ep) {
-    return {
-      id,
-      mediaType: "SHOW",
-      tmdbId: Number(ep[1]),
-      seasonNumber: Number(ep[2]),
-      episodeNumber: Number(ep[3]),
-      watchedAt: Number(ep[4]) * 1000,
-    };
-  }
-  const mv = id.match(/^watch-(MOVIE|SHOW)-(\d+)-(\d+)$/);
-  if (mv) {
-    return { id, mediaType: mv[1], tmdbId: Number(mv[2]), watchedAt: Number(mv[3]) * 1000 };
-  }
-  return null;
-}
 
 // ── GET /api/stats/global ───────────────────────────────────────────────────
 
