@@ -466,6 +466,35 @@ describe("history: stats", () => {
   });
 });
 
+describe("history: integration reconciliation", () => {
+  it("reports the server's integration state on EVERY response, idle included", async () => {
+    // ⚠️ The fix for a silent, permanent bug. Registration used to fire only when the user
+    // CONNECTED an integration — which anyone already connected never does again, so the
+    // server never learned it existed and queued zero pushes forever. Found live: Trakt
+    // connected, 2,916 Trakt-sourced events, `user_integrations` empty.
+    //
+    // Reporting it every pass lets the client reconcile with no marker that can go stale,
+    // and self-heals if the table is ever lost.
+    const env = await env0();
+    env.DB.user_integrations.push({ user_id: A, target: "TRAKT", connected: 1, updated_at: 1 });
+
+    const idle = await (await handleHistorySync(syncReq("tok-a", base), env)).json();
+    expect(idle.upToDate).toBe(true);
+    expect(idle.integrations).toEqual(["TRAKT"]);
+
+    const writing = await (await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env)).json();
+    expect(writing.integrations).toEqual(["TRAKT"]);
+  });
+
+  it("reports an empty list when nothing is connected", async () => {
+    // The client must be able to tell "server says none" from "server did not say" —
+    // an absent field would be indistinguishable from an old Worker.
+    const env = await env0();
+    const res = await (await handleHistorySync(syncReq("tok-a", base), env)).json();
+    expect(res.integrations).toEqual([]);
+  });
+});
+
 describe("history: analytics batching", () => {
   it("emits one data point per TITLE carrying a count, not one per event", async () => {
     // Per event at 2 billion events would be ~$497/month. The count lives IN the point,

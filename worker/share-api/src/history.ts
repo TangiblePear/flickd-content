@@ -30,7 +30,7 @@
  */
 
 import { resolveSession } from "./auth";
-import { claimPushes, queuePushes, queueRemoval, type PendingPush } from "./integrations";
+import { claimPushes, connectedTargets, queuePushes, queueRemoval, type PendingPush } from "./integrations";
 import {
   applyToDoc,
   emptyDoc,
@@ -420,6 +420,7 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
       upToDate: true,
       stats: metaStats(meta),
       pendingPush: await claimPushes(env, session.userId, deviceIdOf(body), Date.now()),
+      integrations: await connectedTargets(env, session.userId),
     });
   }
 
@@ -476,6 +477,18 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
     doc: behind ? doc : undefined,
     stats: docStats(doc),
     pendingPush: await claimPushes(env, session.userId, deviceIdOf(body), Date.now()),
+    // ⚠️ Sent on EVERY response, including the idle path, and deliberately so.
+    //
+    // Registration used to happen only when the user CONNECTED an integration. Anyone
+    // already connected when Phase 3 shipped never re-traverses that path — the token was
+    // stored months ago — so the server never learned the integration existed and queued
+    // zero pushes, silently and forever. Found on a live account with Trakt connected and
+    // 2,916 Trakt-sourced events, and `user_integrations` empty.
+    //
+    // Reporting the server's belief on every pass lets the client reconcile against its
+    // own state with no marker to go stale, so it also self-heals if this table is ever
+    // lost. One extra indexed read per pass, against 25 billion included per month.
+    integrations: await connectedTargets(env, session.userId),
   });
 }
 
