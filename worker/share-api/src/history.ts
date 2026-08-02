@@ -30,6 +30,7 @@
  */
 
 import { resolveSession } from "./auth";
+import { claimPushes, queuePushes, queueRemoval, type PendingPush } from "./integrations";
 import {
   applyToDoc,
   emptyDoc,
@@ -409,11 +410,16 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
   // the overwhelmingly common case for an installed app and the reason an idle fleet of
   // 100k devices costs nothing.
   if (events.length === 0 && ratings.length === 0 && clientVersion === serverVersion) {
+    // ⚠️ Still claims pending pushes. An account whose OTHER device recorded a watch has
+    // work owed to Trakt that this device may be the only one online to perform — so
+    // "nothing changed for me" is not the same as "nothing to do". The claim query reads
+    // an indexed handful of rows and writes only when it actually takes a job, so the
+    // idle case stays free.
     return json({
       version: serverVersion,
       upToDate: true,
       stats: metaStats(meta),
-      pendingPush: [],
+      pendingPush: await claimPushes(env, session.userId, deviceIdOf(body), Date.now()),
     });
   }
 
@@ -441,6 +447,13 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
       .bind(session.userId, version, s.eventCount, s.titleCount, s.lastWatchedAt, Date.now())
       .run();
 
+    // Phase 3: queue outward pushes for whatever this account has connected. Costs
+    // nothing when nothing is connected — `queuePushes` returns after one indexed read.
+    //
+    // ⚠️ Deliberately given the events with their SOURCE. An event that came FROM Trakt
+    // must never be queued back TO Trakt; see the echo guard in integrations.ts.
+    await queuePushes(env, session.userId, events.map((e) => ({ id: e.id, source: e.source })), Date.now());
+
     const after = doc;
     const finish = async () => {
       writeAnalytics(env, session.userId, before, after);
@@ -462,9 +475,13 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
     upToDate: !behind,
     doc: behind ? doc : undefined,
     stats: docStats(doc),
-    pendingPush: [],
+    pendingPush: await claimPushes(env, session.userId, deviceIdOf(body), Date.now()),
   });
 }
+
+/** The reporting device, used only to name a push claim. Absent is fine — see claimPushes. */
+const deviceIdOf = (body: Record<string, unknown>): string =>
+  typeof body.deviceId === "string" ? body.deviceId.slice(0, 64) : "";
 
 const metaStats = (meta: MetaRow | null) => ({
   events: meta?.event_count ?? 0,
@@ -575,6 +592,10 @@ export async function handleDeleteHistory(
   )
     .bind(session.userId, (meta?.version ?? 0) + 1, s.eventCount, s.titleCount, s.lastWatchedAt, now)
     .run();
+
+  // A deletion must reach Trakt too, or the user removes a watch here and it silently
+  // survives on the service they actually look at.
+  await queueRemoval(env, session.userId, id, now);
 
   const finish = async () => {
     await writePublicRecent(env, session.userId, merged);

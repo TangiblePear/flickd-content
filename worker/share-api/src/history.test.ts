@@ -33,6 +33,8 @@ const SEC = 1_700_000_000;
 class FakeD1 {
   sessions = new Map<string, string>();
   history_meta: any[] = [];
+  user_integrations: any[] = [];
+  pending_integration_push: any[] = [];
 
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -58,6 +60,10 @@ class FakeStmt {
     if (s.startsWith("SELECT version, event_count, title_count, last_watched_at FROM history_meta")) {
       return (this.db.history_meta.find((r) => r.user_id === a[0]) as T) ?? null;
     }
+    if (s.startsWith("SELECT target FROM user_integrations")) {
+      // `.all()` shape, but resolveSession-style handlers call `.first()` nowhere here.
+      throw new Error("user_integrations is queried via all(), not first()");
+    }
     if (s.startsWith("SELECT COALESCE(SUM(event_count),0)")) {
       return {
         e: this.db.history_meta.reduce((n, r) => n + r.event_count, 0),
@@ -68,8 +74,70 @@ class FakeStmt {
     throw new Error(`FakeD1: unhandled first() ${this.sql}`);
   }
 
+  async all<T>(): Promise<{ results: T[] }> {
+    const s = this.sql, a = this.args;
+    if (s.startsWith("SELECT target FROM user_integrations")) {
+      return { results: this.db.user_integrations.filter((r) => r.user_id === a[0] && r.connected === 1) as T[] };
+    }
+    if (s.startsWith("SELECT id, target, action, event_ids FROM pending_integration_push")) {
+      const [userId, staleBefore, limit] = a;
+      return {
+        results: this.db.pending_integration_push
+          .filter((r) => r.user_id === userId && (r.claimed_by == null || r.claimed_at < staleBefore))
+          .sort((x, y) => x.created_at - y.created_at)
+          .slice(0, limit) as T[],
+      };
+    }
+    throw new Error(`FakeD1: unhandled all() ${this.sql}`);
+  }
+
   async run() {
     const s = this.sql, a = this.args;
+    if (s.startsWith("INSERT INTO pending_integration_push")) {
+      const [id, user_id, target, ...rest] = a;
+      // The ADD form binds action inline; the generic form passes it.
+      const generic = s.includes("VALUES (?,?,?,?,?,?)");
+      const action = generic ? rest[0] : (s.includes("'REMOVE'") ? "REMOVE" : "ADD");
+      const event_ids = generic ? rest[1] : rest[0];
+      const created_at = generic ? rest[2] : rest[1];
+      this.db.pending_integration_push.push({ id, user_id, target, action, event_ids, created_at, claimed_by: null, claimed_at: null });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE pending_integration_push SET claimed_by = ?, claimed_at = ?")) {
+      const [by, at, userId, id] = a;
+      const r = this.db.pending_integration_push.find((x) => x.user_id === userId && x.id === id);
+      if (r) { r.claimed_by = by; r.claimed_at = at; }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE pending_integration_push SET claimed_by = NULL")) {
+      const [userId, id] = a;
+      const r = this.db.pending_integration_push.find((x) => x.user_id === userId && x.id === id);
+      if (r) { r.claimed_by = null; r.claimed_at = null; }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("DELETE FROM pending_integration_push WHERE user_id = ? AND target = ?")) {
+      this.db.pending_integration_push = this.db.pending_integration_push.filter((x) => !(x.user_id === a[0] && x.target === a[1]));
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM pending_integration_push WHERE user_id = ? AND id = ?")) {
+      this.db.pending_integration_push = this.db.pending_integration_push.filter((x) => !(x.user_id === a[0] && x.id === a[1]));
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM pending_integration_push")) {
+      this.db.pending_integration_push = this.db.pending_integration_push.filter((x) => x.user_id !== a[0]);
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("INSERT INTO user_integrations")) {
+      const [user_id, target, connected, updated_at] = a;
+      const r = this.db.user_integrations.find((x) => x.user_id === user_id && x.target === target);
+      if (r) Object.assign(r, { connected, updated_at });
+      else this.db.user_integrations.push({ user_id, target, connected, updated_at });
+      return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM user_integrations")) {
+      this.db.user_integrations = this.db.user_integrations.filter((x) => x.user_id !== a[0]);
+      return { success: true, meta: { changes: 1 } };
+    }
     if (s.startsWith("INSERT INTO history_meta")) {
       const [user_id, version, event_count, title_count, last_watched_at, updated_at] = a;
       const row = this.db.history_meta.find((r) => r.user_id === user_id);

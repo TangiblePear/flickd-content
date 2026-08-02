@@ -254,6 +254,8 @@ class FakeStmt {
       ["DELETE FROM episode_votes", "episode_votes", "user_id"],
       // Watch history and the private rating tables (migration 0018).
       ["DELETE FROM history_meta", "history_meta", "user_id"],
+      ["DELETE FROM pending_integration_push", "pending_integration_push", "user_id"],
+      ["DELETE FROM user_integrations", "user_integrations", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],

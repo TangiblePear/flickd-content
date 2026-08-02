@@ -716,6 +716,10 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // `user_ratings` and `episode_ratings` are gone as tables (migration 0020), and
     // `sync_cursors` before them (0019, written every pass and read by nothing).
     env.DB.prepare("DELETE FROM history_meta WHERE user_id = ?").bind(id),
+    // Phase 3 integration state. `pending_integration_push` can hold event ids describing
+    // what this person watched, so it is user data, not just bookkeeping.
+    env.DB.prepare("DELETE FROM pending_integration_push WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_integrations WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),

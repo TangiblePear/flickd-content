@@ -239,6 +239,8 @@ class FakeStmt {
       // document, deleted separately. watch_history / user_ratings / episode_ratings are
       // gone as tables entirely.
       ["DELETE FROM history_meta", "history_meta", "user_id"],
+      ["DELETE FROM pending_integration_push", "pending_integration_push", "user_id"],
+      ["DELETE FROM user_integrations", "user_integrations", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],

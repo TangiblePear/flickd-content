@@ -131,6 +131,9 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/history"],
   ["GET", "/api/history?limit=50&type=MOVIE"],
   ["GET", "/api/history/stats"],
+  ["POST", "/api/history/confirm-push", { pushId: "p1", succeeded: true }],
+  ["GET", "/api/history/integrations"],
+  ["PUT", "/api/history/integrations", { target: "TRAKT", connected: true }],
   ["DELETE", "/api/history/watch-EPISODE-1396-s2e5-1753027200"],
   // Public and unauthenticated by design, which is why it is absent from the 401
   // list below — it answers 503 without the Analytics Engine credential.
@@ -196,6 +199,9 @@ describe("route wiring", () => {
       ["POST", "/api/history/sync"],
       ["GET", "/api/history"],
       ["GET", "/api/history/stats"],
+      ["POST", "/api/history/confirm-push"],
+      ["GET", "/api/history/integrations"],
+      ["PUT", "/api/history/integrations"],
       ["DELETE", "/api/history/watch-MOVIE-550-1753027200"],
     ];
     for (const [method, path] of authed) {

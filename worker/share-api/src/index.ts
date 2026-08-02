@@ -98,6 +98,7 @@ import {
   parseSubject,
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
+import { handleConfirmPush, handleGetIntegrations, handleUpdateIntegration } from "./integrations";
 import {
   handleDeleteHistory,
   handleGetGlobalStats,
@@ -454,6 +455,14 @@ export default {
     // The id is the client's canonical watch-event id (`watch-EPISODE-1396-s2e5-…`),
     // so the charset is what `HistoryRepository.buildWatchedItemId` emits. Matched
     // AFTER the two fixed subpaths above, which it would otherwise swallow.
+    // Phase 3: server-coordinated Trakt/SIMKL push. Matched BEFORE the `{id}` pattern
+    // below, which would otherwise swallow both of these as event ids.
+    if (p === "/api/history/confirm-push" && req.method === "POST") return handleConfirmPush(req, env, ctx);
+    if (p === "/api/history/integrations") {
+      if (req.method === "GET") return handleGetIntegrations(req, env, ctx);
+      if (req.method === "PUT") return handleUpdateIntegration(req, env, ctx);
+    }
+
     const historyEvent = p.match(/^\/api\/history\/([A-Za-z0-9._:-]{1,200})$/);
     if (historyEvent && req.method === "DELETE") return handleDeleteHistory(historyEvent[1], req, env, ctx);
 
