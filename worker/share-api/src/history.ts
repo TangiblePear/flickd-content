@@ -84,15 +84,16 @@ interface AnalyticsDataPoint {
  * The secondary argument is Worker CPU: building N prepared statements is CPU time,
  * and the budget is per invocation.
  *
- * So this can safely go UP if the back-fill rate matters — 500 was measured as the
- * obvious next step, cutting a ~2,900-event history from ~15 minutes to ~3. Raise the
- * client's matching constant in `ServerHistoryRepository` at the same time, and note
- * the ORDER: the server's cap must rise FIRST, or a client sending more than this
- * gets a 413 and syncs nothing at all.
+ * Raised 100 -> 500 on 2026-08-02 after measuring a real back-fill: 2,917 events at
+ * 100/pass took ~15 minutes, and 500 brings that to ~3. Still nowhere near any limit.
+ *
+ * ⚠️ ORDER MATTERS if this ever changes again: the SERVER's cap must be deployed
+ * BEFORE a client that sends more, or the client gets a 413 and syncs NOTHING — not
+ * a slower sync, no sync at all.
  */
-const MAX_EVENTS_PER_SYNC = 100;
+export const MAX_EVENTS_PER_SYNC = 500;
 /** Same reasoning; ratings are a separate batch. */
-const MAX_RATINGS_PER_SYNC = 100;
+export const MAX_RATINGS_PER_SYNC = 500;
 /** Delta rows handed back per sync. The client pages by re-syncing with the new cursor. */
 const MAX_DELTA_EVENTS = 500;
 const MAX_DELTA_RATINGS = 500;

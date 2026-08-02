@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  MAX_EVENTS_PER_SYNC,
   deriveStats,
   handleDeleteHistory,
   handleGetGlobalStats,
@@ -396,10 +397,20 @@ describe("history: sync", () => {
     // Truncating would silently discard the tail while telling the client everything
     // synced, so those events would never be sent again.
     const env = await env0();
-    const events = Array.from({ length: 101 }, (_, i) => movie(500 + i, 1_000_000 + i));
+    // Derived from the constant, never a hardcoded number: a literal here silently
+    // stops testing the boundary the moment the cap moves, which is exactly what
+    // happened when it went 100 -> 500.
+    const events = Array.from({ length: MAX_EVENTS_PER_SYNC + 1 }, (_, i) => movie(500 + i, 1_000_000 + i));
     const res = await handleHistorySync(syncReq("tok-a", { ...body, events }), env);
     expect(res.status).toBe(413);
     expect(env.DB.watch_history).toHaveLength(0);
+
+    // ...and one AT the cap is accepted, or "refuses oversized" would pass on a
+    // handler that refused everything.
+    const atCap = Array.from({ length: MAX_EVENTS_PER_SYNC }, (_, i) => movie(500 + i, 1_000_000 + i));
+    const ok = await handleHistorySync(syncReq("tok-a", { ...body, events: atCap }), env);
+    expect(ok.status).toBe(200);
+    expect(env.DB.watch_history).toHaveLength(MAX_EVENTS_PER_SYNC);
   });
 
   it("records the sync cursor per device", async () => {
