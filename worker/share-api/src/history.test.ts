@@ -40,7 +40,6 @@ class FakeD1 {
   sessions = new Map<string, string>();
   watch_history: any[] = [];
   user_ratings: any[] = [];
-  sync_cursors: any[] = [];
 
   prepare(sql: string) {
     return new FakeStmt(this, sql);
@@ -210,16 +209,6 @@ class FakeStmt {
       }
       if (!(updated_at > existing.updated_at)) return { success: true, meta: { changes: 0 } };
       Object.assign(existing, { watch_status, rating, feedback, updated_at });
-      return { success: true, meta: { changes: 1 } };
-    }
-
-    if (s.startsWith("INSERT INTO sync_cursors")) {
-      const [user_id, device_id, cursor_val, updated_at] = a;
-      const existing = this.db.sync_cursors.find(
-        (r) => r.user_id === user_id && r.source === "DEVICE" && r.device_id === device_id,
-      );
-      if (existing) Object.assign(existing, { cursor_val, updated_at });
-      else this.db.sync_cursors.push({ user_id, source: "DEVICE", device_id, cursor_val, updated_at });
       return { success: true, meta: { changes: 1 } };
     }
 
@@ -413,11 +402,20 @@ describe("history: sync", () => {
     expect(env.DB.watch_history).toHaveLength(MAX_EVENTS_PER_SYNC);
   });
 
-  it("records the sync cursor per device", async () => {
+  it("writes NOTHING to D1 when there is nothing to sync", async () => {
+    // A `sync_cursors` upsert used to run on every pass — ~2 rows written per pass,
+    // per device, forever, for a table no query ever read. At a 15-minute cadence
+    // that is ~192 rows/device/day of pure idle heartbeat, which is what capped the
+    // free tier at ~500 users. Dropped in migration 0019.
+    //
+    // The FakeD1 throws on any SQL it does not recognise and has no sync_cursors
+    // branch, so reinstating that write fails this test loudly rather than quietly
+    // costing money.
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV1 }), env);
-    await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV2 }), env);
-    expect(env.DB.sync_cursors).toHaveLength(2);
+    const res = await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV1 }), env);
+    expect(res.status).toBe(200);
+    expect(env.DB.watch_history).toHaveLength(0);
+    expect(env.DB.user_ratings).toHaveLength(0);
   });
 
   it("syncs ratings with the same last-write-wins rule", async () => {

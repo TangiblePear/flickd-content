@@ -232,7 +232,6 @@ class FakeStmt {
       ["DELETE FROM watch_history", "watch_history", "user_id"],
       ["DELETE FROM user_ratings", "user_ratings", "user_id"],
       ["DELETE FROM episode_ratings", "episode_ratings", "user_id"],
-      ["DELETE FROM sync_cursors", "sync_cursors", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
@@ -836,10 +835,6 @@ describe("account deletion", () => {
       { user_id: A, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 10 },
       { user_id: B, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 7 },
     ];
-    env.DB.sync_cursors = [
-      { user_id: A, source: "DEVICE", device_id: "dev-1" },
-      { user_id: B, source: "DEVICE", device_id: "dev-3" },
-    ];
 
     await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
       method: "DELETE",
@@ -849,7 +844,6 @@ describe("account deletion", () => {
     expect(env.DB.watch_history.map((r: any) => r.user_id)).toEqual([B]);
     expect(env.DB.user_ratings.map((r: any) => r.user_id)).toEqual([B]);
     expect(env.DB.episode_ratings.map((r: any) => r.user_id)).toEqual([B]);
-    expect(env.DB.sync_cursors.map((r: any) => r.user_id)).toEqual([B]);
   });
 
   /**

@@ -707,7 +707,9 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     env.DB.prepare("DELETE FROM watch_history WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_ratings WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM episode_ratings WHERE user_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM sync_cursors WHERE user_id = ?").bind(id),
+    // `sync_cursors` is NOT here because the table no longer exists (migration 0019).
+    // It was written on every sync pass and read by nothing, so it was dropped rather
+    // than kept as an empty table for a future reader to puzzle over.
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),

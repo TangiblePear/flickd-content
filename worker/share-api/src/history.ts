@@ -394,19 +394,17 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
     );
   }
 
-  // The cursor row is per (user, source, device). '__global__' is the sentinel the
-  // schema defaults to, for a caller that names no device — it is a real value, not a
-  // NULL, because a NULL cannot participate in a primary key comparison and the
-  // upsert's conflict target would never match.
-  statements.push(
-    env.DB.prepare(
-      `INSERT INTO sync_cursors (user_id, source, device_id, cursor_val, updated_at)
-       VALUES (?, 'DEVICE', ?, ?, ?)
-       ON CONFLICT(user_id, source, device_id) DO UPDATE SET
-         cursor_val = excluded.cursor_val,
-         updated_at = excluded.updated_at`,
-    ).bind(session.userId, deviceId || "__global__", String(now), now),
-  );
+  // ⚠️ There is deliberately NO cursor write here.
+  //
+  // A `sync_cursors` upsert used to run on every pass. Nothing ever read it — the
+  // CLIENT holds its own cursor in DataStore and sends it as `lastSyncTimestamp`, and
+  // no query in this Worker consulted the table to answer anything. It cost ~2 rows
+  // written (row + primary key) on EVERY pass including idle ones, which at a
+  // 15-minute cadence is ~192 rows per device per day with nobody watching anything.
+  //
+  // The table is dropped in migration 0019. If you are tempted to reinstate a
+  // server-side cursor, check first that something actually READS it: this one was
+  // written faithfully for a fortnight and consumed by nothing.
 
   if (statements.length > 0) await env.DB.batch(statements);
 
