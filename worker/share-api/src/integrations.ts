@@ -112,14 +112,29 @@ export async function queuePushes(
   return statements.length;
 }
 
-/** Queue a REMOVE, so a deletion propagates outward as well as between devices. */
+/**
+ * Queue a REMOVE, so a deletion propagates outward as well as between devices.
+ *
+ * ## The echo guard applies to removals too, and here it is safety-critical
+ *
+ * `origin` is the integration the deletion was OBSERVED from — "TRAKT" when a full sync
+ * noticed the watch had gone there — or absent when the user deleted it themselves.
+ *
+ * ⚠️ Without excluding it, a deletion LEARNED from Trakt is pushed straight back to Trakt
+ * as an instruction to delete. That inverts the direction of trust: the additive guard
+ * merely prevents a wasteful round trip, but this one prevents a local MISREAD from
+ * destroying data on the remote service. A reconcile that wrongly concludes an event is
+ * gone would otherwise make itself right by deleting it for real.
+ */
 export async function queueRemoval(
   env: IntegrationsEnv,
   userId: string,
   eventId: string,
   now: number,
+  origin?: string,
 ): Promise<void> {
-  const targets = await connectedTargets(env, userId);
+  const exclude = (origin ?? "").toUpperCase();
+  const targets = (await connectedTargets(env, userId)).filter((t) => t !== exclude);
   if (targets.length === 0) return;
   await env.DB.batch(
     targets.map((target) =>
@@ -293,6 +308,77 @@ export async function handleUpdateIntegration(
   return json({ ok: true, target, connected });
 }
 
+/**
+ * How long a granted reconcile lease lasts.
+ *
+ * This is a rate limit as much as a mutex. A delete reconcile means crawling the user's
+ * entire remote history, so once a day per ACCOUNT is generous; running it per device per
+ * day is the thing being prevented. A device that takes the lease and then dies simply
+ * delays the next reconcile by under a day, which is the cheap failure — the expensive one
+ * is two devices reconciling at once, and that is what the lease makes impossible.
+ */
+const RECONCILE_LEASE_MS = 20 * 60 * 60 * 1000;
+
+/**
+ * `POST /api/history/reconcile-lease` — "may I be the device that decides what Trakt has
+ * deleted?"
+ *
+ * ## Why deletion is serialised when addition is not
+ *
+ * Adding is idempotent and self-correcting: two devices pushing the same watch converge on
+ * the same union. Deleting is neither. It is a claim of ABSENCE, derived from one device's
+ * possibly-truncated view of a remote service, and it is now account-wide — so every extra
+ * device is another independent chance to be wrong, with no corresponding chance to be
+ * more right. The safe number of devices forming that opinion is one.
+ *
+ * Denial is a pure read and writes nothing, which matters because it is the common answer.
+ * Only the grant costs a row.
+ */
+export async function handleReconcileLease(
+  req: Request,
+  env: IntegrationsEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  const target = typeof body?.target === "string" ? body.target.toUpperCase() : "";
+  if (!TARGETS.has(target)) return json({ error: "invalid_target" }, 400);
+  const deviceId = typeof body?.deviceId === "string" && body.deviceId ? body.deviceId : "unknown";
+
+  const now = Date.now();
+  const row = await env.DB.prepare(
+    "SELECT reconcile_by, reconcile_at FROM user_integrations WHERE user_id = ? AND target = ?",
+  )
+    .bind(session.userId, target)
+    .first<{ reconcile_by: string | null; reconcile_at: number | null }>();
+
+  // No row means the account never registered this integration, so it has no business
+  // reconciling it. Registration happens on the ordinary sync loop and will fill this in.
+  if (!row) return json({ granted: false, reason: "not_registered" });
+
+  const heldUntil = (row.reconcile_at ?? 0) + RECONCILE_LEASE_MS;
+  // The holder renewing its own lease is a grant, not a conflict — a device that
+  // reconciles daily should keep doing so rather than lock itself out on day two.
+  if (now < heldUntil && row.reconcile_by !== deviceId) {
+    return json({ granted: false, reason: "held", retryAfter: heldUntil - now });
+  }
+
+  // Compare-and-set on exactly the values just read, so two devices racing here cannot
+  // both win: the loser's UPDATE matches zero rows and it is told so. `IS` rather than `=`
+  // because the first-ever lease compares against NULL, where `=` yields NULL, not true.
+  const res = await env.DB.prepare(
+    `UPDATE user_integrations SET reconcile_by = ?, reconcile_at = ?
+      WHERE user_id = ? AND target = ? AND reconcile_at IS ? AND reconcile_by IS ?`,
+  )
+    .bind(deviceId, now, session.userId, target, row.reconcile_at, row.reconcile_by)
+    .run();
+
+  if ((res.meta?.changes ?? 0) === 0) return json({ granted: false, reason: "raced" });
+  return json({ granted: true, expiresAt: now + RECONCILE_LEASE_MS });
+}
+
 /** `GET /api/history/integrations` — what the server believes is connected. */
 export async function handleGetIntegrations(
   req: Request,
@@ -310,4 +396,4 @@ export const integrationErasureSql = [
   "DELETE FROM user_integrations WHERE user_id = ?",
 ];
 
-export { CLAIM_TTL_MS, MAX_JOBS_PER_SYNC };
+export { CLAIM_TTL_MS, MAX_JOBS_PER_SYNC, RECONCILE_LEASE_MS };

@@ -1,0 +1,27 @@
+-- Guard 5 of the delete reconcile: only ONE device may decide that a watch has been
+-- removed from Trakt.
+--
+-- ## What this protects that the other guards do not
+--
+-- The in-app guards (complete-fetch, outbox, grace window, volume ceiling) each ask "is
+-- THIS answer trustworthy?". They say nothing about how many devices are asking. Every
+-- handset on the account runs its own full sync, forms its own opinion from its own view
+-- of Trakt, and a deletion is now account-wide — so N devices means N independent chances
+-- to get it wrong, and the unluckiest one wins. A phone with a truncated fetch that slips
+-- past the volume ceiling can tombstone rows for a tablet that had a perfect view.
+--
+-- Serialising it also stops N devices paging the user's entire Trakt history on the same
+-- morning, which is the difference between one full crawl and one per device against a
+-- rate limit that is shared between them.
+--
+-- ## Why the lease lives here rather than in its own table
+--
+-- The row already exists — the account registers its connected integrations on this table
+-- during ordinary sync. Adding two nullable columns costs nothing until a lease is
+-- actually taken, and a separate table would need its own PK, its own erasure entry, and
+-- its own chance to be forgotten in `handleDeleteAccount`.
+--
+-- Additive and nullable: existing rows read as "no lease held", which is the correct
+-- starting state, so this migration is safe to apply before OR after the code deploy.
+ALTER TABLE user_integrations ADD COLUMN reconcile_by TEXT;
+ALTER TABLE user_integrations ADD COLUMN reconcile_at INTEGER;

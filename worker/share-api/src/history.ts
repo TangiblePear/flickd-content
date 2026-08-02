@@ -453,7 +453,20 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
     //
     // ⚠️ Deliberately given the events with their SOURCE. An event that came FROM Trakt
     // must never be queued back TO Trakt; see the echo guard in integrations.ts.
-    await queuePushes(env, session.userId, events.map((e) => ({ id: e.id, source: e.source })), Date.now());
+    const pushNow = Date.now();
+    // Additions: queue outward pushes, excluding anything sourced from the target.
+    await queuePushes(
+      env,
+      session.userId,
+      events.filter((e) => e.deletedAt == null).map((e) => ({ id: e.id, source: e.source })),
+      pushNow,
+    );
+    // Removals: same guard, and here it prevents REMOTE data loss rather than a wasted
+    // call — a deletion learned from Trakt must never be sent back to Trakt. The client
+    // puts that origin in `source` on the tombstone.
+    for (const e of events.filter((e) => e.deletedAt != null)) {
+      await queueRemoval(env, session.userId, e.id, pushNow, e.source);
+    }
 
     const after = doc;
     const finish = async () => {
@@ -607,7 +620,9 @@ export async function handleDeleteHistory(
     .run();
 
   // A deletion must reach Trakt too, or the user removes a watch here and it silently
-  // survives on the service they actually look at.
+  // survives on the service they actually look at. `DELETE /api/history/{id}` is always a
+  // USER action, so there is no origin to exclude — a deletion observed FROM an
+  // integration arrives as a tombstone on the sync path instead, carrying its origin.
   await queueRemoval(env, session.userId, id, now);
 
   const finish = async () => {

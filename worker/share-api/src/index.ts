@@ -98,7 +98,12 @@ import {
   parseSubject,
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
-import { handleConfirmPush, handleGetIntegrations, handleUpdateIntegration } from "./integrations";
+import {
+  handleConfirmPush,
+  handleGetIntegrations,
+  handleReconcileLease,
+  handleUpdateIntegration,
+} from "./integrations";
 import {
   handleDeleteHistory,
   handleGetGlobalStats,
@@ -458,6 +463,7 @@ export default {
     // Phase 3: server-coordinated Trakt/SIMKL push. Matched BEFORE the `{id}` pattern
     // below, which would otherwise swallow both of these as event ids.
     if (p === "/api/history/confirm-push" && req.method === "POST") return handleConfirmPush(req, env, ctx);
+    if (p === "/api/history/reconcile-lease" && req.method === "POST") return handleReconcileLease(req, env, ctx);
     if (p === "/api/history/integrations") {
       if (req.method === "GET") return handleGetIntegrations(req, env, ctx);
       if (req.method === "PUT") return handleUpdateIntegration(req, env, ctx);

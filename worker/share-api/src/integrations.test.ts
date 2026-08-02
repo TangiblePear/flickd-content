@@ -16,9 +16,11 @@ import {
   connectedTargets,
   handleConfirmPush,
   handleGetIntegrations,
+  handleReconcileLease,
   handleUpdateIntegration,
   queuePushes,
   queueRemoval,
+  RECONCILE_LEASE_MS,
 } from "./integrations";
 
 const A = "AAAAH73X7P55T48R4CFHDED9CW";
@@ -43,6 +45,10 @@ class FakeStmt {
     if (s.startsWith("SELECT user_id, expires_at, revoked_at FROM sessions")) {
       const u = this.db.sessions.get(a[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
+    }
+    if (s.startsWith("SELECT reconcile_by, reconcile_at FROM user_integrations")) {
+      const r = this.db.user_integrations.find((x) => x.user_id === a[0] && x.target === a[1]);
+      return r ? ({ reconcile_by: r.reconcile_by ?? null, reconcile_at: r.reconcile_at ?? null } as T) : null;
     }
     throw new Error(`FakeD1: unhandled first() ${this.sql}`);
   }
@@ -97,6 +103,17 @@ class FakeStmt {
     if (s.startsWith("DELETE FROM pending_integration_push WHERE user_id = ? AND id = ?")) {
       this.db.pending_integration_push = this.db.pending_integration_push.filter((x) => !(x.user_id === a[0] && x.id === a[1]));
       return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("UPDATE user_integrations SET reconcile_by = ?, reconcile_at = ?")) {
+      const [by, at, user_id, target, casAt, casBy] = a;
+      // The compare-and-set the real UPDATE performs in its WHERE clause. Modelled
+      // faithfully, because "two devices both won the lease" is exactly what it prevents.
+      const r = this.db.user_integrations.find(
+        (x) => x.user_id === user_id && x.target === target &&
+          (x.reconcile_at ?? null) === casAt && (x.reconcile_by ?? null) === casBy,
+      );
+      if (r) Object.assign(r, { reconcile_by: by, reconcile_at: at });
+      return { success: true, meta: { changes: r ? 1 : 0 } };
     }
     if (s.startsWith("INSERT INTO user_integrations")) {
       const [user_id, target, connected, updated_at] = a;
@@ -181,6 +198,30 @@ describe("integrations: queueing", () => {
     const env = await env0(["TRAKT"]);
     await queueRemoval(env, A, "watch-MOVIE-550-1700000000", NOW);
     expect(env.DB.pending_integration_push[0]).toMatchObject({ action: "REMOVE", target: "TRAKT" });
+  });
+
+  it("never sends a Trakt-observed deletion back to Trakt", async () => {
+    // ⚠️ The most dangerous guard in the feature, and the one whose absence causes REMOTE
+    // data loss rather than a wasted call. A full sync that wrongly concludes a watch is
+    // gone from Trakt would otherwise make itself right by telling Trakt to delete it.
+    const env = await env0(["TRAKT"]);
+    await queueRemoval(env, A, "watch-MOVIE-550-1700000000", NOW, "TRAKT");
+    expect(env.DB.pending_integration_push).toHaveLength(0);
+  });
+
+  it("still forwards a Trakt-observed deletion to OTHER services", async () => {
+    // The guard is per TARGET. A watch the user removed on Trakt should still be removed
+    // from Simkl — that is the deletion propagating, which is the point.
+    const env = await env0(["TRAKT", "SIMKL"]);
+    await queueRemoval(env, A, "watch-MOVIE-550-1700000000", NOW, "TRAKT");
+    expect(env.DB.pending_integration_push).toHaveLength(1);
+    expect(env.DB.pending_integration_push[0].target).toBe("SIMKL");
+  });
+
+  it("forwards a USER deletion to every connected service", async () => {
+    const env = await env0(["TRAKT", "SIMKL"]);
+    await queueRemoval(env, A, "watch-MOVIE-550-1700000000", NOW);
+    expect(env.DB.pending_integration_push.map((j: any) => j.target).sort()).toEqual(["SIMKL", "TRAKT"]);
   });
 });
 
@@ -324,5 +365,91 @@ describe("integrations: registration", () => {
   it("refuses without a session", async () => {
     const env = await env0([]);
     expect((await handleUpdateIntegration(req("nope", { target: "TRAKT", connected: true }), env)).status).toBe(401);
+  });
+});
+
+describe("integrations: the delete-reconcile lease", () => {
+  const lease = (token: string, deviceId: string) =>
+    new Request("https://flickto.app/api/history/reconcile-lease", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "TRAKT", deviceId }),
+    });
+
+  it("grants the first device that asks", async () => {
+    const env = await env0(["TRAKT"]);
+    const res = await (await handleReconcileLease(lease("tok-a", "phone"), env)).json();
+    expect(res.granted).toBe(true);
+    expect(env.DB.user_integrations[0].reconcile_by).toBe("phone");
+  });
+
+  it("refuses a SECOND device while the lease is held", async () => {
+    // The property the whole guard exists for. Two devices each form their own opinion
+    // about what Trakt has deleted, from their own possibly-truncated view, and a deletion
+    // is account-wide — so the unluckiest device's answer would win for everyone.
+    const env = await env0(["TRAKT"]);
+    expect((await (await handleReconcileLease(lease("tok-a", "phone"), env)).json()).granted).toBe(true);
+
+    const second = await (await handleReconcileLease(lease("tok-a", "tablet"), env)).json();
+    expect(second.granted).toBe(false);
+    expect(second.reason).toBe("held");
+    expect(env.DB.user_integrations[0].reconcile_by).toBe("phone");
+  });
+
+  it("lets the HOLDER renew, so a single-device account is not locked out on day two", async () => {
+    const env = await env0(["TRAKT"]);
+    await handleReconcileLease(lease("tok-a", "phone"), env);
+    const again = await (await handleReconcileLease(lease("tok-a", "phone"), env)).json();
+    expect(again.granted).toBe(true);
+  });
+
+  it("hands the lease on once it has expired", async () => {
+    // A device that took the lease and then died must not hold it forever.
+    const env = await env0(["TRAKT"]);
+    Object.assign(env.DB.user_integrations[0], {
+      reconcile_by: "dead-phone",
+      reconcile_at: Date.now() - RECONCILE_LEASE_MS - 1000,
+    });
+    const res = await (await handleReconcileLease(lease("tok-a", "tablet"), env)).json();
+    expect(res.granted).toBe(true);
+    expect(env.DB.user_integrations[0].reconcile_by).toBe("tablet");
+  });
+
+  it("only one of two devices racing from the same read can win", async () => {
+    // Both see an unheld lease, both attempt the UPDATE. The compare-and-set in the WHERE
+    // clause is what stops both being told yes.
+    const env = await env0(["TRAKT"]);
+    const [a, b] = await Promise.all([
+      handleReconcileLease(lease("tok-a", "phone"), env).then((r) => r.json()),
+      handleReconcileLease(lease("tok-a", "tablet"), env).then((r) => r.json()),
+    ]);
+    expect([a.granted, b.granted].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("refuses an account that never registered the integration", async () => {
+    const env = await env0([]);
+    const res = await (await handleReconcileLease(lease("tok-a", "phone"), env)).json();
+    expect(res.granted).toBe(false);
+    expect(res.reason).toBe("not_registered");
+  });
+
+  it("does not leak another account's lease", async () => {
+    const env = await env0(["TRAKT"]);
+    await handleReconcileLease(lease("tok-a", "phone"), env);
+    // B has no integration row at all, so it is refused on its own merits, not A's lease.
+    const res = await (await handleReconcileLease(lease("tok-b", "phone"), env)).json();
+    expect(res.granted).toBe(false);
+    expect(res.reason).toBe("not_registered");
+  });
+
+  it("rejects an unknown target and refuses without a session", async () => {
+    const env = await env0(["TRAKT"]);
+    const bad = new Request("https://flickto.app/api/history/reconcile-lease", {
+      method: "POST",
+      headers: { Authorization: "Bearer tok-a", "Content-Type": "application/json" },
+      body: JSON.stringify({ target: "LETTERBOXD", deviceId: "phone" }),
+    });
+    expect((await handleReconcileLease(bad, env)).status).toBe(400);
+    expect((await handleReconcileLease(lease("nope", "phone"), env)).status).toBe(401);
   });
 });
