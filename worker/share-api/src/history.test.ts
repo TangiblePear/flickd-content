@@ -1,48 +1,41 @@
-// Server-side watch history.
+// Watch-history endpoints: R2 document + D1 pointer row.
 //
-// Everything pinned here fails SILENTLY. A sync that drops an event still answers 200;
-// a delta that withholds a row still looks like "nothing changed"; a stats query that
-// counts a rewatch twice still renders a plausible number; a tombstone that never
-// reaches the other device just looks like that device being slow. None of it throws,
-// so only assertions catch it — and several of these are bugs the plan's own SQL had.
+// Everything pinned here fails SILENTLY in production. A sync that drops events still
+// answers 200; a lost concurrent write looks like "that device is behind"; a stats total
+// that counts sync batches instead of watches still renders a plausible number. None of
+// it throws, so assertions are the only thing that can catch it.
+//
+// The merge RULES live in historyDoc.test.ts, against the pure module. This file tests
+// the plumbing: authentication, the zero-write idle path, concurrency, and the
+// write-conflict refusal that stops a client clearing an outbox that never landed.
 
 import { describe, it, expect } from "vitest";
 import {
   MAX_EVENTS_PER_SYNC,
-  deriveStats,
   handleDeleteHistory,
   handleGetGlobalStats,
   handleGetHistory,
   handleGetHistoryStats,
   handleHistorySync,
+  historyObjectKeys,
   parseEvent,
+  parseEventId,
   parseRating,
 } from "./history";
+import { parseDoc } from "./historyDoc";
 
 const A = "AAAAH73X7P55T48R4CFHDED9CW";
 const B = "BBBBJ84Y8Q66V59S5DGJEFEAX0";
 const TOKENS: Record<string, string> = { "tok-a": A, "tok-b": B };
+const SEC = 1_700_000_000;
 
-const DEV1 = "device-one";
-const DEV2 = "device-two";
-
-/**
- * Hand-rolled D1 stand-in, the shape the other suites established: every SQL prefix a
- * handler issues gets an explicit branch and anything unrecognised throws. A fake that
- * quietly answers "no rows" turns a broken query into a passing test, which is the one
- * outcome worth nothing here.
- *
- * The upsert branches implement the REAL conflict semantics — the `updated_at` guard
- * and the `MAX(progress_pct)` — because those are the behaviours under test, not
- * incidental detail.
- */
+/** D1 stand-in. Unrecognised SQL throws — a fake that answers "no rows" hides a bug. */
 class FakeD1 {
   sessions = new Map<string, string>();
-  watch_history: any[] = [];
-  user_ratings: any[] = [];
+  history_meta: any[] = [];
 
   prepare(sql: string) {
-    return new FakeStmt(this, sql);
+    return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
   }
   async batch(stmts: FakeStmt[]) {
     const out = [];
@@ -53,192 +46,92 @@ class FakeD1 {
 
 class FakeStmt {
   args: any[] = [];
-  constructor(
-    private db: FakeD1,
-    private sql: string,
-  ) {}
-  bind(...a: any[]) {
-    this.args = a;
-    return this;
-  }
+  constructor(private db: FakeD1, private sql: string) {}
+  bind(...a: any[]) { this.args = a; return this; }
 
   async first<T>(): Promise<T | null> {
-    const s = this.sql.trimStart();
-    const a = this.args;
+    const s = this.sql, a = this.args;
     if (s.startsWith("SELECT user_id, expires_at, revoked_at FROM sessions")) {
       const u = this.db.sessions.get(a[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
     }
-    if (s.startsWith("SELECT COUNT(DISTINCT tmdb_id) AS n FROM watch_history")) {
-      const [userId, threshold] = a;
-      const ids = new Set(
-        this.db.watch_history
-          .filter(
-            (r) =>
-              r.user_id === userId && r.media_type === "MOVIE" && r.progress_pct >= threshold && r.deleted_at == null,
-          )
-          .map((r) => r.tmdb_id),
-      );
-      return { n: ids.size } as T;
+    if (s.startsWith("SELECT version, event_count, title_count, last_watched_at FROM history_meta")) {
+      return (this.db.history_meta.find((r) => r.user_id === a[0]) as T) ?? null;
     }
-    if (s.startsWith("SELECT COUNT(*) AS n FROM watch_history")) {
-      const [userId, threshold] = a;
-      const n = this.db.watch_history.filter(
-        (r) => r.user_id === userId && r.media_type === "SHOW" && r.progress_pct >= threshold && r.deleted_at == null,
-      ).length;
-      return { n } as T;
+    if (s.startsWith("SELECT COALESCE(SUM(event_count),0)")) {
+      return {
+        e: this.db.history_meta.reduce((n, r) => n + r.event_count, 0),
+        t: this.db.history_meta.reduce((n, r) => n + r.title_count, 0),
+        u: this.db.history_meta.length,
+      } as T;
     }
     throw new Error(`FakeD1: unhandled first() ${this.sql}`);
   }
 
-  async all<T>(): Promise<{ results: T[] }> {
-    const s = this.sql.trimStart();
-    const a = this.args;
-
-    // The sync delta over watch_history.
-    if (s.startsWith("SELECT id, media_type") && s.includes("updated_at > ?")) {
-      const [userId, since, deviceId, limit] = a;
-      const rows = this.db.watch_history
-        .filter((r) => r.user_id === userId && r.updated_at > since && (r.device_id ?? "") !== deviceId)
-        .sort((x, y) => x.updated_at - y.updated_at)
-        .slice(0, limit);
-      return { results: rows as T[] };
-    }
-    // The paginated history read: keyset on (watched_at, id), tombstones excluded.
-    if (s.startsWith("SELECT id, media_type")) {
-      const [userId, cursor, cursorEq, cursorId, typeNull, type, limit] = a;
-      const rows = this.db.watch_history
-        .filter((r) => r.user_id === userId && r.deleted_at == null)
-        .filter((r) => r.watched_at < cursor || (r.watched_at === cursorEq && r.id < cursorId))
-        .filter((r) => typeNull === null || r.media_type === type)
-        .sort((x, y) => y.watched_at - x.watched_at || (x.id < y.id ? 1 : x.id > y.id ? -1 : 0))
-        .slice(0, limit);
-      return { results: rows as T[] };
-    }
-    if (s.startsWith("SELECT media_type, tmdb_id, watch_status")) {
-      const [userId, since, limit] = a;
-      const rows = this.db.user_ratings
-        .filter((r) => r.user_id === userId && r.updated_at > since)
-        .sort((x, y) => x.updated_at - y.updated_at)
-        .slice(0, limit);
-      return { results: rows as T[] };
-    }
-    if (s.startsWith("SELECT show_tmdb_id,")) {
-      const [userId, threshold] = a;
-      const by = new Map<number, { eps: Set<string>; last: number }>();
-      for (const r of this.db.watch_history) {
-        if (r.user_id !== userId || r.show_tmdb_id == null) continue;
-        if (r.progress_pct < threshold || r.deleted_at != null) continue;
-        const e = by.get(r.show_tmdb_id) ?? { eps: new Set<string>(), last: 0 };
-        e.eps.add(`${r.season_number}:${r.episode_number}`);
-        e.last = Math.max(e.last, r.watched_at);
-        by.set(r.show_tmdb_id, e);
-      }
-      return {
-        results: [...by.entries()].map(([show_tmdb_id, v]) => ({
-          show_tmdb_id,
-          episodes_watched: v.eps.size,
-          last_watched_at: v.last,
-        })) as T[],
-      };
-    }
-    throw new Error(`FakeD1: unhandled all() ${this.sql}`);
-  }
-
   async run() {
-    const s = this.sql.trimStart();
-    const a = this.args;
-
-    if (s.startsWith("INSERT INTO watch_history")) {
-      const [
-        user_id,
-        id,
-        media_type,
-        tmdb_id,
-        tvdb_id,
-        show_tmdb_id,
-        season_number,
-        episode_number,
-        watched_at,
-        source,
-        progress_pct,
-        device_id,
-        deleted_at,
-        created_at,
-        updated_at,
-      ] = a;
-      const existing = this.db.watch_history.find((r) => r.user_id === user_id && r.id === id);
-      if (!existing) {
-        this.db.watch_history.push({
-          user_id,
-          id,
-          media_type,
-          tmdb_id,
-          tvdb_id,
-          show_tmdb_id,
-          season_number,
-          episode_number,
-          watched_at,
-          source,
-          progress_pct,
-          device_id,
-          deleted_at,
-          created_at,
-          updated_at,
-        });
-        return { success: true, meta: { changes: 1 } };
-      }
-      // DO UPDATE … WHERE excluded.updated_at > watch_history.updated_at
-      if (!(updated_at > existing.updated_at)) return { success: true, meta: { changes: 0 } };
-      existing.progress_pct = Math.max(existing.progress_pct, progress_pct);
-      existing.tvdb_id = tvdb_id ?? existing.tvdb_id;
-      existing.source = source;
-      existing.deleted_at = deleted_at;
-      existing.updated_at = updated_at;
+    const s = this.sql, a = this.args;
+    if (s.startsWith("INSERT INTO history_meta")) {
+      const [user_id, version, event_count, title_count, last_watched_at, updated_at] = a;
+      const row = this.db.history_meta.find((r) => r.user_id === user_id);
+      const next = { user_id, version, event_count, title_count, last_watched_at, updated_at };
+      if (row) Object.assign(row, next);
+      else this.db.history_meta.push(next);
       return { success: true, meta: { changes: 1 } };
     }
-
-    if (s.startsWith("INSERT INTO user_ratings")) {
-      const [user_id, media_type, tmdb_id, watch_status, rating, feedback, updated_at] = a;
-      const existing = this.db.user_ratings.find(
-        (r) => r.user_id === user_id && r.media_type === media_type && r.tmdb_id === tmdb_id,
-      );
-      if (!existing) {
-        this.db.user_ratings.push({ user_id, media_type, tmdb_id, watch_status, rating, feedback, updated_at });
-        return { success: true, meta: { changes: 1 } };
-      }
-      if (!(updated_at > existing.updated_at)) return { success: true, meta: { changes: 0 } };
-      Object.assign(existing, { watch_status, rating, feedback, updated_at });
+    if (s.startsWith("DELETE FROM history_meta")) {
+      this.db.history_meta = this.db.history_meta.filter((r) => r.user_id !== a[0]);
       return { success: true, meta: { changes: 1 } };
     }
-
-    if (s.startsWith("UPDATE watch_history SET deleted_at")) {
-      const [deleted_at, updated_at, user_id, id] = a;
-      const row = this.db.watch_history.find((r) => r.user_id === user_id && r.id === id && r.deleted_at == null);
-      if (!row) return { success: true, meta: { changes: 0 } };
-      Object.assign(row, { deleted_at, updated_at });
-      return { success: true, meta: { changes: 1 } };
-    }
-
     throw new Error(`FakeD1: unhandled run() ${this.sql}`);
   }
 }
 
-/** In-memory KV. `expirationTtl` is ignored — no test here turns on expiry timing. */
+/**
+ * R2 stand-in with REAL etag semantics.
+ *
+ * The conditional PUT is the only thing standing between two concurrent devices and
+ * silent data loss, so a fake that ignored `onlyIf` would make the most dangerous
+ * property in this feature untestable. `failNextPut` simulates losing that race.
+ */
+class FakeR2 {
+  objects = new Map<string, { body: ArrayBuffer; etag: string }>();
+  puts = 0;
+  gets = 0;
+  private seq = 0;
+  /** Upcoming conditional PUTs to reject, as a concurrent writer would. */
+  failNextPut = 0;
+
+  async get(key: string) {
+    this.gets++;
+    const o = this.objects.get(key);
+    if (!o) return null;
+    return { etag: o.etag, arrayBuffer: async () => o.body };
+  }
+
+  async put(key: string, body: ArrayBuffer | string, opts?: any) {
+    const existing = this.objects.get(key);
+    const cond = opts?.onlyIf;
+
+    if (this.failNextPut > 0) { this.failNextPut--; return null; }
+    if (cond?.etagMatches != null && existing?.etag !== cond.etagMatches) return null;
+    if (cond?.etagDoesNotMatch === "*" && existing) return null;
+
+    const buf = typeof body === "string" ? new TextEncoder().encode(body).buffer : body;
+    this.objects.set(key, { body: buf as ArrayBuffer, etag: `e${++this.seq}` });
+    this.puts++;
+    return { key };
+  }
+
+  async delete(key: string | string[]) {
+    for (const k of Array.isArray(key) ? key : [key]) this.objects.delete(k);
+  }
+}
+
 class FakeKV {
   store = new Map<string, string>();
-  reads = 0;
-  async get(key: string, _type?: string) {
-    this.reads++;
-    const v = this.store.get(key);
-    return v == null ? null : JSON.parse(v);
-  }
-  async put(key: string, value: string) {
-    this.store.set(key, value);
-  }
-  async delete(key: string) {
-    this.store.delete(key);
-  }
+  async get(k: string) { const v = this.store.get(k); return v == null ? null : JSON.parse(v); }
+  async put(k: string, v: string) { this.store.set(k, v); }
+  async delete(k: string) { this.store.delete(k); }
 }
 
 async function hash(token: string): Promise<string> {
@@ -249,7 +142,14 @@ async function hash(token: string): Promise<string> {
 async function env0() {
   const db = new FakeD1();
   for (const [tok, uid] of Object.entries(TOKENS)) db.sessions.set(await hash(tok), uid);
-  return { DB: db, HISTORY_STATS_KV: new FakeKV() } as any;
+  const analytics: any[] = [];
+  return {
+    DB: db,
+    BUCKET: new FakeR2(),
+    HISTORY_STATS_KV: new FakeKV(),
+    HISTORY_ANALYTICS: { writeDataPoint: (p: any) => analytics.push(p) },
+    __analytics: analytics,
+  } as any;
 }
 
 const syncReq = (token: string, body: unknown) =>
@@ -261,343 +161,323 @@ const syncReq = (token: string, body: unknown) =>
 
 const listReq = (token: string, qs = "") =>
   new Request(`https://flickto.app/api/history${qs}`, { headers: { Authorization: `Bearer ${token}` } });
-
 const statsReq = (token: string) =>
   new Request("https://flickto.app/api/history/stats", { headers: { Authorization: `Bearer ${token}` } });
-
 const delReq = (token: string) =>
-  new Request("https://flickto.app/api/history/x", {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  new Request("https://flickto.app/api/history/x", { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
 
-/** A movie watch. `watchedAt` doubles as the id suffix so ids stay distinct. */
-const movie = (tmdbId: number, watchedAt: number, over: Record<string, unknown> = {}) => ({
-  id: `watch-MOVIE-${tmdbId}-${Math.floor(watchedAt / 1000)}`,
-  mediaType: "MOVIE",
-  tmdbId,
-  watchedAt,
-  updatedAt: watchedAt,
-  ...over,
+const movie = (tmdbId: number, second: number, over: Record<string, unknown> = {}) => ({
+  id: `watch-MOVIE-${tmdbId}-${second}`,
+  mediaType: "MOVIE", tmdbId, watchedAt: second * 1000, ...over,
+});
+const ep = (tmdbId: number, s: number, e: number, second: number, over: Record<string, unknown> = {}) => ({
+  id: `watch-EPISODE-${tmdbId}-s${s}e${e}-${second}`,
+  mediaType: "SHOW", tmdbId, seasonNumber: s, episodeNumber: e, watchedAt: second * 1000, ...over,
 });
 
-const episode = (tmdbId: number, s: number, e: number, watchedAt: number, over: Record<string, unknown> = {}) => ({
-  id: `watch-EPISODE-${tmdbId}-s${s}e${e}-${Math.floor(watchedAt / 1000)}`,
-  mediaType: "SHOW",
-  tmdbId,
-  seasonNumber: s,
-  episodeNumber: e,
-  watchedAt,
-  updatedAt: watchedAt,
-  ...over,
-});
-
-const body = { events: [], ratings: [], lastSyncTimestamp: 0, deviceId: DEV1 };
+const base = { events: [], ratings: [], version: 0 };
+const docOf = async (env: any, userId = A) =>
+  parseDoc(env.BUCKET.objects.get(`history/${userId}.json`)!.body);
 
 describe("history: authentication", () => {
   it("refuses every endpoint without a session", async () => {
     const env = await env0();
-    const anon = (r: Request) => r;
-    expect((await handleHistorySync(anon(syncReq("nope", body)), env)).status).toBe(401);
+    expect((await handleHistorySync(syncReq("nope", base), env)).status).toBe(401);
     expect((await handleGetHistory(listReq("nope"), env)).status).toBe(401);
     expect((await handleGetHistoryStats(statsReq("nope"), env)).status).toBe(401);
     expect((await handleDeleteHistory("x", delReq("nope"), env)).status).toBe(401);
   });
 });
 
+describe("history: the zero-write idle path", () => {
+  it("writes nothing and never touches R2 when there is nothing to do", async () => {
+    // The single most important cost property. The previous design wrote a cursor row on
+    // EVERY pass — ~192 rows/device/day of pure heartbeat, which alone capped the free
+    // tier at ~500 users. An installed app spends almost all its life on this path.
+    const env = await env0();
+    const res = await handleHistorySync(syncReq("tok-a", base), env);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.upToDate).toBe(true);
+    expect(env.BUCKET.puts).toBe(0);
+    expect(env.BUCKET.gets).toBe(0);
+    expect(env.DB.history_meta).toHaveLength(0);
+  });
+
+  it("stays on the zero-write path once synced and current", async () => {
+    const env = await env0();
+    const first = await (await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env)).json();
+    const putsAfterWrite = env.BUCKET.puts;
+
+    const idle = await (await handleHistorySync(syncReq("tok-a", { ...base, version: first.version }), env)).json();
+    expect(idle.upToDate).toBe(true);
+    expect(idle.doc).toBeUndefined();
+    expect(env.BUCKET.puts).toBe(putsAfterWrite);
+  });
+});
+
 describe("history: sync", () => {
-  it("stores events and hands them to the account's OTHER device, but not back to the sender", async () => {
+  it("stores an entire import as ONE history write", async () => {
+    // The headline property: cost is no longer proportional to history size.
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)], deviceId: DEV1 }), env);
-    expect(env.DB.watch_history).toHaveLength(1);
+    const events = Array.from({ length: 400 }, (_, i) => ep(1396, 1 + (i % 8), i, SEC + i));
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, events }), env);
 
-    // The sender must not receive its own write back — it already has the row, and
-    // echoing it makes every sync re-insert what it just sent.
-    const own = await (await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV1 }), env)).json();
-    expect(own.serverEvents).toHaveLength(0);
-
-    const other = await (await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV2 }), env)).json();
-    expect(other.serverEvents).toHaveLength(1);
-    expect(other.serverEvents[0].tmdbId).toBe(550);
+    expect(res.status).toBe(200);
+    expect(env.BUCKET.puts).toBe(2); // the history document + the public recent slice
+    expect(env.DB.history_meta[0]).toMatchObject({ event_count: 400, title_count: 1, version: 1 });
   });
 
-  it("hands a row with NO device id to every device", async () => {
-    // `device_id != ?` is NULL — and therefore falsy — for a NULL device_id, so a bare
-    // `!=` withholds these rows from EVERYONE. A row nobody claims belongs to everyone.
+  it("keeps one account's history out of another's", async () => {
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)], deviceId: "" }), env);
-    expect(env.DB.watch_history[0].device_id).toBeNull();
-
-    const seen = await (await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV1 }), env)).json();
-    expect(seen.serverEvents).toHaveLength(1);
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const bs = await (await handleHistorySync(syncReq("tok-b", base), env)).json();
+    expect(bs.stats.events).toBe(0);
+    expect(env.BUCKET.objects.has(`history/${B}.json`)).toBe(false);
   });
 
-  it("keeps one account's events out of another's", async () => {
+  it("hands the whole document to a device that is behind", async () => {
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)] }), env);
-    const bs = await (await handleHistorySync(syncReq("tok-b", { ...body, deviceId: DEV2 }), env)).json();
-    expect(bs.serverEvents).toHaveLength(0);
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    // A second device that has never synced sends version 0.
+    const behind = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 0 }), env)).json();
+    expect(behind.upToDate).toBe(false);
+    expect(behind.doc.titles["MOVIE|550"]).toBeDefined();
   });
 
-  it("takes the newer write and ignores a stale one", async () => {
-    const env = await env0();
-    await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [movie(550, 1_000_000, { source: "TRAKT", updatedAt: 5_000 })] }),
-      env,
-    );
-    await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [movie(550, 1_000_000, { source: "STALE", updatedAt: 4_000 })] }),
-      env,
-    );
-    expect(env.DB.watch_history).toHaveLength(1);
-    expect(env.DB.watch_history[0].source).toBe("TRAKT");
-  });
-
-  it("never lets a later sync move progress backwards", async () => {
-    // A device that recorded 40% and only got online after another device recorded
-    // 100% would otherwise mark a finished film unfinished. Progress is monotonic in
-    // the user's experience of it, so the merge takes the max, not the newer value.
-    const env = await env0();
-    await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [movie(550, 1_000_000, { progressPct: 100, updatedAt: 5_000 })] }),
-      env,
-    );
-    await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [movie(550, 1_000_000, { progressPct: 40, updatedAt: 9_000 })] }),
-      env,
-    );
-    expect(env.DB.watch_history[0].progress_pct).toBe(100);
-  });
-
-  it("drops a malformed event and still writes the rest of the batch", async () => {
-    // The client's queue clears only on success, so failing the whole call over one bad
-    // row would wedge the queue forever — a permanently retried, permanently failing
-    // sync. Bad rows are discarded; good ones land.
+  it("drops a malformed event and still stores the rest", async () => {
+    // The client's outbox clears only on success, so failing a batch over one bad row
+    // would wedge that queue permanently.
     const env = await env0();
     const res = await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [{ id: "", mediaType: "MOVIE" }, movie(550, 1_000_000)] }),
+      syncReq("tok-a", { ...base, events: [{ id: "", mediaType: "MOVIE" }, movie(550, SEC)] }),
       env,
     );
     expect(res.status).toBe(200);
-    expect(env.DB.watch_history).toHaveLength(1);
+    expect(env.DB.history_meta[0].event_count).toBe(1);
   });
 
   it("refuses an oversized batch rather than truncating it", async () => {
-    // Truncating would silently discard the tail while telling the client everything
-    // synced, so those events would never be sent again.
+    // Truncating would tell the client everything synced while discarding the tail, and
+    // those events would never be sent again.
     const env = await env0();
-    // Derived from the constant, never a hardcoded number: a literal here silently
-    // stops testing the boundary the moment the cap moves, which is exactly what
-    // happened when it went 100 -> 500.
-    const events = Array.from({ length: MAX_EVENTS_PER_SYNC + 1 }, (_, i) => movie(500 + i, 1_000_000 + i));
-    const res = await handleHistorySync(syncReq("tok-a", { ...body, events }), env);
+    const events = Array.from({ length: MAX_EVENTS_PER_SYNC + 1 }, (_, i) => movie(500 + i, SEC + i));
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, events }), env);
     expect(res.status).toBe(413);
-    expect(env.DB.watch_history).toHaveLength(0);
-
-    // ...and one AT the cap is accepted, or "refuses oversized" would pass on a
-    // handler that refused everything.
-    const atCap = Array.from({ length: MAX_EVENTS_PER_SYNC }, (_, i) => movie(500 + i, 1_000_000 + i));
-    const ok = await handleHistorySync(syncReq("tok-a", { ...body, events: atCap }), env);
-    expect(ok.status).toBe(200);
-    expect(env.DB.watch_history).toHaveLength(MAX_EVENTS_PER_SYNC);
+    expect(env.BUCKET.puts).toBe(0);
   });
 
-  it("writes NOTHING to D1 when there is nothing to sync", async () => {
-    // A `sync_cursors` upsert used to run on every pass — ~2 rows written per pass,
-    // per device, forever, for a table no query ever read. At a 15-minute cadence
-    // that is ~192 rows/device/day of pure idle heartbeat, which is what capped the
-    // free tier at ~500 users. Dropped in migration 0019.
-    //
-    // The FakeD1 throws on any SQL it does not recognise and has no sync_cursors
-    // branch, so reinstating that write fails this test loudly rather than quietly
-    // costing money.
+  it("bumps the version once per write", async () => {
     const env = await env0();
-    const res = await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV1 }), env);
-    expect(res.status).toBe(200);
-    expect(env.DB.watch_history).toHaveLength(0);
-    expect(env.DB.user_ratings).toHaveLength(0);
-  });
-
-  it("syncs ratings with the same last-write-wins rule", async () => {
-    const env = await env0();
-    const rating = (r: number, updatedAt: number) => ({ mediaType: "MOVIE", tmdbId: 550, rating: r, updatedAt });
-    await handleHistorySync(syncReq("tok-a", { ...body, ratings: [rating(9, 5_000)] }), env);
-    await handleHistorySync(syncReq("tok-a", { ...body, ratings: [rating(3, 4_000)] }), env);
-    expect(env.DB.user_ratings[0].rating).toBe(9);
-
-    const seen = await (await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV2 }), env)).json();
-    expect(seen.serverRatings[0].rating).toBe(9);
-  });
-});
-
-describe("history: pagination", () => {
-  it("does not step over rows that share a watched_at", async () => {
-    // Marking a whole season watched in Trakt stamps every episode with ONE timestamp.
-    // A `watched_at < cursor` cursor skips the rest of that tie the moment a page
-    // boundary lands inside it, and the user simply never sees those episodes again.
-    const env = await env0();
-    const T = 1_700_000_000_000;
-    const events = [1, 2, 3, 4].map((e) => episode(1396, 1, e, T));
-    await handleHistorySync(syncReq("tok-a", { ...body, events }), env);
-
-    const page1 = await (await handleGetHistory(listReq("tok-a", "?limit=2"), env)).json();
-    expect(page1.events).toHaveLength(2);
-    expect(page1.nextCursor).toBe(T);
-
-    const page2 = await (
-      await handleGetHistory(listReq("tok-a", `?limit=2&cursor=${page1.nextCursor}&cursorId=${page1.nextCursorId}`), env)
+    const a = await (await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env)).json();
+    const b = await (
+      await handleHistorySync(syncReq("tok-a", { ...base, version: a.version, events: [movie(680, SEC)] }), env)
     ).json();
-    const ids = [...page1.events, ...page2.events].map((e: any) => e.id);
-    expect(new Set(ids).size).toBe(4);
-  });
-
-  it("returns no cursor on a short page", async () => {
-    const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)] }), env);
-    const page = await (await handleGetHistory(listReq("tok-a", "?limit=50"), env)).json();
-    expect(page.nextCursor).toBeNull();
-  });
-
-  it("filters by media type and hides tombstoned rows", async () => {
-    const env = await env0();
-    await handleHistorySync(
-      syncReq("tok-a", { ...body, events: [movie(550, 2_000_000), episode(1396, 1, 1, 1_000_000)] }),
-      env,
-    );
-    const movies = await (await handleGetHistory(listReq("tok-a", "?type=MOVIE"), env)).json();
-    expect(movies.events).toHaveLength(1);
-    expect(movies.events[0].mediaType).toBe("MOVIE");
-
-    await handleDeleteHistory("watch-MOVIE-550-2000", delReq("tok-a"), env);
-    const after = await (await handleGetHistory(listReq("tok-a", "?type=MOVIE"), env)).json();
-    expect(after.events).toHaveLength(0);
+    expect(a.version).toBe(1);
+    expect(b.version).toBe(2);
   });
 });
 
-describe("history: stats", () => {
-  it("counts a rewatched film once and a rewatched episode once per show", async () => {
+describe("history: concurrency", () => {
+  it("retries the merge when another device wins the race", async () => {
     const env = await env0();
-    await handleHistorySync(
-      syncReq("tok-a", {
-        ...body,
-        events: [
-          movie(550, 1_000_000),
-          movie(550, 9_000_000), // a rewatch: still one film watched
-          episode(1396, 1, 1, 2_000_000),
-          episode(1396, 1, 2, 3_000_000),
-          episode(1396, 1, 1, 8_000_000), // a rewatch: still two episodes of progress
-        ],
-      }),
-      env,
-    );
-    const stats = await deriveStats(env, A);
-    expect(stats.totalMovies).toBe(1);
-    // Episodes WATCHED counts every viewing — the user watched five episodes' worth.
-    expect(stats.totalEpisodes).toBe(3);
-    // Progress THROUGH the show must not advance on a rewatch.
-    expect(stats.shows).toHaveLength(1);
-    expect(stats.shows[0].episodesWatched).toBe(2);
-    expect(stats.shows[0].lastWatchedAt).toBe(8_000_000);
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+
+    env.BUCKET.failNextPut = 2; // lose twice, then succeed
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env);
+    expect(res.status).toBe(200);
+
+    const doc = await docOf(env);
+    expect(doc.titles["MOVIE|550"]).toBeDefined();
+    expect(doc.titles["MOVIE|680"]).toBeDefined();
   });
 
-  it("ignores abandoned watches and tombstones", async () => {
+  it("answers 409 rather than 200 when every attempt loses", async () => {
+    // ⚠️ The critical one. A 200 here would have the client clear an outbox whose
+    // contents were never stored — silent, permanent loss of those watches.
     const env = await env0();
-    await handleHistorySync(
-      syncReq("tok-a", {
-        ...body,
-        events: [movie(550, 1_000_000, { progressPct: 12 }), movie(680, 2_000_000)],
-      }),
-      env,
-    );
-    expect((await deriveStats(env, A)).totalMovies).toBe(1);
-
-    await handleDeleteHistory("watch-MOVIE-680-2000", delReq("tok-a"), env);
-    expect((await deriveStats(env, A)).totalMovies).toBe(0);
+    env.BUCKET.failNextPut = 99;
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    expect(res.status).toBe(409);
+    expect(env.DB.history_meta).toHaveLength(0);
   });
 
-  it("serves the cache on the second read and drops it when a sync writes", async () => {
+  it("lets only one of two brand-new writers create the object", async () => {
+    // Both devices see "no object" and take the create path; without the
+    // etagDoesNotMatch guard the loser's entire first upload would vanish.
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)] }), env);
-
-    const first = await (await handleGetHistoryStats(statsReq("tok-a"), env)).json();
-    expect(first.totalMovies).toBe(1);
-    expect(env.HISTORY_STATS_KV.store.has(`history:stats:${A}`)).toBe(true);
-
-    // A new watch must not be served from a stale blob. Without the invalidation the
-    // History tab reports yesterday's totals for five minutes after every watch.
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(680, 2_000_000)] }), env);
-    expect(env.HISTORY_STATS_KV.store.has(`history:stats:${A}`)).toBe(false);
-
-    const second = await (await handleGetHistoryStats(statsReq("tok-a"), env)).json();
-    expect(second.totalMovies).toBe(2);
+    env.BUCKET.failNextPut = 1;
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    expect(res.status).toBe(200);
+    expect((await docOf(env)).titles["MOVIE|550"]).toBeDefined();
   });
 });
 
 describe("history: delete", () => {
-  it("tombstones rather than removing, so the deletion reaches the other device", async () => {
+  it("tombstones the event so the deletion reaches other devices", async () => {
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)], deviceId: DEV1 }), env);
-    // Drain DEV2's delta so the tombstone below is the only thing it has left to learn.
-    const drain = await (await handleHistorySync(syncReq("tok-a", { ...body, deviceId: DEV2 }), env)).json();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
 
-    const res = await handleDeleteHistory("watch-MOVIE-550-1000", delReq("tok-a"), env);
+    const res = await handleDeleteHistory(`watch-MOVIE-550-${SEC}`, delReq("tok-a"), env);
     expect(res.status).toBe(200);
-    expect(env.DB.watch_history).toHaveLength(1);
 
-    const delta = await (
-      await handleHistorySync(
-        syncReq("tok-a", { ...body, deviceId: DEV2, lastSyncTimestamp: drain.syncTimestamp }),
-        env,
-      )
-    ).json();
-    expect(delta.serverEvents).toHaveLength(1);
-    expect(delta.serverEvents[0].deletedAt).toBeGreaterThan(0);
+    const doc = await docOf(env);
+    expect(doc.titles["MOVIE|550"]).toBeUndefined();
+    expect(doc.deleted[`watch-MOVIE-550-${SEC}`]).toBeGreaterThan(0);
+    expect(env.DB.history_meta[0].event_count).toBe(0);
   });
 
-  it("answers 404 for another account's event id, exactly as for one that does not exist", async () => {
+  it("cannot reach another account's history", async () => {
     const env = await env0();
-    await handleHistorySync(syncReq("tok-a", { ...body, events: [movie(550, 1_000_000)] }), env);
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    await handleDeleteHistory(`watch-MOVIE-550-${SEC}`, delReq("tok-b"), env);
+    // B's delete writes B's own (empty) document; A's is untouched.
+    expect((await docOf(env, A)).titles["MOVIE|550"]).toBeDefined();
+  });
 
-    const foreign = await handleDeleteHistory("watch-MOVIE-550-1000", delReq("tok-b"), env);
-    expect(foreign.status).toBe(404);
-    const missing = await handleDeleteHistory("watch-MOVIE-999-1000", delReq("tok-a"), env);
-    expect(missing.status).toBe(404);
-    // A's row is untouched — the 404 was a refusal, not a partial delete.
-    expect(env.DB.watch_history[0].deleted_at).toBeNull();
+  it("rejects an unparseable id instead of guessing", async () => {
+    const env = await env0();
+    expect((await handleDeleteHistory("nonsense", delReq("tok-a"), env)).status).toBe(400);
   });
 });
 
-describe("history: global stats", () => {
-  it("reports not_configured rather than a plausible zero", async () => {
-    // "Nobody has watched anything" and "the credential is missing" must not look the
-    // same — a zero would be cached and served confidently for an hour.
+describe("history: event id parsing", () => {
+  it("recovers title and second from the canonical ids", () => {
+    // Parsing rather than storing these strings is a large part of the 59x size win —
+    // at 2 billion events the ids alone were ~70 GB.
+    expect(parseEventId("watch-EPISODE-1396-s2e5-1753027200")).toMatchObject({
+      mediaType: "SHOW", tmdbId: 1396, seasonNumber: 2, episodeNumber: 5, watchedAt: 1753027200000,
+    });
+    expect(parseEventId("watch-MOVIE-550-1753027200")).toMatchObject({
+      mediaType: "MOVIE", tmdbId: 550, watchedAt: 1753027200000,
+    });
+    expect(parseEventId("watch-MOVIE-550-bad")).toBeNull();
+    expect(parseEventId("")).toBeNull();
+  });
+});
+
+describe("history: stats", () => {
+  it("serves per-user totals from the pointer row without reading R2", async () => {
     const env = await env0();
-    const res = await handleGetGlobalStats(new Request("https://flickto.app/api/stats/global"), env);
-    expect(res.status).toBe(503);
-    expect((await res.json()).error).toBe("not_configured");
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC), ep(1396, 1, 1, SEC)] }), env);
+    const getsBefore = env.BUCKET.gets;
+
+    const stats = await (await handleGetHistoryStats(statsReq("tok-a"), env)).json();
+    expect(stats).toMatchObject({ events: 2, titles: 2, version: 1 });
+    expect(env.BUCKET.gets).toBe(getsBefore);
+  });
+
+  it("drops the cached stats when a sync changes them", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    expect((await (await handleGetHistoryStats(statsReq("tok-a"), env)).json()).events).toBe(1);
+    expect(env.HISTORY_STATS_KV.store.has(`history:stats:${A}`)).toBe(true);
+
+    await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env);
+    expect(env.HISTORY_STATS_KV.store.has(`history:stats:${A}`)).toBe(false);
+    expect((await (await handleGetHistoryStats(statsReq("tok-a"), env)).json()).events).toBe(2);
+  });
+
+  it("sums exact fleet totals from the pointer rows, never from anyone's history", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC), movie(680, SEC)] }), env);
+    await handleHistorySync(syncReq("tok-b", { ...base, events: [ep(1396, 1, 1, SEC)] }), env);
+
+    const g = await (await handleGetGlobalStats(new Request("https://flickto.app/api/stats/global"), env)).json();
+    expect(g).toMatchObject({ totalWatches: 3, users: 2 });
+  });
+
+  it("still reports totals with no Analytics credential", async () => {
+    // The headline number is what users see; it must not depend on the optional half.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const g = await (await handleGetGlobalStats(new Request("https://flickto.app/api/stats/global"), env)).json();
+    expect(g.totalWatches).toBe(1);
+    expect(g.topTitles).toEqual([]);
+  });
+});
+
+describe("history: analytics batching", () => {
+  it("emits one data point per TITLE carrying a count, not one per event", async () => {
+    // Per event at 2 billion events would be ~$497/month. The count lives IN the point,
+    // so queries must SUM it — COUNT would report the number of sync batches.
+    const env = await env0();
+    await handleHistorySync(
+      syncReq("tok-a", { ...base, events: [ep(1396, 1, 1, SEC), ep(1396, 1, 2, SEC + 1), movie(550, SEC)] }),
+      env,
+    );
+    expect(env.__analytics).toHaveLength(2);
+    expect(env.__analytics.find((p: any) => p.blobs[2] === "1396").doubles[0]).toBe(2);
+    expect(env.__analytics.find((p: any) => p.blobs[2] === "550").doubles[0]).toBe(1);
+  });
+
+  it("does not double-count a re-sent batch", async () => {
+    // The outbox re-sends whenever a response is lost after the write landed. Counting
+    // the whole document each time would inflate fleet totals on every dropped connection.
+    const env = await env0();
+    const batch = { ...base, events: [movie(550, SEC)] };
+    await handleHistorySync(syncReq("tok-a", batch), env);
+    await handleHistorySync(syncReq("tok-a", batch), env);
+    const total = env.__analytics.reduce((n: number, p: any) => n + p.doubles[0], 0);
+    expect(total).toBe(1);
+  });
+});
+
+describe("history: paginated read", () => {
+  it("returns newest first and pages without losing rows on a timestamp tie", async () => {
+    // A whole season imported from Trakt shares one timestamp. The old keyset cursor
+    // stepped over the rest of the tie at a page boundary; this list is materialised from
+    // one snapshot, so it cannot.
+    const env = await env0();
+    const events = [1, 2, 3, 4].map((e) => ep(1396, 1, e, SEC));
+    await handleHistorySync(syncReq("tok-a", { ...base, events }), env);
+
+    const p1 = await (await handleGetHistory(listReq("tok-a", "?limit=2"), env)).json();
+    const p2 = await (await handleGetHistory(listReq("tok-a", `?limit=2&offset=${p1.nextOffset}`), env)).json();
+    expect(p1.total).toBe(4);
+    expect([...p1.events, ...p2.events]).toHaveLength(4);
+    expect(p2.nextOffset).toBeNull();
+  });
+
+  it("filters by media type", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC), ep(1396, 1, 1, SEC)] }), env);
+    const movies = await (await handleGetHistory(listReq("tok-a", "?type=MOVIE"), env)).json();
+    expect(movies.events).toHaveLength(1);
+    expect(movies.events[0].mediaType).toBe("MOVIE");
+  });
+});
+
+describe("history: the public slice", () => {
+  it("publishes a separate small object, never the private document", async () => {
+    // Serving the private document publicly would expose the user's entire viewing
+    // history to anyone holding the URL.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+
+    const [priv, pub] = historyObjectKeys(A);
+    expect(env.BUCKET.objects.has(priv)).toBe(true);
+    const recent = JSON.parse(new TextDecoder().decode(env.BUCKET.objects.get(pub)!.body));
+    expect(recent.totals.events).toBe(1);
+    expect(recent.recent[0]).toMatchObject({ tmdbId: 550 });
+    expect(recent.titles).toBeUndefined(); // no raw history in the public copy
   });
 });
 
 describe("history: validation", () => {
-  it("fills showTmdbId from tmdbId for a show and leaves it null for a movie", async () => {
-    // The Android entity has no separate show column; the show's TMDB id IS the row's
-    // tmdbId. The partial per-show index depends on movies keeping NULL here.
-    expect(parseEvent(episode(1396, 1, 1, 5))!.showTmdbId).toBe(1396);
-    expect(parseEvent(movie(550, 5))!.showTmdbId).toBeNull();
-  });
-
-  it("rejects the fields that become keys or totals", async () => {
-    expect(parseEvent({ ...movie(550, 5), id: "" })).toBeNull();
-    expect(parseEvent({ ...movie(550, 5), mediaType: "PODCAST" })).toBeNull();
-    expect(parseEvent({ ...movie(550, 5), tmdbId: 0 })).toBeNull();
-    expect(parseEvent({ ...movie(550, 5), watchedAt: Number.NaN })).toBeNull();
-    expect(parseEvent({ ...movie(550, 5), seasonNumber: "1" })).toBeNull();
+  it("rejects the fields that become keys or totals", () => {
+    expect(parseEvent({ ...movie(550, SEC), id: "" })).toBeNull();
+    expect(parseEvent({ ...movie(550, SEC), mediaType: "PODCAST" })).toBeNull();
+    expect(parseEvent({ ...movie(550, SEC), tmdbId: 0 })).toBeNull();
+    expect(parseEvent({ ...movie(550, SEC), watchedAt: Number.NaN })).toBeNull();
+    expect(parseEvent({ ...movie(550, SEC), seasonNumber: "1" })).toBeNull();
     expect(parseRating({ mediaType: "MOVIE", tmdbId: 550, rating: 11, updatedAt: 1 })).toBeNull();
     expect(parseRating({ mediaType: "MOVIE", tmdbId: 550, rating: 0, updatedAt: 1 })).toBeNull();
   });
 
-  it("clamps a nonsense progress rather than discarding the watch", async () => {
-    expect(parseEvent({ ...movie(550, 5), progressPct: 3000 })!.progressPct).toBe(100);
-    expect(parseEvent({ ...movie(550, 5), progressPct: -7 })!.progressPct).toBe(0);
+  it("clamps a nonsense progress rather than discarding the watch", () => {
+    expect(parseEvent({ ...movie(550, SEC), progressPct: 3000 })!.progressPct).toBe(100);
+    expect(parseEvent({ ...movie(550, SEC), progressPct: -7 })!.progressPct).toBe(0);
   });
 });

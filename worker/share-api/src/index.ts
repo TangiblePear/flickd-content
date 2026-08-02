@@ -52,11 +52,13 @@ interface Env {
   // Unset ⇒ /api/admin/* answers 403. Closed rather than open when unconfigured.
   ADMIN_KEY?: string;
   // Derived watch-history totals (src/history.ts). A CACHE, never a source of truth —
-  // every entry is reproducible from `watch_history` with a GROUP BY, so losing the
-  // namespace costs latency and nothing else.
+  // every entry is reproducible from the per-user R2 document, so losing the namespace
+  // costs latency and nothing else.
   HISTORY_STATS_KV?: KVNamespace;
-  // One data point per synced watch event. The only source for platform-wide numbers;
-  // `watch_history` is per-account and counting across it would be a full scan.
+  // One data point per TITLE per sync — never per event. At 2 billion events a per-event
+  // write would be ~$497/month; per title it is ~18x fewer and stays inside the included
+  // allowance. It is also the ONLY thing that can answer a cross-user question, because
+  // the history itself is an opaque R2 document.
   HISTORY_ANALYTICS?: AnalyticsEngineDataset;
   // Account id for the Analytics Engine SQL API — reading a dataset is an
   // account-level HTTP call, not a binding. The credential is a SECRET:

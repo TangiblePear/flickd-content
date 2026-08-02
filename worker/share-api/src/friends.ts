@@ -647,6 +647,13 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     await env.BUCKET.delete(`accounts/${id}/picture.jpg`);
     await env.BUCKET.delete(`accounts/${id}/picture-meta.json`);
     await env.BUCKET.delete(`_moderation/u/${id}.json`);
+    // ⚠️ The watch history itself. Since migration 0020 these objects ARE the data —
+    // every title the person ever watched and every rating they gave. D1 holds only a
+    // pointer row, so an erasure that cleared D1 and left these behind would delete the
+    // index to the data and keep the data, which is worse than doing nothing: it would
+    // look complete and be a total failure. The public slice goes too — it is a copy.
+    await env.BUCKET.delete(`history/${id}.json`);
+    await env.BUCKET.delete(`profile/${id}/recent.json`);
     // The public friend card. Leaving it behind keeps a deleted person's name, avatar
     // and picture URL resolvable by anyone still holding their code.
     const own = await env.DB.prepare("SELECT friend_code FROM users WHERE id = ?")
@@ -704,12 +711,11 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // `episode_ratings` is the user's PRIVATE per-episode record and goes with them.
     // It is not the same table as `episode_votes` above, which is the public poll;
     // both are deleted, for different reasons.
-    env.DB.prepare("DELETE FROM watch_history WHERE user_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM user_ratings WHERE user_id = ?").bind(id),
-    env.DB.prepare("DELETE FROM episode_ratings WHERE user_id = ?").bind(id),
-    // `sync_cursors` is NOT here because the table no longer exists (migration 0019).
-    // It was written on every sync pass and read by nothing, so it was dropped rather
-    // than kept as an empty table for a future reader to puzzle over.
+    // Watch history is ONE row here now — the pointer. The events themselves live in an
+    // R2 document, deleted above with the other account-keyed objects. `watch_history`,
+    // `user_ratings` and `episode_ratings` are gone as tables (migration 0020), and
+    // `sync_cursors` before them (0019, written every pass and read by nothing).
+    env.DB.prepare("DELETE FROM history_meta WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),

@@ -107,6 +107,12 @@ class FakeStmt {
       );
       return { n: who.size } as T;
     }
+    // Only reached when env.BUCKET is set — the erasure looks the code up to delete the
+    // public friend card. Earlier erasure tests passed no bucket, so this went unexercised.
+    if (s.startsWith("SELECT friend_code FROM users WHERE id = ?")) {
+      const u = this.db.users.find((x) => x.id === a[0]);
+      return u ? ({ friend_code: u.friend_code ?? null } as T) : null;
+    }
     if (s.startsWith("SELECT friend_id FROM users WHERE id = ?")) {
       const u = this.db.users.find((x) => x.id === a[0]);
       return u ? ({ friend_id: u.friend_id ?? null } as T) : null;
@@ -229,9 +235,10 @@ class FakeStmt {
       ["DELETE FROM episode_votes", "episode_votes", "user_id"],
       // Watch history and the private rating tables (migration 0018). A HARD delete
       // even though `watch_history` carries a tombstone column — see handleDeleteAccount.
-      ["DELETE FROM watch_history", "watch_history", "user_id"],
-      ["DELETE FROM user_ratings", "user_ratings", "user_id"],
-      ["DELETE FROM episode_ratings", "episode_ratings", "user_id"],
+      // Watch history is ONE pointer row now (migration 0020) — the events live in an R2
+      // document, deleted separately. watch_history / user_ratings / episode_ratings are
+      // gone as tables entirely.
+      ["DELETE FROM history_meta", "history_meta", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
@@ -818,32 +825,43 @@ describe("account deletion", () => {
    * the table under an erasure the user was told had completed. Account deletion has no
    * other device left to inform.
    */
-  it("erases watch history and the private rating tables outright, tombstones included", async () => {
-    const env = await env0();
-    env.DB.watch_history = [
-      { user_id: A, id: "watch-MOVIE-550-1000", tmdb_id: 550, deleted_at: null },
-      // Already tombstoned by a per-event delete. A soft-delete-based erasure would
-      // "succeed" on this row by changing nothing at all.
-      { user_id: A, id: "watch-MOVIE-680-2000", tmdb_id: 680, deleted_at: 1_700_000_000_000 },
-      { user_id: B, id: "watch-MOVIE-550-1000", tmdb_id: 550, deleted_at: null },
+  /**
+   * Watch history after migration 0020: D1 keeps only a pointer row, and the events
+   * themselves are an R2 document.
+   *
+   * ⚠️ The R2 assertion is the one that matters. An erasure that cleared D1 and left the
+   * objects behind would delete the INDEX to the data and keep the data — which is worse
+   * than doing nothing, because it looks complete. The public recent slice goes too: it
+   * is a copy of the same history, published for the web profile.
+   */
+  it("erases the history pointer row AND both R2 objects", async () => {
+    const env: any = await env0();
+    // Local fake: `makeBucket` belongs to the reports describe block, not this one.
+    const objects = new Map<string, string>();
+    env.BUCKET = {
+      objects,
+      put: async (k: string, v: string) => void objects.set(k, v),
+      delete: async (k: string) => void objects.delete(k),
+      get: async (k: string) => (objects.has(k) ? { body: objects.get(k) } : null),
+    } as any;
+    env.DB.history_meta = [
+      { user_id: A, version: 3, event_count: 2917, title_count: 160 },
+      { user_id: B, version: 1, event_count: 12, title_count: 4 },
     ];
-    env.DB.user_ratings = [
-      { user_id: A, media_type: "MOVIE", tmdb_id: 550, rating: 9 },
-      { user_id: B, media_type: "MOVIE", tmdb_id: 550, rating: 4 },
-    ];
-    env.DB.episode_ratings = [
-      { user_id: A, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 10 },
-      { user_id: B, show_tmdb_id: 1396, season_number: 1, episode_number: 1, rating: 7 },
-    ];
+    await env.BUCKET.put(`history/${A}.json`, "A-history");
+    await env.BUCKET.put(`profile/${A}/recent.json`, "A-public");
+    await env.BUCKET.put(`history/${B}.json`, "B-history");
 
     await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
       method: "DELETE",
       headers: { Authorization: "Bearer tok-a" },
     }), env);
 
-    expect(env.DB.watch_history.map((r: any) => r.user_id)).toEqual([B]);
-    expect(env.DB.user_ratings.map((r: any) => r.user_id)).toEqual([B]);
-    expect(env.DB.episode_ratings.map((r: any) => r.user_id)).toEqual([B]);
+    expect(env.DB.history_meta.map((r: any) => r.user_id)).toEqual([B]);
+    expect(objects.has(`history/${A}.json`)).toBe(false);
+    expect(objects.has(`profile/${A}/recent.json`)).toBe(false);
+    // Nobody else's history is touched.
+    expect(objects.has(`history/${B}.json`)).toBe(true);
   });
 
   /**

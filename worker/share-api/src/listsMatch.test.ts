@@ -253,9 +253,7 @@ class FakeStmt {
       ["DELETE FROM comments WHERE author_id", "comments", "author_id"],
       ["DELETE FROM episode_votes", "episode_votes", "user_id"],
       // Watch history and the private rating tables (migration 0018).
-      ["DELETE FROM watch_history", "watch_history", "user_id"],
-      ["DELETE FROM user_ratings", "user_ratings", "user_id"],
-      ["DELETE FROM episode_ratings", "episode_ratings", "user_id"],
+      ["DELETE FROM history_meta", "history_meta", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
