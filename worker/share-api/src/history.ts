@@ -66,11 +66,29 @@ interface AnalyticsDataPoint {
 // ── Limits ──────────────────────────────────────────────────────────────────
 
 /**
- * Events accepted in one sync call. Each one is a D1 write, and D1 caps a batch at
- * 100 statements — so this is not a politeness limit, it is the size of the batch
- * that can actually be issued. A first-login bulk upload of ten years of history
- * therefore arrives as many calls, which is also what keeps any single one of them
- * inside the Worker CPU budget.
+ * Events accepted in one sync call.
+ *
+ * ⚠️ This is a CHOSEN number, not a platform ceiling. An earlier version of this
+ * comment claimed "D1 caps a batch at 100 statements"; that is false, and the kind of
+ * false-fact-in-a-comment that gets believed later. D1's documented "100" is
+ * **maximum bound parameters per QUERY** — per individual statement — and the INSERT
+ * below binds 15. Nothing here is near a limit.
+ *
+ * What actually argues for chunking is failure semantics, not size. `DB.batch()` is a
+ * transaction: every row lands or none do. A phone uploading a decade of history in
+ * one request over mobile data, dying at 95%, would keep nothing and start again. At
+ * this size each batch commits independently, so progress is durable and resumable —
+ * which is what let a mis-triggered back-fill recover with no user action on
+ * 2026-08-02.
+ *
+ * The secondary argument is Worker CPU: building N prepared statements is CPU time,
+ * and the budget is per invocation.
+ *
+ * So this can safely go UP if the back-fill rate matters — 500 was measured as the
+ * obvious next step, cutting a ~2,900-event history from ~15 minutes to ~3. Raise the
+ * client's matching constant in `ServerHistoryRepository` at the same time, and note
+ * the ORDER: the server's cap must rise FIRST, or a client sending more than this
+ * gets a 413 and syncs nothing at all.
  */
 const MAX_EVENTS_PER_SYNC = 100;
 /** Same reasoning; ratings are a separate batch. */
