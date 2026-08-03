@@ -36,6 +36,14 @@ export interface IntegrationsEnv {
 const TARGETS = new Set(["TRAKT", "SIMKL"]);
 
 /**
+ * Sentinel `origin` meaning "this removal collapsed two records of ONE viewing".
+ *
+ * Not a target, and deliberately not one: it must suppress the outward push to *every*
+ * service, whereas a real origin excludes exactly the one it was observed from.
+ */
+export const ORIGIN_DEDUPE = "DEDUPE";
+
+/**
  * How long a device owns a claimed job.
  *
  * Long enough that a slow push over mobile data finishes; short enough that a device
@@ -134,6 +142,15 @@ export async function queueRemoval(
   origin?: string,
 ): Promise<void> {
   const exclude = (origin ?? "").toUpperCase();
+
+  // ⚠️ A de-duplication is NOT a deletion of the watch. Two rows described one viewing —
+  // the client pushed it, the service stored it under a coarser timestamp, and it came back
+  // as a second row. Collapsing them keeps the viewing under the OTHER id, so propagating a
+  // REMOVE would delete a watch the user still has, on every service at once. Excluded from
+  // all targets rather than one, which is why a single `origin` string cannot express it.
+  if (exclude === ORIGIN_DEDUPE) return;
+
+
   const targets = (await connectedTargets(env, userId)).filter((t) => t !== exclude);
   if (targets.length === 0) return;
   await env.DB.batch(

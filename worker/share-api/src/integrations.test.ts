@@ -20,6 +20,7 @@ import {
   handleUpdateIntegration,
   queuePushes,
   queueRemoval,
+  ORIGIN_DEDUPE,
   RECONCILE_LEASE_MS,
 } from "./integrations";
 
@@ -451,5 +452,22 @@ describe("integrations: the delete-reconcile lease", () => {
     });
     expect((await handleReconcileLease(bad, env)).status).toBe(400);
     expect((await handleReconcileLease(lease("nope", "phone"), env)).status).toBe(401);
+  });
+});
+
+describe("integrations: a de-duplication never propagates outward", () => {
+  it("queues nothing for ANY connected target", async () => {
+    // Two rows described one viewing: the client pushed it, Trakt stored it truncated to
+    // the minute, and it came back as a second row. Collapsing them keeps the viewing under
+    // the other id — so a REMOVE here would delete a watch the user still has, everywhere.
+    const env = await env0(["TRAKT", "SIMKL"]);
+    await queueRemoval(env, A, "watch-EPISODE-63646-s1e1-1785706054", NOW, ORIGIN_DEDUPE);
+    expect(env.DB.pending_integration_push).toHaveLength(0);
+  });
+
+  it("is distinct from a real origin, which still reaches the OTHER service", async () => {
+    const env = await env0(["TRAKT", "SIMKL"]);
+    await queueRemoval(env, A, "watch-MOVIE-550-1753027200", NOW, "TRAKT");
+    expect(env.DB.pending_integration_push.map((r: any) => r.target)).toEqual(["SIMKL"]);
   });
 });
