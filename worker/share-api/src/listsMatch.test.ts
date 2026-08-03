@@ -257,6 +257,8 @@ class FakeStmt {
       ["DELETE FROM pending_integration_push", "pending_integration_push", "user_id"],
       ["DELETE FROM user_integrations", "user_integrations", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
+      ["DELETE FROM user_settings", "user_settings", "user_id"],
+      ["DELETE FROM user_achievements", "user_achievements", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],

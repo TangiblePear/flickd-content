@@ -746,6 +746,13 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // subtracting this account from a historical total would corrupt the series
     // rather than protect anyone.
     env.DB.prepare("DELETE FROM user_telemetry WHERE user_id = ?").bind(id),
+    // Portable preferences and achievements (migration 0024). `user_settings` holds the
+    // person's gender alongside their theme and viewing preferences, and
+    // `user_achievements` is a record of their behaviour over years — both are as much
+    // "their data" as the profile row two lines below, and neither is reachable by any
+    // other cleanup path once `users` is gone.
+    env.DB.prepare("DELETE FROM user_settings WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM user_achievements WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profiles WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),

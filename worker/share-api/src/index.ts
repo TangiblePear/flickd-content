@@ -140,6 +140,8 @@ import {
 } from "./profiles";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { handlePutMyPush, readAccountPush } from "./push";
+import { handleGetMySettings, handlePutMySettings } from "./settings";
+import { handleGetMyAchievements, handlePutMyAchievements } from "./achievements";
 
 interface ShareItem {
   tmdbId: number;
@@ -366,6 +368,17 @@ export default {
       if (req.method === "PUT") return handlePutMyProfile(req, env, ctx);
     }
     if (p === "/api/me/stats" && req.method === "PUT") return handlePutMyStats(req, env, ctx);
+    // Portable preferences and achievements (migration 0024). Owner-only by
+    // construction — there is no foreign read route for either, and none should be
+    // added: `user_settings` carries the person's gender.
+    if (p === "/api/me/settings") {
+      if (req.method === "GET") return handleGetMySettings(req, env, ctx);
+      if (req.method === "PUT") return handlePutMySettings(req, env, ctx);
+    }
+    if (p === "/api/me/achievements") {
+      if (req.method === "GET") return handleGetMyAchievements(req, env, ctx);
+      if (req.method === "PUT") return handlePutMyAchievements(req, env, ctx);
+    }
     // Push topics on the account. Replaces `PUT /api/user/{friendId}/push`, which
     // authenticated on a relay-issued owner secret — so the friendId WAS the auth
     // scope. Both paths are served for one release; see push.ts.

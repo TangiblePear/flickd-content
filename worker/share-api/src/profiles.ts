@@ -15,6 +15,8 @@ import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
+import { readSettingsRow, toSettingsWire } from "./settings";
+import { readAchievementsRow, toAchievementsWire } from "./achievements";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -493,10 +495,21 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
   if (!session) return unauthorized();
   const row = await readProfileRow(env, session.userId);
   const friendships = await loadFriendships(env as any, session.userId);
+  // Preferences and achievements ride app-open for the same reason minSocialVersion and
+  // the feed page do: this request is already paid for, and Worker requests bind far
+  // tighter than rows. It is also what makes a restore on a new device cost ZERO extra
+  // requests — the sign-in pull is this call and nothing more.
+  //
+  // Null means "this account has none stored", which for an existing user is the normal
+  // case and must be read as "push yours", never as "you have none, adopt the blank".
+  const settingsRow = await readSettingsRow(env, session.userId);
+  const achievementsRow = await readAchievementsRow(env, session.userId);
   return json({
     userId: session.userId,
     profile: row ? toWire(row) : null,
     stats: row ? await readStats(env, session.userId) : null,
+    settings: settingsRow ? toSettingsWire(settingsRow) : null,
+    achievements: achievementsRow ? toAchievementsWire(achievementsRow) : null,
     friends: friendships.accepted,
     pending: friendships.incoming,
     outgoing: friendships.outgoing,

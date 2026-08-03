@@ -18,6 +18,8 @@ import { loadFriendships, loadFriendTopics } from "./friends";
 import { loadSharedLists, type ListsEnv } from "./lists";
 import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEnv } from "./match";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
+import { readSettingsRow, toSettingsWire } from "./settings";
+import { readAchievementsRow, toAchievementsWire } from "./achievements";
 import { maybeRollup, recordTelemetry, type TelemetryBlock, type TelemetryEnv } from "./telemetry";
 
 export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv & TelemetryEnv;
@@ -51,6 +53,10 @@ export interface SyncRequest {
   feedSince?: number;
   /** Profile version last seen; the server answers only when it holds a newer one. */
   profileVersion?: number;
+  /** Settings version last seen. Same contract as [profileVersion]. */
+  settingsVersion?: number;
+  /** Achievements version last seen. Same contract as [profileVersion]. */
+  achievementsVersion?: number;
   /** Newly-watched events, same shape as `POST /api/me/feed`. */
   events?: unknown[];
   /**
@@ -155,6 +161,20 @@ export async function handleSync(
   const row = await readProfileRow(env, session.userId);
   const profile = row && row.version > held ? toWire(row) : null;
 
+  // Preferences and achievements, on exactly the contract the profile uses above: sent
+  // only when the stored row is genuinely newer than what the client says it holds, so a
+  // current client re-renders nothing and a stale one is corrected in a request it was
+  // already making. `-1` for an absent field, so a client that has never synced (version
+  // 0 held) still receives the first row.
+  const settingsHeld = typeof body.settingsVersion === "number" ? body.settingsVersion : -1;
+  const settingsRow = await readSettingsRow(env, session.userId);
+  const settings = settingsRow && settingsRow.version > settingsHeld ? toSettingsWire(settingsRow) : null;
+
+  const achievementsHeld = typeof body.achievementsVersion === "number" ? body.achievementsVersion : -1;
+  const achievementsRow = await readAchievementsRow(env, session.userId);
+  const achievements =
+    achievementsRow && achievementsRow.version > achievementsHeld ? toAchievementsWire(achievementsRow) : null;
+
   // Has this account claimed a device friendId? It is the ONLY route from an account
   // to a push topic (topics are keyed by friendId, and the record lives in R2), so
   // without it `notifyAccount` finds nothing and every push silently does not happen.
@@ -211,6 +231,8 @@ export async function handleSync(
     feed: { events, cursor },
     friends,
     profile,
+    settings,
+    achievements,
     lists,
     match,
     relay,

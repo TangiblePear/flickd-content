@@ -26,6 +26,9 @@ interface Row {
 class FakeD1 {
   profiles: Row[] = [];
   profile_stats: Row[] = [];
+  /** Migration 0024. Bootstrap reads both, so the fake has to know them. */
+  user_settings: Row[] = [];
+  user_achievements: Row[] = [];
   friendships: Row[] = [];
   blocks: Row[] = [];
   /** Only `posting_suspended_until` is read from here; the rest of the row is irrelevant. */
@@ -64,6 +67,12 @@ class FakeStmt {
       const row = this.db.profiles.find((p) => p.user_id === this.args[0]);
       if (!row) return null;
       return (s.startsWith("SELECT version") ? { version: row.version } : row) as T;
+    }
+    if (s.includes("FROM user_settings WHERE user_id = ?")) {
+      return (this.db.user_settings.find((r) => r.user_id === this.args[0]) ?? null) as T | null;
+    }
+    if (s.includes("FROM user_achievements WHERE user_id = ?")) {
+      return (this.db.user_achievements.find((r) => r.user_id === this.args[0]) ?? null) as T | null;
     }
     if (s.startsWith("SELECT stats FROM profile_stats")) {
       const row = this.db.profile_stats.find((p) => p.user_id === this.args[0]);

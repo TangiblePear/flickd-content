@@ -242,6 +242,10 @@ class FakeStmt {
       ["DELETE FROM pending_integration_push", "pending_integration_push", "user_id"],
       ["DELETE FROM user_integrations", "user_integrations", "user_id"],
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
+      // Migration 0024. `user_settings` carries the person's gender; `user_achievements`
+      // is a record of their behaviour over years. Both are their data.
+      ["DELETE FROM user_settings", "user_settings", "user_id"],
+      ["DELETE FROM user_achievements", "user_achievements", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
@@ -791,6 +795,33 @@ describe("account deletion", () => {
     }), env);
 
     expect(env.DB.episode_votes.map((v: any) => v.user_id)).toEqual([B]);
+  });
+
+  /**
+   * Same hazard as the poll votes above, for the two tables migration 0024 added.
+   * `user_settings` holds the person's gender beside their theme; `user_achievements` is
+   * a multi-year record of their behaviour. Neither is reachable by any other cleanup
+   * path once the `users` row is gone, so being absent from the batch would leave them
+   * permanently — and silently, behind a 204.
+   */
+  it("erases portable settings and achievements", async () => {
+    const env = await env0();
+    env.DB.user_settings = [
+      { user_id: A, payload: '{"gender":"female"}', version: 3, updated_at: 1 },
+      { user_id: B, payload: '{"themeMode":"dark"}', version: 1, updated_at: 1 },
+    ];
+    env.DB.user_achievements = [
+      { user_id: A, payload: "[]", rules_version: 1, version: 1, updated_at: 1 },
+      { user_id: B, payload: "[]", rules_version: 1, version: 1, updated_at: 1 },
+    ];
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect(env.DB.user_settings.map((r: any) => r.user_id)).toEqual([B]);
+    expect(env.DB.user_achievements.map((r: any) => r.user_id)).toEqual([B]);
   });
 
   /**

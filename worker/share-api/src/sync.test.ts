@@ -47,6 +47,13 @@ class FakeStmt {
     if (s.includes("FROM profiles WHERE user_id = ?")) {
       return (this.db.profiles.find((p) => p.user_id === this.args[0]) ?? null) as T | null;
     }
+    // Migration 0024, both version-gated in the response exactly as `profile` is.
+    if (s.includes("FROM user_settings WHERE user_id = ?")) {
+      return ((this.db as any).user_settings?.find((r: any) => r.user_id === this.args[0]) ?? null) as T | null;
+    }
+    if (s.includes("FROM user_achievements WHERE user_id = ?")) {
+      return ((this.db as any).user_achievements?.find((r: any) => r.user_id === this.args[0]) ?? null) as T | null;
+    }
     // Has this account claimed a device friendId? Drives `policy.needsFriendId`, which
     // is what makes push delivery self-healing. `users` is not modelled here, so the
     // default is "claimed" — tests that care set `db.friendIds`.
