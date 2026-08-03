@@ -17,6 +17,8 @@ import {
   serialiseDoc,
   statsFor,
   type IncomingEvent,
+  TOMBSTONE_TTL_MS,
+  MAX_TOMBSTONES,
 } from "./historyDoc";
 
 const SEC = 1_700_000_000;
@@ -329,5 +331,69 @@ describe("tombstones identify their watch by ID, not by payload", () => {
     const doc = emptyDoc();
     applyToDoc(doc, [{ ...tombstone("legacy-id-shape"), mediaType: "MOVIE" }], [], 2);
     expect(doc.deleted["legacy-id-shape"]).toBe(5_000);
+  });
+});
+
+describe("tombstone purge", () => {
+  const movie = (sec: number) => ({
+    id: "watch-MOVIE-550-" + sec,
+    mediaType: "MOVIE",
+    tmdbId: 550,
+    watchedAt: sec * 1000,
+  });
+
+  it("keeps a tombstone inside the retention window", () => {
+    // Purging early resurrects the watch on any device that has not synced since. That is
+    // silent, user-visible corruption, against a saving of ~15 gzipped bytes.
+    const doc = emptyDoc();
+    const now = 10_000_000_000_000;
+    doc.deleted["watch-MOVIE-550-1753027200"] = now - TOMBSTONE_TTL_MS / 2;
+    applyToDoc(doc, [], [], now);
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBeDefined();
+  });
+
+  it("drops a tombstone past the retention window", () => {
+    const doc = emptyDoc();
+    const now = 10_000_000_000_000;
+    doc.deleted["watch-MOVIE-550-1753027200"] = now - TOMBSTONE_TTL_MS - 1;
+    applyToDoc(doc, [], [], now);
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBeUndefined();
+  });
+
+  it("⚠️ repairs BEFORE purging, so an expired tombstone cannot strand its watch", () => {
+    // The ordering is the whole safety property. Purge first and the watch stays in the
+    // document with nothing left recording that it was ever deleted - resurrected forever.
+    const doc = emptyDoc();
+    const now = 10_000_000_000_000;
+    doc.titles["MOVIE|550"] = { w: [[1753027200, 100, "TRAKT"]] };
+    doc.deleted["watch-MOVIE-550-1753027200"] = now - TOMBSTONE_TTL_MS - 1;
+
+    applyToDoc(doc, [], [], now);
+    expect(doc.titles["MOVIE|550"]).toBeUndefined();          // watch removed
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBeUndefined(); // and tombstone gone
+    expect(statsFor(doc).eventCount).toBe(0);
+  });
+
+  it("enforces the hard ceiling, dropping the OLDEST first", () => {
+    // Age alone is not a bound: deleting thousands in a week yields thousands of young
+    // tombstones. Oldest go first - every device has had longest to see them.
+    const doc = emptyDoc();
+    const now = 10_000_000_000_000;
+    for (let i = 0; i < MAX_TOMBSTONES + 50; i++) {
+      doc.deleted["watch-MOVIE-550-" + (1000000 + i)] = now - (MAX_TOMBSTONES + 50 - i) * 1000;
+    }
+    applyToDoc(doc, [], [], now);
+    const left = Object.keys(doc.deleted);
+    expect(left.length).toBe(MAX_TOMBSTONES);
+    expect(doc.deleted["watch-MOVIE-550-1000000"]).toBeUndefined();               // oldest dropped
+    expect(doc.deleted["watch-MOVIE-550-" + (1000000 + MAX_TOMBSTONES + 49)]).toBeDefined(); // newest kept
+  });
+
+  it("a fresh deletion still round-trips through the purge untouched", () => {
+    const doc = applyToDoc(emptyDoc(), [movie(1753027200)], [], 1);
+    const now = 10_000_000_000_000;
+    applyToDoc(doc, [{ ...movie(1753027200), deletedAt: now }], [], now);
+    expect(doc.deleted["watch-MOVIE-550-1753027200"]).toBe(now);
+    expect(statsFor(doc).eventCount).toBe(0);
   });
 });

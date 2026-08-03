@@ -29,6 +29,32 @@
  * behind" — so it must be provable in isolation.
  */
 
+/**
+ * How long a tombstone is retained.
+ *
+ * ## Why this is 90 days and not the 30 the plan suggested
+ *
+ * A tombstone exists so a deletion REACHES the account's other devices: a row that merely
+ * vanished is indistinguishable from one that never synced, so an offline device would
+ * re-upload it. Purge one too early and that is exactly what happens — the deleted watch
+ * comes back, on every device, silently.
+ *
+ * The saving is negligible against that risk. A tombstone is ~15 bytes gzipped, so a user
+ * deleting 100 items a year adds ~1.5 KB/year to a ~180 KB document. There is no storage
+ * case for being aggressive here, and a device offline for three months is far rarer than
+ * one offline for one.
+ */
+export const TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * Hard ceiling, so the map cannot grow without bound however the TTL behaves.
+ *
+ * Age alone is not a bound: a user who deletes thousands of rows in a week has thousands of
+ * young tombstones. Oldest are dropped first, since they are the ones every device has had
+ * the most opportunity to see.
+ */
+export const MAX_TOMBSTONES = 5000;
+
 /** Bump only for a shape change readers must branch on. */
 export const DOC_VERSION = 1;
 
@@ -193,6 +219,28 @@ export function applyToDoc(
   for (const id of Object.keys(doc.deleted)) {
     const real = parseEventId(id);
     if (real) removeWatch(doc, titleKey(normaliseType(real.mediaType), real.tmdbId), real);
+  }
+
+  // Purge expired tombstones — deliberately AFTER the repair sweep above.
+  //
+  // ⚠️ The order is load-bearing. The sweep removes any watch that a tombstone says should
+  // be gone; only then is the tombstone itself safe to drop. Purging first would delete the
+  // record of the deletion while the watch was still in the document, leaving it
+  // permanently resurrected with nothing left to say it had ever been deleted.
+  //
+  // Runs only inside applyToDoc, so it costs nothing on an idle sync — those never touch
+  // the document at all.
+  const tombstoned = Object.keys(doc.deleted);
+  if (tombstoned.length > 0) {
+    const cutoff = now - TOMBSTONE_TTL_MS;
+    for (const id of tombstoned) {
+      if (doc.deleted[id] < cutoff) delete doc.deleted[id];
+    }
+    const left = Object.keys(doc.deleted);
+    if (left.length > MAX_TOMBSTONES) {
+      left.sort((a, b) => doc.deleted[a] - doc.deleted[b]); // oldest first
+      for (const id of left.slice(0, left.length - MAX_TOMBSTONES)) delete doc.deleted[id];
+    }
   }
 
   doc.updatedAt = now;
