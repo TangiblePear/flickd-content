@@ -21,6 +21,7 @@ import {
   queuePushes,
   queueRemoval,
   ORIGIN_DEDUPE,
+  MAX_PUSH_ATTEMPTS,
   RECONCILE_LEASE_MS,
 } from "./integrations";
 
@@ -47,6 +48,10 @@ class FakeStmt {
       const u = this.db.sessions.get(a[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
     }
+    if (s.startsWith("SELECT attempts FROM pending_integration_push")) {
+      const r = this.db.pending_integration_push.find((x) => x.user_id === a[0] && x.id === a[1]);
+      return r ? ({ attempts: r.attempts ?? 0 } as T) : null;
+    }
     if (s.startsWith("SELECT reconcile_by, reconcile_at FROM user_integrations")) {
       const r = this.db.user_integrations.find((x) => x.user_id === a[0] && x.target === a[1]);
       return r ? ({ reconcile_by: r.reconcile_by ?? null, reconcile_at: r.reconcile_at ?? null } as T) : null;
@@ -59,11 +64,18 @@ class FakeStmt {
     if (s.startsWith("SELECT target FROM user_integrations")) {
       return { results: this.db.user_integrations.filter((r) => r.user_id === a[0] && r.connected === 1) as T[] };
     }
+    if (s.startsWith("SELECT target, COUNT(*) AS n FROM pending_integration_push")) {
+      const counts: Record<string, number> = {};
+      for (const r of this.db.pending_integration_push) {
+        if (r.user_id === a[0] && r.failed_at != null) counts[r.target] = (counts[r.target] ?? 0) + 1;
+      }
+      return { results: Object.entries(counts).map(([target, n]) => ({ target, n })) as T[] };
+    }
     if (s.startsWith("SELECT id, target, action, event_ids FROM pending_integration_push")) {
       const [userId, staleBefore, limit] = a;
       return {
         results: this.db.pending_integration_push
-          .filter((r) => r.user_id === userId && (r.claimed_by == null || r.claimed_at < staleBefore))
+          .filter((r) => r.user_id === userId && r.failed_at == null && (r.claimed_by == null || r.claimed_at < staleBefore))
           .sort((x, y) => x.created_at - y.created_at)
           .slice(0, limit) as T[],
       };
@@ -74,13 +86,16 @@ class FakeStmt {
   async run() {
     const s = this.sql, a = this.args;
     if (s.startsWith("INSERT INTO pending_integration_push")) {
-      const generic = s.includes("VALUES (?,?,?,?,?,?)");
+      const withAttempts = s.includes("VALUES (?,?,?,?,?,?,?,?)");
+      const generic = s.includes("VALUES (?,?,?,?,?,?)") || withAttempts;
       const [id, user_id, target, ...rest] = a;
       this.db.pending_integration_push.push({
         id, user_id, target,
         action: generic ? rest[0] : (s.includes("'REMOVE'") ? "REMOVE" : "ADD"),
         event_ids: generic ? rest[1] : rest[0],
         created_at: generic ? rest[2] : rest[1],
+        attempts: withAttempts ? rest[3] : 0,
+        failed_at: withAttempts ? rest[4] : null,
         claimed_by: null, claimed_at: null,
       });
       return { success: true, meta: { changes: 1 } };
@@ -90,6 +105,19 @@ class FakeStmt {
       const r = this.db.pending_integration_push.find((x) => x.user_id === userId && x.id === id);
       if (r) { r.claimed_by = by; r.claimed_at = at; }
       return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE pending_integration_push SET claimed_by = NULL, claimed_at = NULL, attempts = ?, failed_at = ?")) {
+      const [attempts, failedAt, userId, id] = a;
+      const r = this.db.pending_integration_push.find((x) => x.user_id === userId && x.id === id);
+      if (r) { r.claimed_by = null; r.claimed_at = null; r.attempts = attempts; r.failed_at = failedAt; }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE pending_integration_push SET failed_at = NULL, attempts = 0")) {
+      let n = 0;
+      for (const r of this.db.pending_integration_push) {
+        if (r.user_id === a[0] && r.target === a[1] && r.failed_at != null) { r.failed_at = null; r.attempts = 0; n++; }
+      }
+      return { success: true, meta: { changes: n } };
     }
     if (s.startsWith("UPDATE pending_integration_push SET claimed_by = NULL")) {
       const [userId, id] = a;
@@ -469,5 +497,86 @@ describe("integrations: a de-duplication never propagates outward", () => {
     const env = await env0(["TRAKT", "SIMKL"]);
     await queueRemoval(env, A, "watch-MOVIE-550-1753027200", NOW, "TRAKT");
     expect(env.DB.pending_integration_push.map((r: any) => r.target)).toEqual(["SIMKL"]);
+  });
+});
+
+describe("integrations: a dead integration eventually gives up", () => {
+  let env: any;
+  const fail = (pushId: string, failedIds: string[] = []) =>
+    handleConfirmPush(
+      new Request("https://flickto.app/api/history/confirm-push", {
+        method: "POST",
+        headers: { Authorization: "Bearer tok-a", "Content-Type": "application/json" },
+        body: JSON.stringify({ pushId, target: "TRAKT", succeeded: false, failedEventIds: failedIds }),
+      }),
+      env,
+    );
+
+  it("releases for retry below the ceiling, then marks the job failed", async () => {
+    // Releasing rather than deleting is deliberate - a dropped push is one nobody retries.
+    // But with no ceiling a revoked token re-issues the same doomed job forever.
+    env = await env0(["TRAKT"]);
+    await queuePushes(env, A, [ev("a", "MANUAL")], NOW);
+    const id = env.DB.pending_integration_push[0].id;
+
+    for (let i = 1; i < MAX_PUSH_ATTEMPTS; i++) {
+      const r = await (await fail(id)).json();
+      expect(r.gaveUp).toBe(false);
+      expect(r.released).toBe(true);
+    }
+    const last = await (await fail(id)).json();
+    expect(last.gaveUp).toBe(true);
+    expect(env.DB.pending_integration_push[0].failed_at).not.toBeNull();
+  });
+
+  it("a job that gave up is never handed out again", async () => {
+    env = await env0(["TRAKT"]);
+    await queuePushes(env, A, [ev("a", "MANUAL")], NOW);
+    const id = env.DB.pending_integration_push[0].id;
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) await fail(id);
+    expect(await claimPushes(env, A, "phone", NOW + 1)).toEqual([]);
+  });
+
+  it("keeps the row rather than deleting it, so the loss stays answerable", async () => {
+    // Deleting on give-up would reintroduce exactly the silent loss release-on-failure
+    // exists to prevent: watches missing from Trakt with nothing anywhere recording it.
+    env = await env0(["TRAKT"]);
+    await queuePushes(env, A, [ev("a", "MANUAL")], NOW);
+    const id = env.DB.pending_integration_push[0].id;
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) await fail(id);
+    expect(env.DB.pending_integration_push).toHaveLength(1);
+
+    const listed: any = await (await handleGetIntegrations(req("tok-a", null, "GET"), env)).json();
+    expect(listed.abandoned.TRAKT).toBe(1);
+  });
+
+  it("a PARTIAL failure cannot reset the counter and loop forever", async () => {
+    // The replacement is a new row with a new id. Without inheriting `attempts`, a job that
+    // fails partially every pass restarts the count each time and never gives up.
+    env = await env0(["TRAKT"]);
+    await queuePushes(env, A, [ev("a", "MANUAL"), ev("b", "MANUAL")], NOW);
+    let id = env.DB.pending_integration_push[0].id;
+
+    for (let i = 1; i <= MAX_PUSH_ATTEMPTS; i++) {
+      const r: any = await (await fail(id, ["b"])).json();
+      expect(r.attempts).toBe(i);
+      id = env.DB.pending_integration_push[0].id;
+    }
+    expect(env.DB.pending_integration_push[0].failed_at).not.toBeNull();
+  });
+
+  it("reconnecting REVIVES a backlog that had given up", async () => {
+    // A lapsed token is the usual cause, and re-authorising is exactly what makes the work
+    // deliverable again. A permanent give-up would strand it.
+    env = await env0(["TRAKT"]);
+    await queuePushes(env, A, [ev("a", "MANUAL")], NOW);
+    const id = env.DB.pending_integration_push[0].id;
+    for (let i = 0; i < MAX_PUSH_ATTEMPTS; i++) await fail(id);
+    expect(await claimPushes(env, A, "phone", NOW + 1)).toEqual([]);
+
+    await handleUpdateIntegration(req("tok-a", { target: "TRAKT", connected: true }), env);
+    expect(env.DB.pending_integration_push[0].failed_at).toBeNull();
+    expect(env.DB.pending_integration_push[0].attempts).toBe(0);
+    expect(await claimPushes(env, A, "phone", NOW + 2)).toHaveLength(1);
   });
 });

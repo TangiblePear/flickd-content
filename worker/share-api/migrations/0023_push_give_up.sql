@@ -1,0 +1,25 @@
+-- Bounded retries for an integration that has stopped accepting pushes.
+--
+-- ## The gap this closes
+--
+-- A failed push RELEASES its claim rather than being deleted, so it is retried — that part
+-- is deliberate and must stay: silently dropping it would leave the user's Trakt history
+-- missing entries with nothing anywhere to notice. But nothing ever counted the retries, so
+-- a permanently dead integration (revoked token, deleted Trakt account, an event Trakt will
+-- never accept) re-issued the same doomed job on every sync pass, forever.
+--
+-- ## Why the job is MARKED rather than deleted
+--
+-- Deleting on give-up would reintroduce exactly the silent loss the release-on-failure rule
+-- exists to prevent. `failed_at` stops it being claimed while keeping it queryable, so
+-- "these watches never reached Trakt" remains an answerable question.
+--
+-- ## Giving up is reversible
+--
+-- Reconnecting the integration clears `failed_at` and resets `attempts`, so the backlog is
+-- retried. The usual cause is a lapsed token, and re-authorising is precisely the user
+-- action that makes those jobs viable again — a permanent give-up would strand work that
+-- has just become deliverable. Same reasoning as reconciling state every pass rather than
+-- registering once on an event.
+ALTER TABLE pending_integration_push ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE pending_integration_push ADD COLUMN failed_at INTEGER;

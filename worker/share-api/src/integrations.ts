@@ -59,6 +59,20 @@ const MAX_JOBS_PER_SYNC = 5;
 /** Ids per job — one sync batch's worth. */
 const MAX_EVENT_IDS = 5000;
 
+/**
+ * Retries before a job is marked permanently failed.
+ *
+ * A failed push releases its claim rather than being deleted, which is right — dropping it
+ * would leave the user's history missing entries with nothing to notice. But without a
+ * ceiling, a dead integration (revoked token, an event the service will never accept)
+ * re-issues the same doomed job on every sync pass forever.
+ *
+ * Eight is chosen against the sync cadence, not plucked: passes are ~15 minutes apart, so
+ * this rides out roughly two hours of a service outage before concluding the job itself is
+ * the problem. Giving up is reversible — reconnecting revives the backlog.
+ */
+const MAX_PUSH_ATTEMPTS = 8;
+
 export interface PendingPush {
   pushId: string;
   target: string;
@@ -182,7 +196,7 @@ export async function claimPushes(
 ): Promise<PendingPush[]> {
   const { results } = await env.DB.prepare(
     `SELECT id, target, action, event_ids FROM pending_integration_push
-      WHERE user_id = ? AND (claimed_by IS NULL OR claimed_at < ?)
+      WHERE user_id = ? AND failed_at IS NULL AND (claimed_by IS NULL OR claimed_at < ?)
       ORDER BY created_at ASC LIMIT ?`,
   )
     .bind(userId, now - CLAIM_TTL_MS, MAX_JOBS_PER_SYNC)
@@ -254,15 +268,28 @@ export async function handleConfirmPush(req: Request, env: IntegrationsEnv, ctx?
     ? body.target.toUpperCase()
     : null;
 
+  // The attempt count so far. Read before either branch, because both consume one.
+  const row = await env.DB.prepare(
+    "SELECT attempts FROM pending_integration_push WHERE user_id = ? AND id = ?",
+  )
+    .bind(session.userId, pushId)
+    .first<{ attempts: number }>();
+  const attempts = (row?.attempts ?? 0) + 1;
+  const givingUp = attempts >= MAX_PUSH_ATTEMPTS;
+
   if (failedIds.length > 0 && target) {
     // Replace the job with one covering ONLY the failures. Re-queueing the whole batch
     // would re-push what already landed and duplicate it in Trakt.
+    //
+    // ⚠️ The replacement INHERITS the attempt count. It is a new row with a new id, so
+    // without this a job that keeps failing partially resets its counter every pass and
+    // retries forever — the exact loop the ceiling exists to stop.
     await env.DB.batch([
       env.DB.prepare("DELETE FROM pending_integration_push WHERE user_id = ? AND id = ?").bind(session.userId, pushId),
       env.DB
         .prepare(
-          `INSERT INTO pending_integration_push (id, user_id, target, action, event_ids, created_at)
-           VALUES (?,?,?,?,?,?)`,
+          `INSERT INTO pending_integration_push (id, user_id, target, action, event_ids, created_at, attempts, failed_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
         )
         .bind(
           crypto.randomUUID(),
@@ -271,18 +298,25 @@ export async function handleConfirmPush(req: Request, env: IntegrationsEnv, ctx?
           typeof body.action === "string" && body.action.toUpperCase() === "REMOVE" ? "REMOVE" : "ADD",
           JSON.stringify(failedIds.slice(0, MAX_EVENT_IDS)),
           Date.now(),
+          attempts,
+          givingUp ? Date.now() : null,
         ),
     ]);
-    return json({ ok: true, requeued: failedIds.length });
+    return json({ ok: true, requeued: failedIds.length, attempts, gaveUp: givingUp });
   }
 
-  // Whole-job failure: release the claim so it is retried rather than lost.
+  // Whole-job failure: release the claim so it is retried rather than lost — until the
+  // ceiling, at which point it is MARKED rather than deleted. Deleting would reintroduce
+  // exactly the silent loss that release-on-failure exists to prevent; `failed_at` stops it
+  // being claimed while keeping "these watches never reached Trakt" an answerable question.
   await env.DB.prepare(
-    "UPDATE pending_integration_push SET claimed_by = NULL, claimed_at = NULL WHERE user_id = ? AND id = ?",
+    `UPDATE pending_integration_push
+        SET claimed_by = NULL, claimed_at = NULL, attempts = ?, failed_at = ?
+      WHERE user_id = ? AND id = ?`,
   )
-    .bind(session.userId, pushId)
+    .bind(attempts, givingUp ? Date.now() : null, session.userId, pushId)
     .run();
-  return json({ ok: true, released: true });
+  return json({ ok: true, released: !givingUp, attempts, gaveUp: givingUp });
 }
 
 /**
@@ -319,6 +353,17 @@ export async function handleUpdateIntegration(
         session.userId,
         target,
       ),
+    );
+  } else {
+    // Reconnecting REVIVES a backlog that had given up. The usual reason pushes die is a
+    // lapsed token, and re-authorising is exactly the action that makes those jobs
+    // deliverable again — leaving them dead would strand work that has just become valid.
+    // Costs nothing when there is nothing failed, which is the normal case.
+    statements.push(
+      env.DB.prepare(
+        `UPDATE pending_integration_push SET failed_at = NULL, attempts = 0
+          WHERE user_id = ? AND target = ? AND failed_at IS NOT NULL`,
+      ).bind(session.userId, target),
     );
   }
   await env.DB.batch(statements);
@@ -404,7 +449,14 @@ export async function handleGetIntegrations(
 ): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
-  return json({ targets: await connectedTargets(env, session.userId) });
+  const { results } = await env.DB.prepare(
+    "SELECT target, COUNT(*) AS n FROM pending_integration_push WHERE user_id = ? AND failed_at IS NOT NULL GROUP BY target",
+  )
+    .bind(session.userId)
+    .all<{ target: string; n: number }>();
+  const abandoned: Record<string, number> = {};
+  for (const r of results ?? []) abandoned[r.target] = r.n;
+  return json({ targets: await connectedTargets(env, session.userId), abandoned });
 }
 
 /** Account deletion. Exported so the erasure batch cannot forget these two tables. */
@@ -413,4 +465,4 @@ export const integrationErasureSql = [
   "DELETE FROM user_integrations WHERE user_id = ?",
 ];
 
-export { CLAIM_TTL_MS, MAX_JOBS_PER_SYNC, RECONCILE_LEASE_MS };
+export { CLAIM_TTL_MS, MAX_JOBS_PER_SYNC, MAX_PUSH_ATTEMPTS, RECONCILE_LEASE_MS };
