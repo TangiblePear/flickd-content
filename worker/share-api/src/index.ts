@@ -142,6 +142,12 @@ import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { handlePutMyPush, readAccountPush } from "./push";
 import { handleGetMySettings, handlePutMySettings } from "./settings";
 import { handleGetMyAchievements, handlePutMyAchievements } from "./achievements";
+import {
+  handleAdhocCreate,
+  handleAdhocGet,
+  handleAdhocMeta,
+  handleAdhocPut,
+} from "./matchAdhoc";
 
 interface ShareItem {
   tmdbId: number;
@@ -431,6 +437,19 @@ export default {
 
     const listTarget = p.match(/^\/api\/lists\/shared\/([0-9A-HJKMNP-TV-Z]{8,40})$/);
     if (listTarget && req.method === "DELETE") return handleDeleteSharedList(listTarget[1], req, env, ctx);
+
+    // ── Account-free Friend Match, by QR, in person ──
+    // Deliberately UNAUTHENTICATED: the whole point is that neither side needs an account.
+    // Unlike `/api/social/backup`, whose lookup key is client-chosen, the token here is
+    // SERVER-minted, so the namespace cannot be sprayed. See matchAdhoc.ts.
+    if (p === "/api/match/adhoc" && req.method === "POST") return handleAdhocCreate(req, env);
+    const adhocHalf = p.match(/^\/api\/match\/adhoc\/([0-9A-HJKMNP-TV-Z]{26})\/([ab])$/);
+    if (adhocHalf) {
+      if (req.method === "PUT") return handleAdhocPut(adhocHalf[1], adhocHalf[2], req, env);
+      if (req.method === "GET") return handleAdhocGet(adhocHalf[1], adhocHalf[2], env);
+    }
+    const adhocMeta = p.match(/^\/api\/match\/adhoc\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (adhocMeta && req.method === "GET") return handleAdhocMeta(adhocMeta[1], env);
 
     if (p === "/api/match" && req.method === "GET") return handleGetMatches(req, env, ctx);
     if (p === "/api/match/request" && req.method === "POST") {
