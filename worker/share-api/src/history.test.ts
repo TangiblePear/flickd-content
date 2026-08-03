@@ -35,6 +35,10 @@ class FakeD1 {
   history_meta: any[] = [];
   user_integrations: any[] = [];
   pending_integration_push: any[] = [];
+  /** Fleet telemetry rows written off the back of a sync — see the telemetry describe. */
+  user_telemetry: any[] = [];
+  /** Days already rolled up. Pre-seeded so `maybeRollup` returns at its first read. */
+  telemetry_daily = new Set<string>();
 
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -70,6 +74,9 @@ class FakeStmt {
         t: this.db.history_meta.reduce((n, r) => n + r.title_count, 0),
         u: this.db.history_meta.length,
       } as T;
+    }
+    if (s.startsWith("SELECT day FROM telemetry_daily")) {
+      return (this.db.telemetry_daily.has(a[0]) ? { day: a[0] } : null) as T | null;
     }
     throw new Error(`FakeD1: unhandled first() ${this.sql}`);
   }
@@ -150,6 +157,19 @@ class FakeStmt {
       this.db.history_meta = this.db.history_meta.filter((r) => r.user_id !== a[0]);
       return { success: true, meta: { changes: 1 } };
     }
+    if (s.startsWith("INSERT INTO user_telemetry")) {
+      // Mirrors the real ON CONFLICT(user_id, device_id) key and its once-a-day guard:
+      // the second report of the same UTC day writes nothing.
+      const [user_id, device_id, platform, version_code, country, last_seen_at, reported_on] = a;
+      const row = this.db.user_telemetry.find((r) => r.user_id === user_id && r.device_id === device_id);
+      if (!row) {
+        this.db.user_telemetry.push({ user_id, device_id, platform, version_code, country, last_seen_at, reported_on });
+        return { success: true, meta: { changes: 1 } };
+      }
+      if (row.reported_on === reported_on) return { success: true, meta: { changes: 0 } };
+      Object.assign(row, { platform, version_code, country, last_seen_at, reported_on });
+      return { success: true, meta: { changes: 1 } };
+    }
     throw new Error(`FakeD1: unhandled run() ${this.sql}`);
   }
 }
@@ -210,6 +230,10 @@ async function hash(token: string): Promise<string> {
 async function env0() {
   const db = new FakeD1();
   for (const [tok, uid] of Object.entries(TOKENS)) db.sessions.set(await hash(tok), uid);
+  // Yesterday is already rolled up, so `maybeRollup` returns at its first read instead of
+  // running an aggregation this fake has no reason to model. Delete the entry in a test
+  // that wants the rollup path.
+  db.telemetry_daily.add(new Date(Date.now() - 86_400_000).toISOString().slice(0, 10));
   const analytics: any[] = [];
   return {
     DB: db,
@@ -282,6 +306,77 @@ describe("history: the zero-write idle path", () => {
     expect(idle.upToDate).toBe(true);
     expect(idle.doc).toBeUndefined();
     expect(env.BUCKET.puts).toBe(putsAfterWrite);
+  });
+});
+
+describe("history: fleet telemetry rides this endpoint", () => {
+  // Telemetry used to be written ONLY by `/api/sync`, reached only by SocialSyncWorker —
+  // a 24h job whose one prompt firing is spent before the user has signed in. Measured
+  // against production on 2026-08-02: 9 accounts, 6 telemetry rows, and the 3 missing were
+  // the 3 newest. This endpoint runs every 15 minutes for every signed-in device, so it is
+  // what makes coverage independent of whether anyone opened the Friends tab.
+  //
+  // Every assertion here fails silently in production: a telemetry row that is never
+  // written looks exactly like a device that is not there.
+
+  it("records a row on the ZERO-WRITE idle path", async () => {
+    // The important one. The idle path is where an installed app spends almost all its
+    // life, so recording only on the write paths would rebuild the hole this closes.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "dev-1" }), env);
+
+    expect(env.DB.user_telemetry).toHaveLength(1);
+    expect(env.DB.user_telemetry[0]).toMatchObject({ user_id: A, device_id: "dev-1", platform: "android" });
+  });
+
+  it("keys the row per device, so an account's phone and tablet do not overwrite each other", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "phone" }), env);
+    await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "tablet" }), env);
+
+    expect(env.DB.user_telemetry.map((r) => r.device_id).sort()).toEqual(["phone", "tablet"]);
+  });
+
+  it("reads the app version off X-App-Version rather than the body", async () => {
+    // This is what lets version data work without an app release: the header is already
+    // stamped on every call by the client's OkHttp interceptor.
+    const env = await env0();
+    const req = new Request("https://flickto.app/api/history/sync", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer tok-a",
+        "Content-Type": "application/json",
+        "X-App-Version": "33",
+      },
+      body: JSON.stringify({ ...base, deviceId: "dev-1" }),
+    });
+    await handleHistorySync(req, env);
+
+    expect(env.DB.user_telemetry[0].version_code).toBe(33);
+  });
+
+  it("writes at most once per device per UTC day", async () => {
+    const env = await env0();
+    for (let i = 0; i < 5; i++) await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "dev-1" }), env);
+
+    expect(env.DB.user_telemetry).toHaveLength(1);
+  });
+
+  it("never records without a session", async () => {
+    const env = await env0();
+    expect((await handleHistorySync(syncReq("nope", base), env)).status).toBe(401);
+    expect(env.DB.user_telemetry).toHaveLength(0);
+  });
+
+  it("still answers 200 when the telemetry write throws", async () => {
+    // Telemetry must never fail, slow, or change the shape of a sync.
+    const env = await env0();
+    env.DB.prepare = (sql: string) => {
+      if (sql.includes("user_telemetry")) throw new Error("D1 exploded");
+      return FakeD1.prototype.prepare.call(env.DB, sql);
+    };
+    const res = await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "dev-1" }), env);
+    expect(res.status).toBe(200);
   });
 });
 

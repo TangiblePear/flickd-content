@@ -65,6 +65,9 @@ beforeEach(() => {
   raw.exec("CREATE TABLE episode_votes (user_id TEXT)");
   raw.exec("CREATE TABLE shared_lists (id TEXT PRIMARY KEY)");
   raw.exec("CREATE TABLE reports (id TEXT PRIMARY KEY, state TEXT)");
+  // The server-side history pointer (migration 0020). One row per user, never per event —
+  // the events are an R2 document, so "has this account uploaded" is only answerable here.
+  raw.exec("CREATE TABLE history_meta (user_id TEXT PRIMARY KEY, event_count INTEGER NOT NULL DEFAULT 0)");
   raw.exec(MIGRATION);
   for (const id of [ME, YOU]) {
     raw.prepare("INSERT INTO users (id, created_at) VALUES (?, ?)").run(id, Date.now());
@@ -186,7 +189,15 @@ describe("handleInsights", () => {
       discover: 2,
       saved: 1,
     });
-    expect(b.featureCounts.find((f: any) => f.key === "watched")).toEqual({ key: "watched", sum: 40, devices: 2 });
+    // `values` carries every device's own figure, ascending. The sum and the denominator
+    // are kept too, but the panel draws the values: a mean over a library-size column is
+    // not describable when most devices are 0 and one has imported a back catalogue.
+    expect(b.featureCounts.find((f: any) => f.key === "watched")).toEqual({
+      key: "watched",
+      sum: 40,
+      devices: 2,
+      values: [10, 30],
+    });
   });
 
   it("survives a malformed JSON blob instead of failing the whole page", async () => {
@@ -215,5 +226,160 @@ describe("handleInsights", () => {
     const b = await body();
     expect(b.totals.accountsWithFriends).toBe(2);
     expect(b.totals.friendships).toBe(1);
+  });
+});
+
+// ── Coverage ───────────────────────────────────────────────────────────────────
+//
+// The panel this feeds exists because the page used to print "Accounts 9" beside
+// distributions totalling 6 and explain the difference in a footnote. A reader had no way
+// to tell a real zero from an absent one.
+
+describe("handleInsights: coverage", () => {
+  it("separates accounts, reporting, rich and active", async () => {
+    device({ user_id: ME, device_id: "rich" });
+    // Header-only: the row a client lands before it ever sends the telemetry block.
+    device({
+      user_id: YOU,
+      device_id: "",
+      version_name: null,
+      language: null,
+      build_type: null,
+      os_api: null,
+      manufacturer: null,
+      model: null,
+      installer: null,
+      integrations: null,
+      features: null,
+    });
+
+    const b = await body();
+    expect(b.coverage.accounts).toBe(2);
+    expect(b.coverage.reporting).toBe(2);
+    // Only the row carrying a versionName counts as rich.
+    expect(b.coverage.rich).toBe(1);
+  });
+
+  it("counts an account ONCE however many devices it has", async () => {
+    // The bug this guards: `reporting` measured off row count would exceed `accounts`
+    // the moment one person used a phone and a tablet, and a coverage bar above 100%
+    // reads as a rendering fault rather than as the real shape.
+    device({ user_id: ME, device_id: "phone" });
+    device({ user_id: ME, device_id: "tablet" });
+
+    const b = await body();
+    expect(b.totals.devices).toBe(2);
+    expect(b.coverage.reporting).toBe(1);
+    expect(b.coverage.reporting).toBeLessThanOrEqual(b.coverage.accounts);
+  });
+
+  it("lists accounts that have never reported", async () => {
+    device({ user_id: ME, device_id: "d" });
+    const b = await body();
+    // YOU signed in and never synced.
+    expect(b.orphanAccounts).toHaveLength(1);
+    expect(b.orphanAccounts[0].acct).toBe(YOU.slice(0, 6));
+    // Never the full id — the page has no reason to address an account.
+    expect(b.orphanAccounts[0].acct).not.toBe(YOU);
+  });
+});
+
+describe("handleInsights: roster", () => {
+  it("returns one row per device, most recently seen first", async () => {
+    device({ user_id: ME, device_id: "old", model: "Old", last_seen_at: 1000 });
+    device({ user_id: YOU, device_id: "new", model: "New", last_seen_at: 9000 });
+
+    const b = await body();
+    expect(b.roster.map((d: any) => d.deviceId)).toEqual(["new", "old"]);
+    expect(b.roster[0]).toMatchObject({ acct: YOU.slice(0, 6), device: "Google New", country: "GB" });
+  });
+
+  it("carries each device's own integrations and counts, not the fleet's", async () => {
+    device({
+      user_id: ME,
+      device_id: "a",
+      integrations: JSON.stringify({ plex: true, trakt: false }),
+      features: JSON.stringify({ used: ["discover"], counts: { watched: 7 } }),
+    });
+    device({ user_id: YOU, device_id: "b", integrations: JSON.stringify({ trakt: true }), features: null });
+
+    const b = await body();
+    const a = b.roster.find((d: any) => d.deviceId === "a");
+    const bb = b.roster.find((d: any) => d.deviceId === "b");
+    expect(a.integrations).toEqual(["plex"]); // false is not "configured"
+    expect(a.counts).toEqual({ watched: 7 });
+    expect(bb.integrations).toEqual(["trakt"]);
+    expect(bb.counts).toEqual({});
+  });
+
+  it("reports server-side history per ACCOUNT, null when nothing was ever uploaded", async () => {
+    device({ user_id: ME, device_id: "a" });
+    device({ user_id: YOU, device_id: "b" });
+    raw.prepare("INSERT INTO history_meta (user_id, event_count) VALUES (?,?)").run(ME, 2921);
+
+    const b = await body();
+    expect(b.roster.find((d: any) => d.deviceId === "a").serverEvents).toBe(2921);
+    expect(b.roster.find((d: any) => d.deviceId === "b").serverEvents).toBeNull();
+  });
+});
+
+describe("handleInsights: health", () => {
+  it("flags a device with a local library whose account has uploaded nothing", async () => {
+    device({ user_id: ME, device_id: "a", features: JSON.stringify({ used: [], counts: { watched: 16461 } }) });
+    device({ user_id: YOU, device_id: "b", features: JSON.stringify({ used: [], counts: { watched: 0 } }) });
+
+    const b = await body();
+    // Only the one with something to upload counts — an empty library is not a backlog.
+    expect(b.health.historyNotUploaded).toBe(1);
+    expect(b.health.historyAccounts).toBe(0);
+  });
+
+  it("counts ghost rows keyed on the empty device id", async () => {
+    // A device that reported before it sent a deviceId keeps that row forever, so once it
+    // updates the account holds two rows and is double-counted in every distribution.
+    device({ user_id: ME, device_id: "" });
+    device({ user_id: ME, device_id: "real" });
+
+    const b = await body();
+    expect(b.health.ghostDeviceRows).toBe(1);
+  });
+});
+
+describe("handleInsights: the daily series", () => {
+  it("returns a contiguous axis with null on days that were never rolled up", async () => {
+    // `maybeRollup` only ever computes YESTERDAY, so a day nobody synced is skipped and
+    // never backfilled. Handing over only the days that exist lets the chart space them
+    // evenly and draw a gap as an unbroken line — the one thing it must not do.
+    const day = (back: number) => new Date(Date.now() - back * 86_400_000).toISOString().slice(0, 10);
+    raw
+      .prepare("INSERT INTO telemetry_daily (day, active, devices, new_users, snapshot, computed_at) VALUES (?,?,?,?,?,?)")
+      .run(day(2), 5, 5, 2, "{}", Date.now());
+
+    const b = await body();
+    const at = (d: string) => b.series.daily.find((x: any) => x.day === d);
+
+    expect(at(day(2))).toMatchObject({ active: 5, devices: 5 });
+    // Yesterday has no row at all — absent, not zero.
+    expect(at(day(1)).active).toBeNull();
+    // Exactly the one hole BETWEEN the first rollup and today. The 87 days before the
+    // first rollup are not gaps — nothing was recording yet.
+    expect(b.health.missingRollupDays).toBe(1);
+  });
+
+  it("does not count the days before the first rollup as gaps", async () => {
+    // The window is 90 days and the feature is younger, so counting every absent day
+    // would report ~86 holes forever and make the health row a warning that can never
+    // be cleared.
+    const b = await body();
+    expect(b.series.daily.filter((d: any) => d.active === null).length).toBeGreaterThan(80);
+    expect(b.health.missingRollupDays).toBe(0);
+  });
+
+  it("reports a real zero for a signup-free day", async () => {
+    // Signups come from users.created_at, so absence there IS zero — the opposite of the
+    // daily rollup, and the reason the two series are built differently.
+    const b = await body();
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    expect(b.series.signups.find((s: any) => s.day === yesterday).n).toBe(0);
   });
 });

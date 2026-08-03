@@ -76,6 +76,45 @@ function ranked(t: Tally): Array<{ key: string; devices: number }> {
 }
 
 /**
+ * Every UTC day from `from` to `to` inclusive.
+ *
+ * The panel needs this because `maybeRollup` only ever computes YESTERDAY: a day on which
+ * nothing synced is skipped and is never backfilled. Handing the client only the days that
+ * exist lets it space them evenly and draw a gap as continuity — which is the one thing a
+ * trend chart must never do. With the full axis, an absent day arrives as `null` and can
+ * be drawn as absent.
+ */
+function everyDay(from: number, to: number): string[] {
+  const out: string[] = [];
+  for (let t = from; t <= to; t += DAY_MS) out.push(new Date(t).toISOString().slice(0, 10));
+  return out;
+}
+
+/** A device as the roster draws it. One row per `user_telemetry` row, never per account. */
+interface RosterRow {
+  /** Short prefix only. The full users.id is never needed to read this page. */
+  acct: string;
+  deviceId: string;
+  device: string | null;
+  versionName: string | null;
+  versionCode: number | null;
+  osApi: number | null;
+  country: string | null;
+  language: string | null;
+  buildType: string | null;
+  installer: string | null;
+  premium: boolean | null;
+  gate: string | null;
+  adsConsent: string | null;
+  integrations: string[];
+  features: string[];
+  counts: Record<string, number>;
+  lastSeenAt: number;
+  /** Events this ACCOUNT has on the server, from history_meta. Null = never uploaded. */
+  serverEvents: number | null;
+}
+
+/**
  * `GET /api/insights` — the whole page.
  *
  * One request because the panel is one screen: a dozen endpoints would be a dozen
@@ -95,6 +134,14 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
   ).all<DeviceRow>();
   const rows = devices ?? [];
 
+  // Server-side history, per account. `history_meta` is one WITHOUT ROWID row per user and
+  // is the only cheap source for this — the events themselves live in an R2 document, so
+  // "has this account uploaded" cannot be answered from the events at all.
+  const { results: historyRows } = await env.DB.prepare(
+    "SELECT user_id, event_count FROM history_meta",
+  ).all<{ user_id: string; event_count: number }>();
+  const serverHistory = new Map((historyRows ?? []).map((r) => [r.user_id, r.event_count]));
+
   // ── Dimensions ─────────────────────────────────────────────────────────────
   const versions: Tally = {};
   const versionNames: Record<string, string> = {};
@@ -108,7 +155,11 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
   const platforms: Tally = {};
   const integrations: Tally = {};
   const featuresUsed: Tally = {};
-  const featureCounts: Record<string, { sum: number; devices: number }> = {};
+  // `values` alongside the sum, because a mean over these lies at this scale: measured
+  // 2026-08-02, watched was 16,461 / 2,918 / 0 / 0 / 0 — mean 3,876, median 0, and no
+  // device anywhere near the mean. The panel draws the values and derives its own median.
+  const featureCounts: Record<string, { sum: number; devices: number; values: number[] }> = {};
+  const roster: RosterRow[] = [];
   // Monetisation is computed on RELEASE builds only: a debug build can force premium
   // from the developer menu, so counting it would inflate conversion with our own
   // testing. Reported separately so the panel can say what it excluded.
@@ -161,30 +212,67 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
     }
 
     // A malformed blob costs that one device's contribution, never the whole page.
+    const myIntegrations: string[] = [];
     try {
       const parsed = r.integrations ? (JSON.parse(r.integrations) as Record<string, unknown>) : null;
       for (const [k, v] of Object.entries(parsed ?? {})) {
         // A string value is a CHOICE (which AI provider); keep it rather than
         // flattening it to "configured".
-        if (typeof v === "string") bump(integrations, `${k}:${v}`);
-        else if (v === true) bump(integrations, k);
+        if (typeof v === "string") {
+          bump(integrations, `${k}:${v}`);
+          myIntegrations.push(`${k}:${v}`);
+        } else if (v === true) {
+          bump(integrations, k);
+          myIntegrations.push(k);
+        }
       }
     } catch {
       /* ignore */
     }
+    const myFeatures: string[] = [];
+    const myCounts: Record<string, number> = {};
     try {
       const f = r.features ? (JSON.parse(r.features) as { used?: string[]; counts?: Record<string, number> }) : null;
-      for (const k of f?.used ?? []) bump(featuresUsed, k);
+      for (const k of f?.used ?? []) {
+        bump(featuresUsed, k);
+        myFeatures.push(k);
+      }
       for (const [k, v] of Object.entries(f?.counts ?? {})) {
         if (typeof v !== "number" || !Number.isFinite(v)) continue;
-        const slot = (featureCounts[k] ??= { sum: 0, devices: 0 });
+        const slot = (featureCounts[k] ??= { sum: 0, devices: 0, values: [] });
         slot.sum += v;
         slot.devices++;
+        slot.values.push(v);
+        myCounts[k] = v;
       }
     } catch {
       /* ignore */
     }
+
+    roster.push({
+      // A prefix, not the id. The roster is a debugging aid, and nothing on the page
+      // needs to address an account — so it does not carry one.
+      acct: r.user_id.slice(0, 6),
+      deviceId: r.device_id,
+      device: r.manufacturer && r.model ? `${r.manufacturer} ${r.model}` : r.model,
+      versionName: r.version_name,
+      versionCode: r.version_code,
+      osApi: r.os_api,
+      country: r.country,
+      language: r.language,
+      buildType: r.build_type,
+      installer: r.installer,
+      premium: r.premium == null ? null : r.premium === 1,
+      gate: r.gate_outcome,
+      adsConsent: r.ads_consent,
+      integrations: myIntegrations,
+      features: myFeatures,
+      counts: myCounts,
+      lastSeenAt: r.last_seen_at,
+      serverEvents: serverHistory.get(r.user_id) ?? null,
+    });
   }
+  roster.sort((a, b) => b.lastSeenAt - a.lastSeenAt);
 
   // ── Everything D1 already knew ─────────────────────────────────────────────
   // One statement of scalar subqueries rather than eight round trips.
@@ -215,6 +303,17 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
        SELECT user_b AS id FROM friendships WHERE state = 'accepted')`,
   ).first<{ n: number }>();
 
+  // Accounts that hold a session but have never landed a telemetry row — the gap between
+  // "Accounts" and every distribution on the page. Before the history-sync fix these were
+  // simply everyone who had not opened Friends in a day; after it, an account sitting here
+  // for more than an hour is a real signal (signed in, then left) rather than an artefact
+  // of where telemetry happened to be recorded.
+  const { results: orphans } = await env.DB.prepare(
+    `SELECT id, created_at FROM users
+      WHERE id NOT IN (SELECT user_id FROM user_telemetry)
+      ORDER BY created_at DESC`,
+  ).all<{ id: string; created_at: number }>();
+
   const { results: signups } = await env.DB.prepare(
     `SELECT date(created_at / 1000, 'unixepoch') AS day, COUNT(*) AS n
        FROM users WHERE created_at >= ?
@@ -232,12 +331,76 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
 
   const floor = minSocialVersion(env);
 
+  // Every day in the window, so an unrolled day arrives as a hole rather than vanishing.
+  const byDay = new Map((daily ?? []).map((d) => [d.day, d]));
+  const signupsByDay = new Map((signups ?? []).map((s) => [s.day, s.n]));
+  const axis = everyDay(now - SERIES_DAYS * DAY_MS, now);
+
+  const accountsTotal = totals?.accounts ?? 0;
+  const historyAccounts = serverHistory.size;
+
   return json({
     generatedAt: now,
     today,
     /** 0 = no gate. Devices below it are blocked from the social surface. */
     minSocialVersion: floor,
     belowFloor: floor === 0 ? 0 : rows.filter((r) => (r.version_code ?? 0) < floor).length,
+
+    /**
+     * The page's honesty rail: how much of the account base can be measured at all.
+     *
+     * Every distribution below is drawn from `reporting`, never from `accounts`. Shipping
+     * these four together is what stops a share being computed against a denominator the
+     * page cannot see — which is the failure this whole panel exists to prevent.
+     */
+    coverage: {
+      accounts: accountsTotal,
+      /** Accounts with at least one `user_telemetry` row. */
+      reporting: accounts.size,
+      /** Accounts whose row carries the client-sent block, not just the header half. */
+      rich: new Set(rows.filter((r) => r.version_name).map((r) => r.user_id)).size,
+      activeToday: activeAccounts.d1.size,
+    },
+
+    /** Signed in, never reported. Ids are prefixes — the page never addresses an account. */
+    orphanAccounts: (orphans ?? []).map((o) => ({ acct: o.id.slice(0, 6), createdAt: o.created_at })),
+
+    /** One row per reporting device, most recently seen first. */
+    roster,
+
+    /**
+     * Facts D1 can prove on its own, for the health strip. Each is a comparison the page
+     * cannot make from the distributions above.
+     */
+    health: {
+      /** Accounts with a server-side history document. */
+      historyAccounts,
+      historyEvents: [...serverHistory.values()].reduce((n, v) => n + v, 0),
+      /**
+       * Devices reporting a non-zero lifetime `watched` whose ACCOUNT has never uploaded.
+       * A real backlog: the library exists on the device and the server has none of it.
+       */
+      historyNotUploaded: roster.filter((d) => (d.counts.watched ?? 0) > 0 && d.serverEvents == null).length,
+      /**
+       * Rows keyed on the empty device id — a client that reported before it sent a
+       * deviceId. Harmless until the same device later reports properly, at which point
+       * the account holds a permanent ghost row that double-counts it.
+       */
+      ghostDeviceRows: rows.filter((r) => r.device_id === "").length,
+      /**
+       * Rollup days missing BETWEEN the first one ever recorded and yesterday.
+       *
+       * ⚠️ Not "days in the window without a rollup". The window is 90 days and the
+       * feature is younger than that, so that definition reports ~86 holes forever and
+       * the health row it feeds is a warning that can never be cleared. A gap only means
+       * anything inside the period we have actually been recording.
+       */
+      missingRollupDays: (() => {
+        const first = (daily ?? [])[0]?.day;
+        if (!first) return 0;
+        return axis.filter((d) => d >= first && d < today && !byDay.has(d)).length;
+      })(),
+    },
 
     totals: {
       ...totals,
@@ -268,18 +431,27 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
     integrations: ranked(integrations),
     featuresUsed: ranked(featuresUsed),
     featureCounts: Object.entries(featureCounts)
-      .map(([key, v]) => ({ key, sum: v.sum, devices: v.devices }))
+      .map(([key, v]) => ({ key, sum: v.sum, devices: v.devices, values: [...v.values].sort((a, b) => a - b) }))
       .sort((a, b) => b.sum - a.sum),
     monetisation: { gate: ranked(gate), adsConsent: ranked(adsConsent) },
 
     series: {
-      daily: (daily ?? []).map((d) => ({
-        day: d.day,
-        active: d.active,
-        devices: d.devices,
-        newUsers: d.new_users,
-      })),
-      signups: signups ?? [],
+      /**
+       * The full date axis, with `null` on days that were never rolled up.
+       *
+       * ⚠️ `null` and `0` mean different things here and the chart must draw them
+       * differently: 0 is "nobody synced", null is "we never computed this day and now
+       * never will". Collapsing them — which is what handing over only the present days
+       * did — turns a gap into a continuous line.
+       */
+      daily: axis.map((day) => {
+        const d = byDay.get(day);
+        return d
+          ? { day, active: d.active, devices: d.devices, newUsers: d.new_users }
+          : { day, active: null, devices: null, newUsers: null };
+      }),
+      /** Signups come from `users.created_at` directly, so a quiet day is a real 0. */
+      signups: axis.map((day) => ({ day, n: signupsByDay.get(day) ?? 0 })),
     },
   });
 }

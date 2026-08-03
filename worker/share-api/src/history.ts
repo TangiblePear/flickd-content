@@ -43,6 +43,7 @@ import {
   type IncomingEvent,
   type IncomingRating,
 } from "./historyDoc";
+import { maybeRollup, recordTelemetry } from "./telemetry";
 
 // Re-exported: it lives with the document model now (the merge needs it to recover a
 // tombstone's real identity), but callers and tests still reach for it here.
@@ -386,6 +387,35 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
 
   const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
   if (!body || typeof body !== "object") return json({ error: "invalid_payload" }, 400);
+
+  // ── Product telemetry, riding a request that was happening anyway ──────────
+  //
+  // ⚠️ Placed HERE, before the zero-write early return below, and that is the whole
+  // point: the idle path is the overwhelmingly common one, so recording only on the
+  // write paths would reproduce the coverage hole this exists to close.
+  //
+  // Telemetry used to be written ONLY by `/api/sync`, which is reached only by
+  // `SocialSyncWorker` — a 24h-periodic job whose one prompt firing is spent on an
+  // install's first launch, before the user has signed in. Measured 2026-08-02: 9
+  // accounts, 6 telemetry rows, and the 3 missing were the 3 newest. This worker runs
+  // every 15 minutes, is scheduled unconditionally, and is not gated on the social
+  // subsystem, so coverage stops depending on whether anyone opened Friends.
+  //
+  // No new request and no new field: `X-App-Version` is already stamped on every call
+  // by the client's OkHttp interceptor, Cloudflare already attaches `cf.country`, and
+  // `deviceId` is already in this body. The once-per-UTC-day guard inside
+  // `recordTelemetry` means this costs at most one write per device per day.
+  //
+  // `if (ctx)` rather than `ctx?.waitUntil(...)`: optional chaining short-circuits the
+  // ENTIRE call expression including its arguments, so with no `ctx` the promise would
+  // never be constructed and the write would silently never happen. Same shape as the
+  // `finish()` dispatch further down.
+  const recordFleet = async () => {
+    await recordTelemetry(env, session.userId, req, { deviceId: deviceIdOf(body) }).catch(() => {});
+    await maybeRollup(env).catch(() => {});
+  };
+  if (ctx) ctx.waitUntil(recordFleet());
+  else await recordFleet();
 
   const rawEvents = Array.isArray(body.events) ? body.events : [];
   const rawRatings = Array.isArray(body.ratings) ? body.ratings : [];
