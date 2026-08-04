@@ -397,3 +397,55 @@ describe("tombstone purge", () => {
     expect(statsFor(doc).eventCount).toBe(0);
   });
 });
+
+// ── Per-title version stamps (delta pull) ───────────────────────────────────
+//
+// The document is a snapshot, not a log, so without a per-title stamp the server cannot
+// answer "what changed since version N" and every pull returns all 160 titles. These
+// properties are what make a delta safe; each failure mode below is silent.
+describe("history doc: version stamps", () => {
+  it("increments the document version once per apply", () => {
+    const doc = emptyDoc();
+    expect(doc.ver ?? 0).toBe(0);
+    applyToDoc(doc, [movie(550, SEC)], [], 1);
+    expect(doc.ver).toBe(1);
+    applyToDoc(doc, [movie(551, SEC)], [], 2);
+    expect(doc.ver).toBe(2);
+  });
+
+  it("stamps a touched title with the document's new version", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [movie(550, SEC)], [], 1);
+    expect(doc.titles["MOVIE|550"].mv).toBe(1);
+  });
+
+  it("leaves an untouched title at its earlier version", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [movie(550, SEC)], [], 1);
+    applyToDoc(doc, [movie(551, SEC)], [], 2);
+    expect(doc.titles["MOVIE|550"].mv).toBe(1); // untouched by the second apply
+    expect(doc.titles["MOVIE|551"].mv).toBe(2);
+  });
+
+  it("re-stamps a title when a later apply adds a watch to it", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [ep(1396, 1, 1, SEC)], [], 1);
+    applyToDoc(doc, [ep(1396, 1, 2, SEC + 60)], [], 2);
+    expect(doc.titles["SHOW|1396"].mv).toBe(2);
+  });
+
+  it("stamps a title whose rating changed", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [movie(550, SEC)], [], 1);
+    applyToDoc(doc, [], [{ mediaType: "MOVIE", tmdbId: 550, rating: 9, updatedAt: 2 }], 2);
+    expect(doc.titles["MOVIE|550"].mv).toBe(2);
+  });
+
+  it("does not stamp a title whose rating LOST last-write-wins", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [], [{ mediaType: "MOVIE", tmdbId: 550, rating: 9, updatedAt: 5000 }], 1);
+    applyToDoc(doc, [], [{ mediaType: "MOVIE", tmdbId: 550, rating: 3, updatedAt: 1000 }], 2);
+    expect(doc.titles["MOVIE|550"].rating).toBe(9); // stale rating rejected
+    expect(doc.titles["MOVIE|550"].mv).toBe(1);     // so the title did not change
+  });
+});

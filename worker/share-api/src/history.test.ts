@@ -22,7 +22,7 @@ import {
   parseEventId,
   parseRating,
 } from "./history";
-import { parseDoc } from "./historyDoc";
+import { parseDoc, serialiseDoc } from "./historyDoc";
 
 const A = "AAAAH73X7P55T48R4CFHDED9CW";
 const B = "BBBBJ84Y8Q66V59S5DGJEFEAX0";
@@ -671,5 +671,133 @@ describe("history: validation", () => {
   it("clamps a nonsense progress rather than discarding the watch", () => {
     expect(parseEvent({ ...movie(550, SEC), progressPct: 3000 })!.progressPct).toBe(100);
     expect(parseEvent({ ...movie(550, SEC), progressPct: -7 })!.progressPct).toBe(0);
+  });
+});
+
+// ── Delta pull ───────────────────────────────────────────────────────────────
+//
+// The document is a snapshot with a single version counter, so before the `mv` stamp the
+// only honest answer to "you are behind" was the whole thing — measured at 17.5 KB and
+// 2,917 client-side upserts to learn about ONE new episode. Every failure below is
+// silent: too little sent is data the device never learns it is missing.
+describe("history: delta pull", () => {
+  it("sends only the titles that changed since the client's version", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const at1 = await (
+      await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env)
+    ).json();
+    expect(at1.version).toBe(2);
+
+    // A second device sitting at v1 needs 680 and already has 550.
+    const delta = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 1 }), env)).json();
+    expect(delta.upToDate).toBe(false);
+    expect(delta.doc.titles["MOVIE|680"]).toBeDefined();
+    expect(delta.doc.titles["MOVIE|550"]).toBeUndefined();
+  });
+
+  it("sends the whole document to a client at version 0", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env);
+
+    const fresh = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 0 }), env)).json();
+    expect(fresh.doc.titles["MOVIE|550"]).toBeDefined();
+    expect(fresh.doc.titles["MOVIE|680"]).toBeDefined();
+  });
+
+  it("sends the whole document to a client somehow AHEAD of the server", async () => {
+    // Cannot be reasoned about — a restored backup, a rolled-back bucket. Fail open.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const ahead = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 99 }), env)).json();
+    expect(ahead.upToDate).toBe(false);
+    expect(ahead.doc.titles["MOVIE|550"]).toBeDefined();
+  });
+
+  it("always includes a title written BEFORE the stamp existed", async () => {
+    // ⚠️ The migration case. Every title in R2 today has no `mv`; filtering those out
+    // would hand a behind client an empty document it would accept as current.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env);
+
+    // Strip the stamp, as a pre-delta document has it stripped by never having had it.
+    const legacy = await docOf(env);
+    delete legacy.titles["MOVIE|550"].mv;
+    env.BUCKET.objects.set(`history/${A}.json`, {
+      body: await serialiseDoc(legacy),
+      etag: "legacy",
+    });
+
+    // A device at v1 would normally be sent only 680. The unstamped 550 must ride along
+    // rather than be silently withheld forever.
+    const delta = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 1 }), env)).json();
+    expect(delta.doc.titles["MOVIE|680"]).toBeDefined();
+    expect(delta.doc.titles["MOVIE|550"]).toBeDefined();
+  });
+
+  it("reports stats for the whole document, not the delta", async () => {
+    // ⚠️ `resyncIfServerLostHistory` on the client reads `stats.events == 0` as "the
+    // server lost my history" and re-uploads the entire local database. Delta stats would
+    // fire that on a routine pull.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env);
+
+    const delta = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 1 }), env)).json();
+    expect(Object.keys(delta.doc.titles)).toEqual(["MOVIE|680"]); // really is a delta
+    expect(delta.stats.events).toBe(2);                           // but stats count both
+    expect(delta.stats.titles).toBe(2);
+  });
+
+  it("sends every tombstone alongside a delta", async () => {
+    // Tombstones are never filtered: they are how a device learns about a deletion whose
+    // title may not otherwise be in the delta at all.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC), movie(680, SEC)] }), env);
+    // `deletedAt` must be recent: applyToDoc purges tombstones older than TOMBSTONE_TTL_MS
+    // in the same pass that records them.
+    await handleHistorySync(
+      syncReq("tok-a", { ...base, version: 1, events: [{ ...movie(550, SEC), deletedAt: Date.now() }] }),
+      env,
+    );
+    // A third device still at v1 — it holds the watch that has since been deleted.
+    const delta = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 1 }), env)).json();
+    expect(delta.doc.deleted["watch-MOVIE-550-" + SEC]).toBeDefined();
+    // And the tombstone arrives even though no surviving title is in the delta at all.
+    expect(delta.doc.titles["MOVIE|550"]).toBeUndefined();
+  });
+});
+
+describe("history: concurrent writers", () => {
+  it("never labels two different document states with the same version", async () => {
+    // ⚠️ The race that makes deltas unsafe. Deriving the version from a `readMeta` taken
+    // before the merge lets two devices both read 19 and both write "20" — after which a
+    // client sitting at 20 never receives one of them, permanently and silently. The
+    // version must come from the document the CAS actually stored.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+
+    // A stale `history_meta` read is exactly what a concurrent writer produces: the row
+    // is behind the document at the moment this request reads it. Forcing it makes the
+    // race deterministic instead of timing-dependent.
+    env.DB.history_meta[0].version = 0;
+
+    const second = await (
+      await handleHistorySync(syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env)
+    ).json();
+
+    // Derived from meta this would be 0 + 1 = 1 — colliding with the state that already
+    // shipped as v1, and stamping 680 with a version existing clients have already passed.
+    const doc = await docOf(env);
+    expect(second.version).toBe(2);
+    expect(doc.ver).toBe(2);
+    expect(doc.titles["MOVIE|550"].mv).toBe(1);
+    expect(doc.titles["MOVIE|680"].mv).toBe(2);
+
+    // The decisive assertion: a client at the FIRST version still receives 680.
+    const catchUp = await (await handleHistorySync(syncReq("tok-a", { ...base, version: 1 }), env)).json();
+    expect(catchUp.doc.titles["MOVIE|680"]).toBeDefined();
   });
 });

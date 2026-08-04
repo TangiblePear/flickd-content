@@ -80,6 +80,15 @@ export interface PackedTitle {
   feedback?: string;
   /** When the rating/status last changed. Drives last-write-wins on merge. */
   rAt?: number;
+  /**
+   * Document version at which this title last changed. Drives the delta pull.
+   *
+   * ⚠️ **Absent means "unknown", never "unchanged".** Every title written before this
+   * field existed lacks it, and a delta that filtered those out would hand a behind
+   * client an empty document which it would accept as current — silent data loss on the
+   * exact accounts that already had history. Readers MUST fail open on `undefined`.
+   */
+  mv?: number;
 }
 
 export interface HistoryDoc {
@@ -95,6 +104,17 @@ export interface HistoryDoc {
    */
   deleted: Record<string, number>;
   updatedAt: number;
+  /**
+   * The document's own version, incremented by each successful merge.
+   *
+   * ⚠️ Lives HERE rather than being derived from `history_meta`, and that is what makes
+   * the delta correct under concurrency. The R2 CAS serialises writers, so a version
+   * computed from the document that was actually stored cannot be handed to two
+   * different states. Deriving it from a `readMeta` taken before the merge could: two
+   * devices both read 19, both write, and both label their result 20 — after which a
+   * client sitting at 20 never receives one of them, permanently and silently.
+   */
+  ver?: number;
 }
 
 export const emptyDoc = (): HistoryDoc => ({ v: DOC_VERSION, titles: {}, deleted: {}, updatedAt: 0 });
@@ -158,6 +178,11 @@ export function applyToDoc(
   ratings: IncomingRating[],
   now: number,
 ): HistoryDoc {
+  // Derived from the document itself, not from a caller-supplied number: see `ver`. Each
+  // title this pass modifies is stamped with it, so a later reader can answer "what
+  // changed since version N" without the document ever having been a log.
+  const version = (doc.ver ?? 0) + 1;
+
   for (const e of events) {
     const mt = normaliseType(e.mediaType);
     const key = titleKey(mt, e.tmdbId);
@@ -185,6 +210,7 @@ export function applyToDoc(
     if (doc.deleted[e.id] != null) delete doc.deleted[e.id];
 
     const title = (doc.titles[key] ??= {});
+    title.mv = version;
     if (e.tvdbId != null && e.tvdbId > 0) title.tv = e.tvdbId;
     const watch: PackedWatch =  [toSeconds(e.watchedAt), e.progressPct ?? 100, e.source ?? "INTERNAL"];
 
@@ -203,6 +229,10 @@ export function applyToDoc(
     // offline last week must not beat one made on another device yesterday just because
     // it synced later.
     if ((title.rAt ?? 0) > r.updatedAt) continue;
+    // Stamped only PAST the last-write-wins guard: a rating that lost is not a change,
+    // and stamping it would put the title in every delta while its content stayed the
+    // same.
+    title.mv = version;
     if (r.rating != null) title.rating = r.rating;
     if (r.watchStatus != null) title.status = r.watchStatus;
     if (r.feedback != null) title.feedback = r.feedback;
@@ -244,6 +274,7 @@ export function applyToDoc(
   }
 
   doc.updatedAt = now;
+  doc.ver = version;
   return doc;
 }
 
@@ -414,7 +445,17 @@ export async function parseDoc(body: ArrayBuffer): Promise<HistoryDoc> {
     const text = await new Response(stream).text();
     const parsed = JSON.parse(text) as HistoryDoc;
     if (!parsed || typeof parsed !== "object" || typeof parsed.titles !== "object") return emptyDoc();
-    return { v: parsed.v ?? DOC_VERSION, titles: parsed.titles ?? {}, deleted: parsed.deleted ?? {}, updatedAt: parsed.updatedAt ?? 0 };
+    // ⚠️ `ver` must be carried through. This rebuilds the document field by field, so a
+    // new top-level field is dropped unless named here — and dropping `ver` would reset
+    // the version to 0 on every load, restamping every title on the next write and making
+    // every delta a full document forever.
+    return {
+      v: parsed.v ?? DOC_VERSION,
+      titles: parsed.titles ?? {},
+      deleted: parsed.deleted ?? {},
+      updatedAt: parsed.updatedAt ?? 0,
+      ver: parsed.ver ?? 0,
+    };
   } catch {
     return emptyDoc();
   }

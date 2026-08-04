@@ -42,6 +42,7 @@ import {
   type HistoryDoc,
   type IncomingEvent,
   type IncomingRating,
+  type PackedTitle,
 } from "./historyDoc";
 import { maybeRollup, recordTelemetry } from "./telemetry";
 
@@ -469,7 +470,15 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
     // were never stored.
     if (!merged) return json({ error: "write_conflict" }, 409);
     doc = merged;
-    version = serverVersion + 1;
+    // ⚠️ From the DOCUMENT, never `serverVersion + 1`.
+    //
+    // `serverVersion` was read before the merge, so two devices arriving together both
+    // read 19 and both label their result 20 — two different states sharing a version.
+    // With whole-document pulls that self-heals on the next write; with deltas a client
+    // sitting at 20 never receives one of them, permanently and silently. The R2 CAS
+    // serialises writers, so the version carried by the document that was actually
+    // stored is the only one that cannot collide.
+    version = doc.ver ?? serverVersion + 1;
 
     const s = statsFor(doc);
     await env.DB.prepare(
@@ -522,7 +531,12 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
   return json({
     version,
     upToDate: !behind,
-    doc: behind ? doc : undefined,
+    doc: behind ? docFor(doc, clientVersion, version) : undefined,
+    // ⚠️ Always the FULL document, never the delta.
+    //
+    // `ServerHistoryRepository.resyncIfServerLostHistory` reads `stats.events == 0` as
+    // "the server lost my history" and re-uploads the device's entire database. Reporting
+    // a delta's counts here would fire that on a routine two-title pull.
     stats: docStats(doc),
     pendingPush: await claimPushes(env, session.userId, deviceIdOf(body), Date.now()),
     // ⚠️ Sent on EVERY response, including the idle path, and deliberately so.
@@ -549,6 +563,38 @@ const metaStats = (meta: MetaRow | null) => ({
   titles: meta?.title_count ?? 0,
   lastWatchedAt: meta?.last_watched_at ?? 0,
 });
+
+/**
+ * What to actually send a client that is behind: the whole document, or only the titles
+ * it has not seen.
+ *
+ * The document is a snapshot rather than a log, so this is a FILTER, not a replay — there
+ * is no changelog to retain and no window to fall outside. A client at v5 against a server
+ * at v50 is answered exactly the same way as one at v49.
+ *
+ * Falls back to the whole document whenever the question cannot be answered honestly:
+ *
+ * - `clientVersion === 0` — a first sync or a recovery; it has nothing to build on.
+ * - `clientVersion > version` — a restored backup or a rolled-back bucket. Nothing sane
+ *   can be computed from a client claiming to be ahead of the server.
+ *
+ * ⚠️ A title with **no** `mv` is always included. Every title stored before the stamp
+ * existed lacks it, and excluding those would answer a behind client with an empty
+ * document that it would accept as current — silent loss on exactly the accounts that
+ * already have history. They cost a full document until their next write stamps them.
+ */
+function docFor(doc: HistoryDoc, clientVersion: number, version: number): HistoryDoc {
+  if (clientVersion === 0 || clientVersion > version) return doc;
+
+  const titles: Record<string, PackedTitle> = {};
+  for (const [key, title] of Object.entries(doc.titles)) {
+    if (title.mv === undefined || title.mv > clientVersion) titles[key] = title;
+  }
+  // Tombstones ship whole. They are how a device learns about a deletion, and the title
+  // it belonged to may legitimately not be in the delta at all — or may have been pruned
+  // from the document entirely once its last watch went. Capped at MAX_TOMBSTONES.
+  return { ...doc, titles };
+}
 
 const docStats = (doc: HistoryDoc) => {
   const s = statsFor(doc);
