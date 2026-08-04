@@ -177,6 +177,44 @@ describe("recordTelemetry", () => {
     expect(r.last_seen_at).toBe(DAY1);
   });
 
+  /**
+   * The exception the throttle above has to make, and the bug it was hiding.
+   *
+   * `/api/history/sync` runs every 15 minutes with only a device id; `/api/sync` carries
+   * the rich block once a day. The thin caller therefore usually claims the day first, and
+   * with the throttle alone the rich write was discarded for the rest of that day — and
+   * the next, and the next. Two real devices sat at `version_name = NULL` for 11 hours,
+   * showing neither their model nor their build.
+   */
+  it("lets the rich block land on a day a thin write already claimed", async () => {
+    await recordTelemetry(env, ME, req("32"), { deviceId: "dev-1" }, DAY1);
+    expect(one().version_name).toBeNull();
+
+    await recordTelemetry(env, ME, req("32"), richBlock, DAY1_LATER);
+
+    const r = one();
+    expect(r.version_name).toBe("1.4.0");
+    expect(r.model).toBe("Pixel 8");
+    expect(r.last_seen_at).toBe(DAY1_LATER);
+  });
+
+  it("does not reopen the day once the rich half is there", async () => {
+    // The catch-up is one write, not a licence to write all day: with version_name
+    // already set, the second clause is false and the throttle governs again.
+    await recordTelemetry(env, ME, req("32"), richBlock, DAY1);
+    await recordTelemetry(env, ME, req("99"), { ...richBlock, versionName: "9.9.9" }, DAY1_LATER);
+
+    expect(one().version_name).toBe("1.4.0");
+  });
+
+  it("a thin write cannot reopen a day it did not complete", async () => {
+    await recordTelemetry(env, ME, req("32"), { deviceId: "dev-1" }, DAY1);
+    await recordTelemetry(env, ME, req("99"), { deviceId: "dev-1" }, DAY1_LATER);
+
+    // excluded.version_name is NULL for a thin caller, so the second clause is false.
+    expect(one().last_seen_at).toBe(DAY1);
+  });
+
   it("writes again once the UTC day rolls over", async () => {
     await recordTelemetry(env, ME, req("32"), richBlock, DAY1);
     await recordTelemetry(env, ME, req("33"), { ...richBlock, versionName: "1.5.0" }, DAY2);

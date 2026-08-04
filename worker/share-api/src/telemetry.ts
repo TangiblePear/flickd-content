@@ -145,16 +145,26 @@ function featuresJson(v: unknown): string | null {
 // ── The write ────────────────────────────────────────────────────────────────
 
 /**
- * Upsert this device's row, at most once per UTC day.
+ * Upsert this device's row, at most once per UTC day — plus one catch-up write when the
+ * day's first report was a thin one.
  *
- * The `WHERE user_telemetry.reported_on <> excluded.reported_on` on the DO UPDATE is
- * the entire throttle: the second and every later report of the day writes nothing.
+ * The `WHERE user_telemetry.reported_on <> excluded.reported_on` on the DO UPDATE is the
+ * throttle: the second and every later report of the day writes nothing.
  *
- * `COALESCE(excluded.x, user_telemetry.x)` on every client-sent column is insurance,
- * not the mechanism. The client only builds the expensive half of the block on the
- * first sync of a day, so the first write of a day is already the rich one — but if
- * a thin report ever did land first, this keeps yesterday's values instead of
- * nulling the row out.
+ * **The second clause is not an optimisation, it is the thing that makes a row complete.**
+ * Two callers write here on different schedules: `/api/history/sync` every 15 minutes
+ * carrying only a device id, and `/api/sync` carrying the rich block once a day. The
+ * frequent thin caller therefore almost always claims the day first, and with the throttle
+ * alone the rich write that followed was discarded — for that whole day.
+ *
+ * `COALESCE(excluded.x, user_telemetry.x)` hid this for existing rows by preserving
+ * yesterday's values, so it only showed on a row with no yesterday: two devices whose rows
+ * were deleted mid-day came back as `version_name = NULL` and could never fill in again,
+ * because the next day's first write was thin too, and the next. Device-found 2026-08-04.
+ *
+ * So a rich write is also let through when the row still has no rich half. That is at most
+ * one extra write per device per day, it stops the moment the row is complete, and it
+ * cannot be triggered by a thin caller — `excluded.version_name` is NULL for those.
  *
  * @param block absent for any client predating it, which lands on `device_id = ''`
  *   and is exactly why version data works before the next release ships.
@@ -194,7 +204,8 @@ export async function recordTelemetry(
        ads_consent  = COALESCE(excluded.ads_consent,  user_telemetry.ads_consent),
        integrations = COALESCE(excluded.integrations, user_telemetry.integrations),
        features     = COALESCE(excluded.features,     user_telemetry.features)
-     WHERE user_telemetry.reported_on <> excluded.reported_on`,
+     WHERE user_telemetry.reported_on <> excluded.reported_on
+        OR (excluded.version_name IS NOT NULL AND user_telemetry.version_name IS NULL)`,
   )
     .bind(
       userId,
