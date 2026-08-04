@@ -32,7 +32,11 @@ export interface TelemetryEnv {
  * must not break by sending a field we do not know.
  */
 export interface TelemetryBlock {
-  /** Random UUID minted at install. NOT a hardware or advertising id. */
+  /**
+   * Names one handset. A salted SHA-256 of the Android SSAID (client-side; the raw value
+   * never reaches here), or a random UUID on a client that has no SSAID or predates the
+   * change. NOT the advertising id, and never used for ads.
+   */
   deviceId?: unknown;
   platform?: unknown;
   versionName?: unknown;

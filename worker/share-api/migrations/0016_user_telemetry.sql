@@ -12,9 +12,14 @@
 
 CREATE TABLE IF NOT EXISTS user_telemetry (
   user_id      TEXT NOT NULL REFERENCES users(id),
-  -- Random UUID minted at install and kept in DataStore. NOT a hardware id, NOT an
-  -- advertising id, NOT derived from anything — it exists only to keep one account's
-  -- two devices from overwriting each other's row.
+  -- Names one handset — it exists only to keep one account's two devices from
+  -- overwriting each other's row. NOT the advertising id, and never used for ads.
+  --
+  -- ⚠️ Amended 2026-08-04: originally a random UUID kept in DataStore, which made it
+  -- INSTALL-scoped — a data wipe minted a new one and invented a device (eight rows for
+  -- one account across two handsets). It is now a salted SHA-256 of the Android SSAID,
+  -- computed on the client; the raw SSAID never reaches the server. Clients predating
+  -- that change, and any device with no SSAID, still send a random UUID.
   --
   -- '' for any client that predates the telemetry block. That is load-bearing: the
   -- header-only write path (below) lands on `(user_id, '')` and therefore can never
