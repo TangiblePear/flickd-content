@@ -50,8 +50,11 @@ const KEY = "admin-key-for-tests";
 let raw: DatabaseSync;
 let env: any;
 
-const req = (key?: string) =>
-  new Request("https://flickto.app/api/insights", key ? { headers: { "X-Admin-Key": key } } : undefined);
+const req = (key?: string, query = "") =>
+  new Request(
+    `https://flickto.app/api/insights${query}`,
+    key ? { headers: { "X-Admin-Key": key } } : undefined,
+  );
 
 beforeEach(() => {
   raw = new DatabaseSync(":memory:");
@@ -108,7 +111,7 @@ const device = (o: Partial<Record<string, unknown>>) => {
     .run(...(Object.values(row) as never[]));
 };
 
-const body = async () => (await handleInsights(req(KEY), env)).json() as any;
+const body = async (query = "") => (await handleInsights(req(KEY, query), env)).json() as any;
 
 describe("handleInsights", () => {
   it("refuses without the admin key", async () => {
@@ -373,6 +376,41 @@ describe("handleInsights: the daily series", () => {
     const b = await body();
     expect(b.series.daily.filter((d: any) => d.active === null).length).toBeGreaterThan(80);
     expect(b.health.missingRollupDays).toBe(0);
+  });
+
+  it("drops debug builds from every panel when asked, and says it did", async () => {
+    device({ device_id: "mine", build_type: "debug", country: "IE", version_code: 40 });
+    device({ user_id: YOU, device_id: "theirs", build_type: "release", country: "BR" });
+
+    const all = await body();
+    expect(all.excludeDebug).toBe(false);
+    expect(all.totals.devices).toBe(2);
+
+    const b = await body("?excludeDebug=1");
+    expect(b.excludeDebug).toBe(true);
+    expect(b.totals.devices).toBe(1);
+    // Every dimension is folded from the same filtered rows, not just the headline.
+    expect(b.roster.map((r: any) => r.deviceId)).toEqual(["theirs"]);
+    expect(b.countries.map((c: any) => c.key)).toEqual(["BR"]);
+    expect(b.versions.some((v: any) => v.key === "40")).toBe(false);
+  });
+
+  it("moves a debug-only account into the orphan list rather than losing it", async () => {
+    // Otherwise it leaves `coverage.reporting` while appearing nowhere, and the honesty
+    // rail (accounts - reporting) names a gap the page cannot show.
+    device({ device_id: "mine", build_type: "debug" });
+    device({ user_id: YOU, device_id: "theirs", build_type: "release" });
+
+    const b = await body("?excludeDebug=1");
+    expect(b.coverage.reporting).toBe(1);
+    expect(b.orphanAccounts.map((o: any) => o.acct)).toEqual([ME.slice(0, 6)]);
+  });
+
+  it("keeps a legacy row with no build type — unknown is not ours", async () => {
+    device({ device_id: "legacy", build_type: null, version_name: null });
+
+    const b = await body("?excludeDebug=1");
+    expect(b.totals.devices).toBe(1);
   });
 
   it("reports a real zero for a signup-free day", async () => {

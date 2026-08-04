@@ -126,13 +126,28 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
   const now = Date.now();
   const today = new Date(now).toISOString().slice(0, 10);
 
+  /**
+   * `?excludeDebug=1` — drop our own development handsets from the WHOLE page.
+   *
+   * Filtered here, at the single source every panel is folded from, rather than per
+   * panel: a page where the version histogram excludes debug builds and the roster does
+   * not is a page whose numbers cannot be reconciled with each other.
+   *
+   * Only an explicit `debug` is dropped. A NULL `build_type` is a legacy header-only row
+   * from a client predating the telemetry block — unknown, not ours, and hiding it would
+   * quietly shrink the fleet.
+   */
+  const excludeDebug = new URL(req.url).searchParams.get("excludeDebug") === "1";
+
   const { results: devices } = await env.DB.prepare(
     `SELECT user_id, device_id, platform, version_code, version_name, build_type, country,
             language, os_api, manufacturer, model, installer, premium, gate_outcome,
             ads_consent, integrations, features, last_seen_at, reported_on
        FROM user_telemetry`,
   ).all<DeviceRow>();
-  const rows = devices ?? [];
+  const rows = excludeDebug
+    ? (devices ?? []).filter((r) => r.build_type !== "debug")
+    : (devices ?? []);
 
   // Server-side history, per account. `history_meta` is one WITHOUT ROWID row per user and
   // is the only cheap source for this — the events themselves live in an R2 document, so
@@ -308,11 +323,19 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
   // simply everyone who had not opened Friends in a day; after it, an account sitting here
   // for more than an hour is a real signal (signed in, then left) rather than an artefact
   // of where telemetry happened to be recorded.
+  // The sub-select carries the same debug filter as `rows` above. Without it an account
+  // that only ever reported from a debug build would leave `coverage.reporting` while
+  // appearing in no list at all, and the honesty rail (`accounts - reporting`) would name
+  // a gap the page could not show.
   const { results: orphans } = await env.DB.prepare(
     `SELECT id, created_at FROM users
-      WHERE id NOT IN (SELECT user_id FROM user_telemetry)
+      WHERE id NOT IN (
+        SELECT user_id FROM user_telemetry
+         WHERE ?1 = 0 OR build_type IS NULL OR build_type <> 'debug')
       ORDER BY created_at DESC`,
-  ).all<{ id: string; created_at: number }>();
+  )
+    .bind(excludeDebug ? 1 : 0)
+    .all<{ id: string; created_at: number }>();
 
   const { results: signups } = await env.DB.prepare(
     `SELECT date(created_at / 1000, 'unixepoch') AS day, COUNT(*) AS n
@@ -342,6 +365,15 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
   return json({
     generatedAt: now,
     today,
+    /**
+     * Whether debug builds were dropped, echoed back so the page can SAY so.
+     *
+     * ⚠️ It does not reach `series.daily`. That is read from `telemetry_daily`, which is
+     * immutable once computed and holds no build type — the day was folded with debug
+     * devices in it and cannot be refolded. Everything else on the page honours the flag,
+     * so the trend is the one panel that must be labelled rather than filtered.
+     */
+    excludeDebug,
     /** 0 = no gate. Devices below it are blocked from the social surface. */
     minSocialVersion: floor,
     belowFloor: floor === 0 ? 0 : rows.filter((r) => (r.version_code ?? 0) < floor).length,
