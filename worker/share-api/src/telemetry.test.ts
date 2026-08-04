@@ -98,6 +98,9 @@ const DAY1 = Date.parse("2026-08-01T09:00:00.000Z");
 const DAY1_LATER = Date.parse("2026-08-01T21:30:00.000Z");
 const DAY2 = Date.parse("2026-08-02T08:00:00.000Z");
 
+/** Exactly what `/api/history/sync` forwards: identity plus build, never the expensive half. */
+const thinBlock = { deviceId: "dev-1", versionName: "1.4.0", buildType: "debug" };
+
 const richBlock = {
   deviceId: "dev-1",
   platform: "android",
@@ -180,28 +183,48 @@ describe("recordTelemetry", () => {
   /**
    * The exception the throttle above has to make, and the bug it was hiding.
    *
-   * `/api/history/sync` sends only a device id and runs on every app open, on an FCM wake,
-   * and 6-hourly; `/api/sync` carries the rich block and is effectively once a day. The
-   * thin caller therefore claims the day first on essentially every device, and with the
-   * throttle alone the rich write was discarded for the rest of that day — and the next,
-   * and the next. Two real devices sat at `version_name = NULL` for 11 hours, showing
-   * neither their model nor their build.
+   * `/api/history/sync` runs on every app open, on an FCM wake and 6-hourly; `/api/sync`
+   * carries the rich block and is effectively once a day. The thin caller therefore claims
+   * the day first on essentially every device, and with the throttle alone the rich write
+   * was discarded for the rest of that day — and the next, and the next. Two real devices
+   * sat with no model and no build for 11 hours while in active use.
    */
   it("lets the rich block land on a day a thin write already claimed", async () => {
-    await recordTelemetry(env, ME, req("32"), { deviceId: "dev-1" }, DAY1);
-    expect(one().version_name).toBeNull();
+    await recordTelemetry(env, ME, req("32"), thinBlock, DAY1);
+    expect(one().model).toBeNull();
 
     await recordTelemetry(env, ME, req("32"), richBlock, DAY1_LATER);
 
     const r = one();
-    expect(r.version_name).toBe("1.4.0");
     expect(r.model).toBe("Pixel 8");
+    expect(JSON.parse(r.features).counts.watched).toBe(412);
     expect(r.last_seen_at).toBe(DAY1_LATER);
   });
 
+  /**
+   * THE trap in the line above, and the reason the marker is `model`.
+   *
+   * The thin caller sends `versionName` and `buildType` so a row knows what it is running
+   * from its first write of the day. Keying the catch-up on `version_name` would therefore
+   * let the thin write satisfy its own condition and block the rich block all over again —
+   * the same bug, one column further along.
+   */
+  it("a thin write carrying a version still does not complete the row", async () => {
+    await recordTelemetry(env, ME, req("32"), thinBlock, DAY1);
+    // It DID record what it carries...
+    expect(one().version_name).toBe("1.4.0");
+    expect(one().build_type).toBe("debug");
+
+    await recordTelemetry(env, ME, req("32"), richBlock, DAY1_LATER);
+
+    // ...and the expensive half still landed behind it.
+    expect(one().model).toBe("Pixel 8");
+    expect(one().build_type).toBe("release");
+  });
+
   it("does not reopen the day once the rich half is there", async () => {
-    // The catch-up is one write, not a licence to write all day: with version_name
-    // already set, the second clause is false and the throttle governs again.
+    // The catch-up is one write, not a licence to write all day: with model already set,
+    // the second clause is false and the throttle governs again.
     await recordTelemetry(env, ME, req("32"), richBlock, DAY1);
     await recordTelemetry(env, ME, req("99"), { ...richBlock, versionName: "9.9.9" }, DAY1_LATER);
 
@@ -209,10 +232,10 @@ describe("recordTelemetry", () => {
   });
 
   it("a thin write cannot reopen a day it did not complete", async () => {
-    await recordTelemetry(env, ME, req("32"), { deviceId: "dev-1" }, DAY1);
-    await recordTelemetry(env, ME, req("99"), { deviceId: "dev-1" }, DAY1_LATER);
+    await recordTelemetry(env, ME, req("32"), thinBlock, DAY1);
+    await recordTelemetry(env, ME, req("99"), thinBlock, DAY1_LATER);
 
-    // excluded.version_name is NULL for a thin caller, so the second clause is false.
+    // excluded.model is NULL for a thin caller, so the second clause is false.
     expect(one().last_seen_at).toBe(DAY1);
   });
 

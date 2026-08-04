@@ -436,7 +436,18 @@ export async function handleHistorySync(
   // never be constructed and the write would silently never happen. Same shape as the
   // `finish()` dispatch further down.
   const recordFleet = async () => {
-    await recordTelemetry(env, session.userId, req, { deviceId: deviceIdOf(body) }).catch(() => {});
+    await recordTelemetry(env, session.userId, req, {
+      deviceId: deviceIdOf(body),
+      // Build identity rides this request because this is the request that happens. It
+      // does NOT make the row complete — `model` is the marker for that — so the rich
+      // block arriving later on `/api/sync` is still let through exactly once.
+      //
+      // Passed raw: `TelemetryBlock` fields are `unknown` and `recordTelemetry` sanitises
+      // and caps every one of them. Sanitising here as well would be a second definition
+      // of the same rule, and the second one is what rots.
+      versionName: body.versionName,
+      buildType: body.buildType,
+    }).catch(() => {});
     await maybeRollup(env).catch(() => {});
   };
   if (ctx) ctx.waitUntil(recordFleet());

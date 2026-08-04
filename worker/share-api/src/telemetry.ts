@@ -164,6 +164,13 @@ function featuresJson(v: unknown): string | null {
  * The thin caller therefore claims the day first on essentially every device, every day,
  * and with the throttle alone the rich write that followed was discarded for that day.
  *
+ * ⚠️ **The marker is `model`, and it must be a column ONLY the expensive half sets.** The
+ * thin caller carries `versionName` and `buildType` — deliberately, so a row knows what it
+ * is running from its first write of the day — so keying this on `version_name` would let
+ * the thin write satisfy its own catch-up condition and block the rich block all over
+ * again, one column further along. `model` comes from `Build.MODEL` in the expensive half
+ * and from nowhere else.
+ *
  * `COALESCE(excluded.x, user_telemetry.x)` hid this for existing rows by preserving
  * yesterday's values, so it only showed on a row with no yesterday: two devices whose rows
  * were deleted mid-day came back as `version_name = NULL` and could never fill in again,
@@ -212,7 +219,7 @@ export async function recordTelemetry(
        integrations = COALESCE(excluded.integrations, user_telemetry.integrations),
        features     = COALESCE(excluded.features,     user_telemetry.features)
      WHERE user_telemetry.reported_on <> excluded.reported_on
-        OR (excluded.version_name IS NOT NULL AND user_telemetry.version_name IS NULL)`,
+        OR (excluded.model IS NOT NULL AND user_telemetry.model IS NULL)`,
   )
     .bind(
       userId,
