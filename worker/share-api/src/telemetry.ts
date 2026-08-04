@@ -152,10 +152,17 @@ function featuresJson(v: unknown): string | null {
  * throttle: the second and every later report of the day writes nothing.
  *
  * **The second clause is not an optimisation, it is the thing that makes a row complete.**
- * Two callers write here on different schedules: `/api/history/sync` every 15 minutes
- * carrying only a device id, and `/api/sync` carrying the rich block once a day. The
- * frequent thin caller therefore almost always claims the day first, and with the throttle
- * alone the rich write that followed was discarded — for that whole day.
+ * Two callers write here, and the thin one is by far the more frequent:
+ *
+ *  - `/api/history/sync` carries only a device id. `HistorySyncWorker` runs on every app
+ *    open (TTL-gated), on an FCM wake after a server-side document write, and every 6
+ *    hours as a safety net.
+ *  - `/api/sync` carries the rich block. `SocialSyncWorker` is 24-hourly *with a 24-hour
+ *    initial delay*, and its startup one-shot is gated on `socialLastSyncAt == 0L` — so on
+ *    an established device it is roughly a once-a-day job and nothing more.
+ *
+ * The thin caller therefore claims the day first on essentially every device, every day,
+ * and with the throttle alone the rich write that followed was discarded for that day.
  *
  * `COALESCE(excluded.x, user_telemetry.x)` hid this for existing rows by preserving
  * yesterday's values, so it only showed on a row with no yesterday: two devices whose rows

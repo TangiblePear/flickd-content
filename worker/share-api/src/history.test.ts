@@ -313,7 +313,8 @@ describe("history: fleet telemetry rides this endpoint", () => {
   // Telemetry used to be written ONLY by `/api/sync`, reached only by SocialSyncWorker —
   // a 24h job whose one prompt firing is spent before the user has signed in. Measured
   // against production on 2026-08-02: 9 accounts, 6 telemetry rows, and the 3 missing were
-  // the 3 newest. This endpoint runs every 15 minutes for every signed-in device, so it is
+  // the 3 newest. This endpoint is reached on every app open, on an FCM wake and 6-hourly
+  // for every signed-in device (it was 15-minutely until the poll was dropped), so it is
   // what makes coverage independent of whether anyone opened the Friends tab.
   //
   // Every assertion here fails silently in production: a telemetry row that is never
@@ -825,7 +826,7 @@ describe("history: wake on write", () => {
 
   it("wakes nothing on the idle path", async () => {
     // The overwhelmingly common pass. A push here would cost an OAuth round trip and an
-    // FCM publish per device per 15 minutes, for nothing.
+    // FCM publish per device per sync pass, for nothing.
     const env = await env0();
     const first = await (await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env)).json();
     const { calls, notify } = spy();

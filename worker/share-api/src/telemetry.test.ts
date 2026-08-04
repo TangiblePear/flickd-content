@@ -180,11 +180,12 @@ describe("recordTelemetry", () => {
   /**
    * The exception the throttle above has to make, and the bug it was hiding.
    *
-   * `/api/history/sync` runs every 15 minutes with only a device id; `/api/sync` carries
-   * the rich block once a day. The thin caller therefore usually claims the day first, and
-   * with the throttle alone the rich write was discarded for the rest of that day — and
-   * the next, and the next. Two real devices sat at `version_name = NULL` for 11 hours,
-   * showing neither their model nor their build.
+   * `/api/history/sync` sends only a device id and runs on every app open, on an FCM wake,
+   * and 6-hourly; `/api/sync` carries the rich block and is effectively once a day. The
+   * thin caller therefore claims the day first on essentially every device, and with the
+   * throttle alone the rich write was discarded for the rest of that day — and the next,
+   * and the next. Two real devices sat at `version_name = NULL` for 11 hours, showing
+   * neither their model nor their build.
    */
   it("lets the rich block land on a day a thin write already claimed", async () => {
     await recordTelemetry(env, ME, req("32"), { deviceId: "dev-1" }, DAY1);

@@ -417,9 +417,14 @@ export async function handleHistorySync(
   // Telemetry used to be written ONLY by `/api/sync`, which is reached only by
   // `SocialSyncWorker` — a 24h-periodic job whose one prompt firing is spent on an
   // install's first launch, before the user has signed in. Measured 2026-08-02: 9
-  // accounts, 6 telemetry rows, and the 3 missing were the 3 newest. This worker runs
-  // every 15 minutes, is scheduled unconditionally, and is not gated on the social
+  // accounts, 6 telemetry rows, and the 3 missing were the 3 newest. This endpoint is
+  // reached on every app open, on an FCM wake, and 6-hourly (it was 15-minutely until the
+  // poll was dropped), is scheduled unconditionally, and is not gated on the social
   // subsystem, so coverage stops depending on whether anyone opened Friends.
+  //
+  // It is also, for that reason, almost always the write that CLAIMS the UTC day — see the
+  // second WHERE clause in `recordTelemetry`, without which the rich block that arrives
+  // later on `/api/sync` is discarded and the row never gains a model or a build.
   //
   // No new request and no new field: `X-App-Version` is already stamped on every call
   // by the client's OkHttp interceptor, Cloudflare already attaches `cf.country`, and
