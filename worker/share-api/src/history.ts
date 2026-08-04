@@ -44,6 +44,7 @@ import {
   type IncomingRating,
   type PackedTitle,
 } from "./historyDoc";
+import { notifyHistoryWrite, type NotifyEnv } from "./notify";
 import { maybeRollup, recordTelemetry } from "./telemetry";
 
 // Re-exported: it lives with the document model now (the merge needs it to recover a
@@ -72,7 +73,20 @@ export interface HistoryEnv {
   HISTORY_ANALYTICS?: { writeDataPoint(event: AnalyticsDataPoint): void };
   CF_ACCOUNT_ID?: string;
   ANALYTICS_API_TOKEN?: string;
+  /**
+   * Directed push, for waking the account's other devices after a write. Optional —
+   * absent means no wake, and the periodic pull still covers it.
+   */
+  FCM_PROJECT_ID?: string;
+  FCM_SERVICE_ACCOUNT_EMAIL?: string;
+  FCM_PRIVATE_KEY?: string;
 }
+
+/**
+ * Injected so tests can assert that a write wakes and an idle pass does not, without a
+ * network call. Production always takes the default.
+ */
+export type HistoryNotifier = (env: NotifyEnv, userId: string, srcDeviceId: string) => Promise<void>;
 
 interface AnalyticsDataPoint {
   blobs?: string[];
@@ -382,7 +396,12 @@ async function invalidateStats(env: HistoryEnv, userId: string): Promise<void> {
  * The client sends the `version` it last saw. If it has nothing to push and its version
  * matches, this is a pure read: **zero writes, no R2 access at all.**
  */
-export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: ExecutionContext): Promise<Response> {
+export async function handleHistorySync(
+  req: Request,
+  env: HistoryEnv,
+  ctx?: ExecutionContext,
+  notify: HistoryNotifier = notifyHistoryWrite,
+): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
@@ -517,6 +536,9 @@ export async function handleHistorySync(req: Request, env: HistoryEnv, ctx?: Exe
       writeAnalytics(env, session.userId, before, after);
       await writePublicRecent(env, session.userId, after);
       await invalidateStats(env, session.userId);
+      // Hung off the WRITE, never the request: the idle path is the overwhelmingly
+      // common one and must stay free of an OAuth round trip and an FCM publish.
+      await notify(env, session.userId, deviceIdOf(body));
     };
     if (ctx) ctx.waitUntil(finish());
     else await finish();
@@ -676,6 +698,7 @@ export async function handleDeleteHistory(
   req: Request,
   env: HistoryEnv,
   ctx?: ExecutionContext,
+  notify: HistoryNotifier = notifyHistoryWrite,
 ): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -689,6 +712,11 @@ export async function handleDeleteHistory(
 
   const s = statsFor(merged);
   const meta = await readMeta(env, session.userId);
+  // Same rule as the sync path: the version comes from the document the CAS actually
+  // stored, never from a `readMeta` taken around it. Two writers deriving it from meta
+  // can label two different states with one version, which a delta client never recovers
+  // from. See HistoryDoc.ver.
+  const version = merged.ver ?? (meta?.version ?? 0) + 1;
   await env.DB.prepare(
     `INSERT INTO history_meta (user_id, version, event_count, title_count, last_watched_at, updated_at)
      VALUES (?,?,?,?,?,?)
@@ -697,7 +725,7 @@ export async function handleDeleteHistory(
        title_count = excluded.title_count, last_watched_at = excluded.last_watched_at,
        updated_at = excluded.updated_at`,
   )
-    .bind(session.userId, (meta?.version ?? 0) + 1, s.eventCount, s.titleCount, s.lastWatchedAt, now)
+    .bind(session.userId, version, s.eventCount, s.titleCount, s.lastWatchedAt, now)
     .run();
 
   // A deletion must reach Trakt too, or the user removes a watch here and it silently
@@ -709,11 +737,14 @@ export async function handleDeleteHistory(
   const finish = async () => {
     await writePublicRecent(env, session.userId, merged);
     await invalidateStats(env, session.userId);
+    // A removal has to reach the other devices as promptly as an addition; otherwise a
+    // watch deleted on one device lingers on the rest for up to a full periodic cycle.
+    await notify(env, session.userId, "");
   };
   if (ctx) ctx.waitUntil(finish());
   else await finish();
 
-  return json({ ok: true, deletedAt: now, version: (meta?.version ?? 0) + 1 });
+  return json({ ok: true, deletedAt: now, version });
 }
 
 

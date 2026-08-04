@@ -69,7 +69,8 @@ interface Env {
   ANALYTICS_API_TOKEN?: string;
 }
 
-import { sendFcmMessage, pickFcmTarget, FcmConfig } from "./fcm";
+import { sendFcmMessage, pickFcmTarget } from "./fcm";
+import { fcmConfig, notifyAccount } from "./notify";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, reapOldReports, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
@@ -786,15 +787,6 @@ function strongEtag(value: string | null): string | null {
   return v ? v : null;
 }
 
-// PUT access.json / profile.json — owner-auth + bind read token. Body is opaque.
-function fcmConfig(env: Env): FcmConfig | null {
-  if (!env.FCM_PROJECT_ID || !env.FCM_SERVICE_ACCOUNT_EMAIL || !env.FCM_PRIVATE_KEY) return null;
-  return {
-    projectId: env.FCM_PROJECT_ID,
-    clientEmail: env.FCM_SERVICE_ACCOUNT_EMAIL,
-    privateKey: env.FCM_PRIVATE_KEY,
-  };
-}
 
 // Ambient profile fan-out. With push topics this is O(1): publish one message to
 // the owner's friend-topic and Google delivers it to every subscribed friend on
@@ -1354,54 +1346,6 @@ async function loadPublicCard(env: Env, friendCode: string | null): Promise<Publ
  *
  * Best-effort throughout: a share that was delivered must not fail because a push did.
  */
-/**
- * Wake a user's own devices.
- *
- * ⚠️ **Addressing a user has never required a friendship.** `users.push_self_topic`
- * is subscribed to by that user's own devices, so this reaches anyone — friend or
- * stranger's target alike. That is why comment-reaction notifications needed no new addressing
- * mechanism, only a caller.
- *
- * The push record itself still lives in **R2**, which is the last relay dependency
- * on this path. When the relay is retired it has to move to a D1 `device_tokens`
- * table keyed by **token** (not by user+device: a token migrates between users on a
- * shared device, and keying on the device eventually delivers one person's
- * notifications to another). Nothing above this line changes when it does.
- *
- * @param data extra `data` fields for the client to render without a round trip.
- * @param collapseKey replaces an earlier notification about the same subject rather
- *   than stacking beside it — see [sendFcmMessage].
- */
-async function notifyAccount(
-  env: Env,
-  userId: string,
-  data: Record<string, string> = {},
-  collapseKey?: string,
-): Promise<void> {
-  try {
-    const account = await readAccountPush(env.DB, userId);
-    if (!account) return;
-    const config = fcmConfig(env);
-    if (!config) return;
-
-    // The relay fallback (`{friendId}/push.json`) is gone as of 9a. An account with no
-    // topics is now simply unreachable by directed push until its client publishes them,
-    // which every current build does on the sync after upgrading. Measured before
-    // removing: 3 of 5 active accounts had no account topics and lose directed push
-    // until they open an updated build — the accepted price, decided twice.
-    const target = pickFcmTarget(account, "self");
-    if (!target) return;
-    // Still the friendId while one exists: it is the FCM message tag the client
-    // correlates on, not an addressing decision.
-    const friendId = userId;
-    // `kind` distinguishes a rendered notification from the bare "sync now" wake
-    // every other caller sends; the client switches on it.
-    const type = data.kind ? data.kind : "inbox_update";
-    await sendFcmMessage(config, target, friendId, type, data, collapseKey);
-  } catch (e) {
-    console.error("notifyAccount failed", e);
-  }
-}
 
 async function resolveCardOwner(env: Env, code: string): Promise<string | null> {
   const card = await getJson<{ serverUserId?: unknown }>(env, `fc/${code}.json`);

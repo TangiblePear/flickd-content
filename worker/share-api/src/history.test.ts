@@ -801,3 +801,70 @@ describe("history: concurrent writers", () => {
     expect(catchUp.doc.titles["MOVIE|680"]).toBeDefined();
   });
 });
+
+// ── Cross-device wake ────────────────────────────────────────────────────────
+//
+// The push side is debounced to 30s but the pull side had no prompt trigger at all, so a
+// second device learned nothing until its next periodic pass — measured at 15m20s for an
+// episode marked on a tablet to reach a phone.
+describe("history: wake on write", () => {
+  const spy = () => {
+    const calls: Array<[string, string]> = [];
+    return { calls, notify: async (_e: never, u: string, d: string) => void calls.push([u, d]) };
+  };
+
+  it("wakes the account's devices after a document write", async () => {
+    const env = await env0();
+    const { calls, notify } = spy();
+    await handleHistorySync(
+      syncReq("tok-a", { ...base, deviceId: "dev-tablet", events: [movie(550, SEC)] }),
+      env, undefined, notify as never,
+    );
+    expect(calls).toEqual([[A, "dev-tablet"]]);
+  });
+
+  it("wakes nothing on the idle path", async () => {
+    // The overwhelmingly common pass. A push here would cost an OAuth round trip and an
+    // FCM publish per device per 15 minutes, for nothing.
+    const env = await env0();
+    const first = await (await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env)).json();
+    const { calls, notify } = spy();
+    await handleHistorySync(
+      syncReq("tok-a", { ...base, version: first.version }), env, undefined, notify as never,
+    );
+    expect(calls).toEqual([]);
+  });
+
+  it("wakes nothing when the write was rejected as a conflict", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    env.BUCKET.failNextPut = 99; // never lands
+    const { calls, notify } = spy();
+    const res = await handleHistorySync(
+      syncReq("tok-a", { ...base, version: 1, events: [movie(680, SEC)] }), env, undefined, notify as never,
+    );
+    expect(res.status).toBe(409);
+    expect(calls).toEqual([]);
+  });
+
+  it("wakes the account's devices after a single-event delete", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const { calls, notify } = spy();
+    await handleDeleteHistory(`watch-MOVIE-550-${SEC}`, delReq("tok-a"), env, undefined, notify as never);
+    expect(calls).toEqual([[A, ""]]);
+  });
+
+  it("takes the delete path's version from the document too", async () => {
+    // Same stale-read race as the sync path: `readMeta` before the merge cannot label the
+    // state the CAS actually stored.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    env.DB.history_meta[0].version = 0;
+
+    const res = await (await handleDeleteHistory(`watch-MOVIE-550-${SEC}`, delReq("tok-a"), env)).json();
+    const doc = await docOf(env);
+    expect(res.version).toBe(doc.ver);
+    expect(env.DB.history_meta[0].version).toBe(doc.ver);
+  });
+});
