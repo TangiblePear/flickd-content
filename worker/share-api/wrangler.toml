@@ -88,6 +88,28 @@ routes = [
   # rather than the routes being merged. Found on the first real deploy, 2026-07-28;
   # `wrangler deploy --dry-run` cannot see it because it never contacts the zone.
   { pattern = "flickto.app/api/moderation/*", zone_name = "flickto.app" },
+  # In-app feedback (src/feedback.ts). ONE pattern covers all three endpoints because
+  # a route `*` matches any string INCLUDING `/`: `/api/feedback` (the app's POST),
+  # `/api/feedback/admin` and `/api/feedback/admin/act` (the panel, X-Admin-Key) all
+  # match `flickto.app/api/feedback*`.
+  #
+  # `…/api/feedback*` and NOT `…/api/feedback/*` — the latter does not match the bare
+  # path the app actually posts to, which is the trap this file has hit six times
+  # already (see /api/friends, /api/match, /api/comments). Both vitest and
+  # `wrangler deploy --dry-run` stay green either way; only a live request tells them
+  # apart. 405 ⇒ the static site answered and this pattern is wrong; 401 ⇒ correct.
+  #
+  # ⚠️ This pattern is BELT, not braces — and knowing which is the point. Measured
+  # against production 2026-08-06, BEFORE it was deployed: `POST /api/feedback`
+  # answered **404**, not 405. 404 means the Worker was reached and its router had no
+  # handler — so something was already routing this path, and it is `/api/feed*` four
+  # entries up: a route `*` matches any string, and "feedback" starts with "feed".
+  #
+  # So feedback would work without this line today. Keep it anyway: `/api/feed*` has a
+  # trailing `*` only to carry a query string, and narrowing it to `/api/feed` is an
+  # obvious future cleanup that would silently kill feedback with every test green.
+  # Overlapping patterns are fine — only an EXACTLY duplicated one is a deploy error.
+  { pattern = "flickto.app/api/feedback*", zone_name = "flickto.app" },
   # Fleet insights (src/insights.ts), called by the /admin Pages function with
   # X-Admin-Key. Same ADMIN_KEY gate as moderation, and the same reason it is NOT
   # under `/api/admin/*`: that prefix is already flickto-scoring-api's, and a route

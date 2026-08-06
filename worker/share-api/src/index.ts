@@ -51,6 +51,9 @@ interface Env {
   //   wrangler secret put ADMIN_KEY
   // Unset ⇒ /api/admin/* answers 403. Closed rather than open when unconfigured.
   ADMIN_KEY?: string;
+  // Per-IP hourly cap on in-app feedback submissions. Lower than share-create by
+  // default (5): a person with something to say sends one, not ten.
+  FEEDBACK_PER_HOUR?: string;
   // Derived watch-history totals (src/history.ts). A CACHE, never a source of truth —
   // every entry is reproducible from the per-user R2 document, so losing the namespace
   // costs latency and nothing else.
@@ -115,6 +118,7 @@ import {
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
+import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import {
@@ -576,6 +580,16 @@ export default {
     // — those were the temporary reader, not a second surface to keep alive.
     if (p === "/api/moderation/reports" && req.method === "GET") return handleModerationQueue(req, env);
     if (p === "/api/moderation/act" && req.method === "POST") return handleModerationAct(req, env);
+
+    // In-app feedback. The submit path takes an OPTIONAL session — someone stuck at
+    // sign-in is exactly who needs to be able to write to us — so `resolveSession`
+    // returning null is a normal anonymous submission, not a 401.
+    if (p === "/api/feedback" && req.method === "POST") {
+      const session = await resolveSession(req, env, ctx);
+      return handlePostFeedback(req, env, session?.userId ?? null);
+    }
+    if (p === "/api/feedback/admin" && req.method === "GET") return handleAdminFeedbackList(req, env);
+    if (p === "/api/feedback/admin/act" && req.method === "POST") return handleAdminFeedbackAct(req, env);
 
     // Fleet insights for the admin panel. Read-only, ADMIN_KEY-gated like moderation.
     //

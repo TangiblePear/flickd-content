@@ -751,6 +751,11 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
     // `user_achievements` is a record of their behaviour over years — both are as much
     // "their data" as the profile row two lines below, and neither is reachable by any
     // other cleanup path once `users` is gone.
+    // In-app feedback this account sent (migration 0025). Deleted, unlike `reports`
+    // above: a report is a safety record the privacy policy commits to keeping, and
+    // feedback is just this person's own words about the app. Anonymous submissions
+    // carry no `user_id` and are unreachable from here by construction.
+    env.DB.prepare("DELETE FROM feedback WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_settings WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_achievements WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),

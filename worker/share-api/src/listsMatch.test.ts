@@ -259,6 +259,7 @@ class FakeStmt {
       ["DELETE FROM user_telemetry", "user_telemetry", "user_id"],
       ["DELETE FROM user_settings", "user_settings", "user_id"],
       ["DELETE FROM user_achievements", "user_achievements", "user_id"],
+      ["DELETE FROM feedback", "feedback", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],

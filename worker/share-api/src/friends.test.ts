@@ -246,6 +246,8 @@ class FakeStmt {
       // is a record of their behaviour over years. Both are their data.
       ["DELETE FROM user_settings", "user_settings", "user_id"],
       ["DELETE FROM user_achievements", "user_achievements", "user_id"],
+      // Migration 0025. Their own words about the app — deleted, unlike `reports`.
+      ["DELETE FROM feedback", "feedback", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
@@ -822,6 +824,28 @@ describe("account deletion", () => {
 
     expect(env.DB.user_settings.map((r: any) => r.user_id)).toEqual([B]);
     expect(env.DB.user_achievements.map((r: any) => r.user_id)).toEqual([B]);
+  });
+
+  /**
+   * Migration 0025. Feedback is the person's own words, so unlike `reports` — kept
+   * deliberately as a safety record — it goes with the account. An anonymous row has a
+   * NULL `user_id` and must survive: there is no account it belongs to, and deleting
+   * one account must not silently clear the anonymous inbox.
+   */
+  it("erases this account's feedback but not anonymous feedback", async () => {
+    const env = await env0();
+    env.DB.feedback = [
+      { id: "f1", user_id: A, topic: "bug", message: "mine" },
+      { id: "f2", user_id: B, topic: "idea", message: "theirs" },
+      { id: "f3", user_id: null, topic: "other", message: "anonymous" },
+    ];
+
+    await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer tok-a" },
+    }), env);
+
+    expect(env.DB.feedback.map((r: any) => r.id)).toEqual(["f2", "f3"]);
   });
 
   /**

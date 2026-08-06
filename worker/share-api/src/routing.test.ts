@@ -140,6 +140,11 @@ const ROUTES: Array<[string, string, unknown?]> = [
   ["GET", "/api/stats/global"],
   ["GET", "/api/giphy/trending"],
   ["GET", "/api/giphy/search?q=cat"],
+  // In-app feedback. The POST deliberately takes an OPTIONAL session, so unlike every
+  // other write here it must NOT answer 401 — see the exemption list below.
+  ["POST", "/api/feedback", { topic: "bug", message: "hi" }],
+  ["GET", "/api/feedback/admin"],
+  ["POST", "/api/feedback/admin/act", { id: "AAAAAAAA", state: "closed" }],
   ["GET", "/api/moderation/comment-reports"],
   ["POST", "/api/moderation/comments/AAAAAAAA/restore"],
   ["GET", "/api/moderation/reports?state=open"],
@@ -224,6 +229,28 @@ describe("route wiring", () => {
 
     const acted = await worker.fetch(request("POST", "/api/moderation/act", {}), env(), ctx);
     expect(acted.status).toBe(403);
+  });
+
+  /**
+   * Feedback is the one write path that must work signed OUT — someone who cannot get
+   * past sign-in is exactly who needs to be able to tell us so. A 401 here would mean
+   * the endpoint had quietly been given the session guard every other write has.
+   *
+   * Its admin half must NOT be reachable that way: 401 there is the target.
+   */
+  it("accepts anonymous feedback but gates the admin half", async () => {
+    const submitted = await worker.fetch(
+      request("POST", "/api/feedback", { topic: "bug", message: "hi" }),
+      env(),
+      ctx,
+    );
+    expect(submitted.status).toBe(200);
+
+    const listed = await worker.fetch(request("GET", "/api/feedback/admin"), env(), ctx);
+    expect(listed.status).toBe(401);
+
+    const acted = await worker.fetch(request("POST", "/api/feedback/admin/act", { id: "x" }), env(), ctx);
+    expect(acted.status).toBe(401);
   });
 
   /**
