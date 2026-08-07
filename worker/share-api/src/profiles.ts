@@ -222,11 +222,39 @@ export async function readProfileRow(env: ProfileEnv, userId: string): Promise<P
     .first<ProfileRow>();
 }
 
+/**
+ * The canonical stats blob — with a TRANSITIONAL merge from `public_stats`.
+ *
+ * `stats` is meant to be the superset and is not. Measured in production
+ * 2026-08-07: `public_stats` carries `topRated` and `recentWatches`, and
+ * `stats` carries neither. That is the wrong way round, and it is why friends
+ * saw both blocks empty long before any of this changed.
+ *
+ * Reading `stats` alone therefore LOSES data — verified the hard way, by
+ * deploying it and watching those two disappear from a live public profile. So
+ * the richer column fills the gaps until the app publishes them in `stats`,
+ * where they belong.
+ *
+ * `stats` still wins wherever it has a value: it is the canonical one, and this
+ * is a backfill for absent keys, not a preference for the other column.
+ *
+ * ⚠️ Delete this merge only once the app writes the per-title keys into
+ * `stats` — the same release that lets migration 0028 drop `public_stats`.
+ */
 async function readStats(env: ProfileEnv, userId: string): Promise<unknown | null> {
-  const row = await env.DB.prepare("SELECT stats FROM profile_stats WHERE user_id = ?")
+  const row = await env.DB.prepare("SELECT stats, public_stats FROM profile_stats WHERE user_id = ?")
     .bind(userId)
-    .first<{ stats: string | null }>();
-  return row ? jsonColumn<unknown | null>(row.stats, null) : null;
+    .first<{ stats: string | null; public_stats: string | null }>();
+  if (!row) return null;
+  const canonical = jsonColumn<Record<string, unknown> | null>(row.stats, null);
+  const legacy = jsonColumn<Record<string, unknown> | null>(row.public_stats, null);
+  if (!canonical) return legacy;
+  if (!legacy) return canonical;
+  const merged = { ...canonical };
+  for (const key of ["topRated", "recentWatches", "currentlyWatching"]) {
+    if (merged[key] === undefined && legacy[key] !== undefined) merged[key] = legacy[key];
+  }
+  return merged;
 }
 
 /**

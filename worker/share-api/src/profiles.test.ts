@@ -74,6 +74,10 @@ class FakeStmt {
     if (s.includes("FROM user_achievements WHERE user_id = ?")) {
       return (this.db.user_achievements.find((r) => r.user_id === this.args[0]) ?? null) as T | null;
     }
+    if (s.startsWith("SELECT stats, public_stats FROM profile_stats")) {
+      const row = this.db.profile_stats.find((p) => p.user_id === this.args[0]);
+      return row ? ({ stats: row.stats, public_stats: row.public_stats ?? null } as T) : null;
+    }
     if (s.startsWith("SELECT stats FROM profile_stats")) {
       const row = this.db.profile_stats.find((p) => p.user_id === this.args[0]);
       return row ? ({ stats: row.stats } as T) : null;
@@ -584,6 +588,29 @@ describe("foreign profile", () => {
       expect(body.profile).not.toHaveProperty("friendLayout");
       expect(body.profile).not.toHaveProperty("publicLayout");
     }
+  });
+
+  /**
+   * Production had it backwards: `public_stats` held the per-title keys and
+   * `stats` held none. Consolidating onto `stats` alone deleted them from a
+   * live profile, so the richer column backfills absent keys until the app
+   * publishes them where they belong.
+   */
+  it("backfills per-title keys from the legacy public_stats when stats lacks them", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public" }), env);
+    env.DB.profiles[0].public_sensitive_consent_at = 1;
+    env.DB.profile_stats.push({
+      user_id: OWNER,
+      stats: JSON.stringify({ uniqueShows: 9 }),
+      public_stats: JSON.stringify({ uniqueShows: 0, recentWatches: [{ tmdbId: 1 }] }),
+      updated_at: 1,
+    });
+
+    const body = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    expect(body.stats.recentWatches).toEqual([{ tmdbId: 1 }]);
+    // The canonical column still wins where it HAS a value.
+    expect(body.stats.uniqueShows).toBe(9);
   });
 
   it("stores the consent flags a client sends", async () => {
