@@ -125,6 +125,8 @@ class FakeStmt {
         visibility,
         version,
         updated_at,
+        friend_sensitive_consent_at,
+        public_sensitive_consent_at,
       ] = this.args;
       const row: Row = {
         user_id,
@@ -146,6 +148,8 @@ class FakeStmt {
         visibility,
         version,
         updated_at,
+        friend_sensitive_consent_at,
+        public_sensitive_consent_at,
       };
       const at = this.db.profiles.findIndex((p) => p.user_id === user_id);
       if (at >= 0) this.db.profiles[at] = row;
@@ -371,47 +375,12 @@ describe("owner profile", () => {
     expect((await handlePutMyProfile(put("tok-owner", { layout: huge }), env)).status).toBe(413);
   });
 
-  it("rejects an oversize publicLayout", async () => {
-    const env = await env0();
-    const huge = Array.from({ length: 40 }, () => ({ type: "X".repeat(400) }));
-    expect((await handlePutMyProfile(put("tok-owner", { publicLayout: huge }), env)).status).toBe(413);
-  });
-
-  it("stores publicLayout independently of friendLayout", async () => {
-    const env = await env0();
-    await handlePutMyProfile(
-      put("tok-owner", {
-        layout: [{ type: "bio" }, { type: "recent_activity" }],
-        friendLayout: [{ type: "bio" }, { type: "recent_activity" }],
-        publicLayout: [{ type: "bio" }],
-      }),
-      env,
-    );
-    const row = env.DB.profiles[0];
-    expect(JSON.parse(row.friend_layout)).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
-    expect(JSON.parse(row.public_layout)).toEqual([{ type: "bio" }]);
-  });
-
-  it("treats an omitted publicLayout as leave-unchanged", async () => {
-    const env = await env0();
-    await handlePutMyProfile(put("tok-owner", { publicLayout: [{ type: "bio" }] }), env);
-    await handlePutMyProfile(put("tok-owner", { bio: "hello" }, "1"), env);
-    expect(JSON.parse(env.DB.profiles[0].public_layout)).toEqual([{ type: "bio" }]);
-  });
-
   /**
    * The clear path, and the reason `publicLayout` is always sent rather than omitted when
    * a profile stops being public. Omitting it would strand the stale public payload here,
    * ready to go live again the moment the owner flips back — possibly showing blocks they
    * have since removed.
    */
-  it("treats an empty publicLayout as clear", async () => {
-    const env = await env0();
-    await handlePutMyProfile(put("tok-owner", { publicLayout: [{ type: "bio" }] }), env);
-    await handlePutMyProfile(put("tok-owner", { publicLayout: [] }, "1"), env);
-    expect(JSON.parse(env.DB.profiles[0].public_layout)).toEqual([]);
-  });
-
   it("clamps an overlong bio instead of rejecting it", async () => {
     const env = await env0();
     await handlePutMyProfile(put("tok-owner", { bio: "z".repeat(5000) }), env);
@@ -586,12 +555,17 @@ describe("foreign profile", () => {
    * republish them — an omitted key is carried over, so a client that sends
    * only `layout` freezes what everyone else sees.
    */
-  it("returns the derived layouts to the OWNER", async () => {
+  it("still returns the legacy derived layouts to the OWNER", async () => {
     const env = await env0();
-    await seedBothLayouts(env);
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", layout: [{ type: "bio" }] }), env);
+    // Set on the row, not through the body: the write path ignores them now.
+    // They are a frozen rollback snapshot until the migration drops the columns,
+    // and this pins that they are still handed back until then.
+    env.DB.profiles[0].friend_layout = JSON.stringify([{ type: "bio" }]);
+    env.DB.profiles[0].public_layout = JSON.stringify([{ type: "bio" }]);
+
     const mine = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
-    expect(mine.profile.layout).toEqual([{ type: "bio" }, { type: "recent_activity" }, { type: "owner_secret" }]);
-    expect(mine.profile.friendLayout).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(mine.profile.friendLayout).toEqual([{ type: "bio" }]);
     expect(mine.profile.publicLayout).toEqual([{ type: "bio" }]);
   });
 
@@ -610,6 +584,36 @@ describe("foreign profile", () => {
       expect(body.profile).not.toHaveProperty("friendLayout");
       expect(body.profile).not.toHaveProperty("publicLayout");
     }
+  });
+
+  it("stores the consent flags a client sends", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", { displayName: "Pear", visibility: "public", publicSensitiveConsentAt: 1712000000000 }),
+      env,
+    );
+    expect(env.DB.profiles[0].public_sensitive_consent_at).toBe(1712000000000);
+  });
+
+  /**
+   * Deployed builds still send all three layouts. Accepting one would reinstate
+   * the drift read-time filtering exists to remove.
+   */
+  it("ignores friendLayout and publicLayout from an older client", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "bio" }],
+        friendLayout: [{ type: "stat_mosaic" }],
+        publicLayout: [{ type: "stat_mosaic" }],
+      }),
+      env,
+    );
+    env.DB.profiles[0].public_sensitive_consent_at = 1;
+    const body = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    expect(body.profile.layout).toEqual([{ type: "bio" }]);
   });
 
   it("filters the CANONICAL layout instead of reading a stored copy", async () => {

@@ -148,14 +148,13 @@ export function toWire(row: ProfileRow) {
 }
 
 /**
- * Row → wire **for the owner**, carrying the two derived layouts as well.
+ * Row → wire **for the owner**, still carrying the two legacy derived layouts.
  *
- * The owner is the one person entitled to see how their profile has been
- * filtered for everyone else, and they need it to REPUBLISH: a client that
- * edits `layout` must send matching `friendLayout` and `publicLayout` or the
- * two go stale, because an omitted key means "leave unchanged". The web editor
- * did exactly that — reordering on the web moved the owner's own blocks and
- * left every visitor looking at whatever the phone last published.
+ * LEGACY, and on the way out. They existed so a client editing `layout` could
+ * republish matching copies; the server derives both on read now, so nothing
+ * needs them. They are still returned because the columns still hold the last
+ * published values and are the rollback path — both go together in the
+ * migration that drops the columns.
  *
  * Deliberately NOT folded into [toWire]. That function feeds [toForeignWire]
  * too, so a field added there reaches strangers; this one is only ever returned
@@ -279,6 +278,8 @@ interface ValidatedProfile {
   featured_achievements: string | null;
   personality_id: string | null;
   visibility: Visibility;
+  friend_sensitive_consent_at: number | null;
+  public_sensitive_consent_at: number | null;
 }
 
 /**
@@ -295,14 +296,21 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
   const has = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
   const layout = has("layout") ? jsonList(body.layout) : (existing?.layout ?? null);
   if (layout != null && layout.length > MAX_LAYOUT_BYTES) return null;
-  // Same cap: it is a strict subset of `layout`, but it arrives as its own field and an
-  // unchecked one would be a way straight past the limit the line above enforces.
-  const friendLayout = has("friendLayout") ? jsonList(body.friendLayout) : (existing?.friend_layout ?? null);
-  if (friendLayout != null && friendLayout.length > MAX_LAYOUT_BYTES) return null;
-  // Same cap, same reasoning: it arrives as its own field, so an unchecked one would be a
-  // way straight past the limit enforced above.
-  const publicLayout = has("publicLayout") ? jsonList(body.publicLayout) : (existing?.public_layout ?? null);
-  if (publicLayout != null && publicLayout.length > MAX_LAYOUT_BYTES) return null;
+  // `friendLayout` and `publicLayout` are IGNORED, deliberately. Deployed app
+  // builds still send them and accepting one would reinstate the very drift
+  // read-time filtering removes — a stored copy disagreeing with the layout
+  // beside it. The columns are carried over untouched rather than cleared:
+  // frozen at their last value, they are the rollback snapshot until the
+  // migration that drops them.
+  const friendLayout = existing?.friend_layout ?? null;
+  const publicLayout = existing?.public_layout ?? null;
+
+  // Consent timestamps, matching the DataStore values the app keeps. Stored as
+  // given — the grant time is the client's to state — and only `> 0` is read.
+  const consentAt = (key: string, column: keyof ProfileRow) =>
+    has(key) && typeof body[key] === "number"
+      ? (body[key] as number)
+      : ((existing?.[column] as number | null) ?? null);
 
   const text = (key: string, column: keyof ProfileRow, max: number) =>
     has(key) ? str(body[key], max) : ((existing?.[column] as string | null) ?? null);
@@ -329,6 +337,8 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
     visibility: has("visibility")
       ? parseVisibility(typeof body.visibility === "string" ? body.visibility : undefined)
       : parseVisibility(existing?.visibility),
+    friend_sensitive_consent_at: consentAt("friendSensitiveConsentAt", "friend_sensitive_consent_at"),
+    public_sensitive_consent_at: consentAt("publicSensitiveConsentAt", "public_sensitive_consent_at"),
   };
 }
 
@@ -397,8 +407,9 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   await env.DB.prepare(
     `INSERT INTO profiles (user_id, display_name, avatar_id, border_id, picture_url, header_color,
        header_backdrop_url, layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows,
-       favourite_people, featured_achievements, personality_id, visibility, version, updated_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       favourite_people, featured_achievements, personality_id, visibility, version, updated_at,
+       friend_sensitive_consent_at, public_sensitive_consent_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(user_id) DO UPDATE SET
        display_name = excluded.display_name, avatar_id = excluded.avatar_id,
        border_id = excluded.border_id, picture_url = excluded.picture_url,
@@ -409,7 +420,9 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
        favourite_people = excluded.favourite_people,
        featured_achievements = excluded.featured_achievements,
        personality_id = excluded.personality_id, visibility = excluded.visibility,
-       version = excluded.version, updated_at = excluded.updated_at`,
+       version = excluded.version, updated_at = excluded.updated_at,
+       friend_sensitive_consent_at = excluded.friend_sensitive_consent_at,
+       public_sensitive_consent_at = excluded.public_sensitive_consent_at`,
   )
     .bind(
       session.userId,
@@ -431,6 +444,8 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
       next.visibility,
       version,
       now,
+      next.friend_sensitive_consent_at,
+      next.public_sensitive_consent_at,
     )
     .run();
 
