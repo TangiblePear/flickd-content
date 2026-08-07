@@ -578,6 +578,37 @@ describe("foreign profile", () => {
   const foreignBody = async (env: any, token: string) =>
     (await (await handleGetProfile(OWNER, authed(token, `/api/profile/${OWNER}`), env)).json()) as any;
 
+  /**
+   * The owner needs both derived layouts back, because editing `layout` has to
+   * republish them — an omitted key is carried over, so a client that sends
+   * only `layout` freezes what everyone else sees.
+   */
+  it("returns the derived layouts to the OWNER", async () => {
+    const env = await env0();
+    await seedBothLayouts(env);
+    const mine = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(mine.profile.layout).toEqual([{ type: "bio" }, { type: "recent_activity" }, { type: "owner_secret" }]);
+    expect(mine.profile.friendLayout).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(mine.profile.publicLayout).toEqual([{ type: "bio" }]);
+  });
+
+  /**
+   * …and NOBODY else does. `toOwnerWire` is deliberately separate from `toWire`
+   * for this reason: a field added to the shared one reaches strangers, and
+   * `friendLayout` would hand a stranger the friend-scoped arrangement the
+   * public/friend split exists to keep apart.
+   */
+  it("never sends the derived layouts to a foreign reader", async () => {
+    const env = await env0();
+    await seedBothLayouts(env);
+    for (const token of ["tok-other", null]) {
+      const req = token ? authed(token, `/api/profile/${OWNER}`) : new Request(`https://x/api/profile/${OWNER}`);
+      const body = (await (await handleGetProfile(OWNER, req, env)).json()) as any;
+      expect(body.profile).not.toHaveProperty("friendLayout");
+      expect(body.profile).not.toHaveProperty("publicLayout");
+    }
+  });
+
   it("serves public_layout and public_stats to a stranger", async () => {
     const env = await env0();
     await seedBothLayouts(env);

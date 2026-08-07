@@ -142,6 +142,28 @@ export function toWire(row: ProfileRow) {
   };
 }
 
+/**
+ * Row → wire **for the owner**, carrying the two derived layouts as well.
+ *
+ * The owner is the one person entitled to see how their profile has been
+ * filtered for everyone else, and they need it to REPUBLISH: a client that
+ * edits `layout` must send matching `friendLayout` and `publicLayout` or the
+ * two go stale, because an omitted key means "leave unchanged". The web editor
+ * did exactly that — reordering on the web moved the owner's own blocks and
+ * left every visitor looking at whatever the phone last published.
+ *
+ * Deliberately NOT folded into [toWire]. That function feeds [toForeignWire]
+ * too, so a field added there reaches strangers; this one is only ever returned
+ * from the owner's own routes.
+ */
+export function toOwnerWire(row: ProfileRow) {
+  return {
+    ...toWire(row),
+    friendLayout: row.friend_layout == null ? null : jsonColumn<unknown[]>(row.friend_layout, []),
+    publicLayout: row.public_layout == null ? null : jsonColumn<unknown[]>(row.public_layout, []),
+  };
+}
+
 /** Which filtered view of a profile a foreign reader receives. */
 export type ForeignAudience = "friend" | "public";
 
@@ -292,7 +314,7 @@ export async function handleGetMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   if (!session) return unauthorized();
   const row = await readProfileRow(env, session.userId);
   if (!row) return json({ profile: null, stats: null });
-  return json({ profile: toWire(row), stats: await readStats(env, session.userId) }, 200, {
+  return json({ profile: toOwnerWire(row), stats: await readStats(env, session.userId) }, 200, {
     ETag: `"${row.version}"`,
   });
 }
@@ -515,7 +537,7 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
   const achievementsRow = await readAchievementsRow(env, session.userId);
   return json({
     userId: session.userId,
-    profile: row ? toWire(row) : null,
+    profile: row ? toOwnerWire(row) : null,
     stats: row ? await readStats(env, session.userId) : null,
     settings: settingsRow ? toSettingsWire(settingsRow) : null,
     achievements: achievementsRow ? toAchievementsWire(achievementsRow) : null,
