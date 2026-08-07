@@ -148,6 +148,14 @@ import { handlePutMyPush, readAccountPush } from "./push";
 import { handleGetMySettings, handlePutMySettings } from "./settings";
 import { handleGetMyAchievements, handlePutMyAchievements } from "./achievements";
 import {
+  handleCreateList,
+  handleDeleteList,
+  handleGetMyLists,
+  handleListItems,
+  handleListsOptions,
+  handleUpdateList,
+} from "./userLists";
+import {
   handleAdhocCreate,
   handleAdhocGet,
   handleAdhocMeta,
@@ -389,6 +397,23 @@ export default {
     if (p === "/api/me/achievements") {
       if (req.method === "GET") return handleGetMyAchievements(req, env, ctx);
       if (req.method === "PUT") return handlePutMyAchievements(req, env, ctx);
+    }
+    // Personal lists and the watchlist (migration 0026). Owner-only. NOTE the
+    // path: `/api/lists/*` is friend-to-friend SHARING and is a different
+    // module entirely — see userLists.ts's header.
+    if (p === "/api/me/lists") {
+      if (req.method === "GET") return handleGetMyLists(req, env, ctx);
+      if (req.method === "POST") return handleCreateList(req, env, ctx);
+      if (req.method === "OPTIONS") return handleListsOptions();
+    }
+    const listItems = p.match(/^\/api\/me\/lists\/([A-Za-z0-9._:-]{1,64})\/items$/);
+    if (listItems && (req.method === "POST" || req.method === "DELETE")) {
+      return handleListItems(listItems[1], req, env, ctx);
+    }
+    const oneList = p.match(/^\/api\/me\/lists\/([A-Za-z0-9._:-]{1,64})$/);
+    if (oneList) {
+      if (req.method === "PUT") return handleUpdateList(oneList[1], req, env, ctx);
+      if (req.method === "DELETE") return handleDeleteList(oneList[1], req, env, ctx);
     }
     // Push topics on the account. Replaces `PUT /api/user/{friendId}/push`, which
     // authenticated on a relay-issued owner secret — so the friendId WAS the auth
