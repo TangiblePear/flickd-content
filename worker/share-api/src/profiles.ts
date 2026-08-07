@@ -11,6 +11,7 @@
 // open instead of three.
 
 import { canView, canViewAnonymous, parseVisibility, Visibility } from "./authz";
+import { visibleLayout, visibleStats, type Consents } from "./visibility";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { loadFeed } from "./feed";
@@ -102,12 +103,16 @@ interface ProfileRow {
   visibility: string;
   version: number;
   updated_at: number;
+  /** >0 means granted. Back-filled by migration 0027; the app sends the real time. */
+  friend_sensitive_consent_at: number | null;
+  public_sensitive_consent_at: number | null;
 }
 
 const PROFILE_COLUMNS =
   "user_id, display_name, avatar_id, border_id, picture_url, header_color, header_backdrop_url, " +
   "layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows, favourite_people, " +
-  "featured_achievements, personality_id, visibility, version, updated_at";
+  "featured_achievements, personality_id, visibility, version, updated_at, " +
+  "friend_sensitive_consent_at, public_sensitive_consent_at";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -186,10 +191,29 @@ export type ForeignAudience = "friend" | "public";
  * outcome this split exists to prevent.
  */
 export function toForeignWire(row: ProfileRow, audience: ForeignAudience) {
-  const raw = audience === "friend" ? row.friend_layout : row.public_layout;
   return {
     ...toWire(row),
-    layout: raw == null ? null : jsonColumn<unknown[]>(raw, []),
+    // Filtered from the CANONICAL layout, not read from a stored copy. The
+    // copies drifted the moment a second client learned to edit: the web wrote
+    // `layout` alone and every visitor stayed on the phone's last publish.
+    //
+    // `null` still means "nothing has ever been published", so a reader keeps
+    // whatever it had rather than blanking the profile. It no longer means
+    // "this client predates the derived columns" — there are none to predate,
+    // and there is nothing left to accidentally fall back to. An EMPTY array is
+    // now a real answer: the owner has published a layout and none of it is
+    // yours to see.
+    layout: row.layout == null
+      ? null
+      : visibleLayout(jsonColumn<unknown[]>(row.layout, []), audience, consentsOf(row)),
+  };
+}
+
+/** The row's two consent flags, as booleans. */
+export function consentsOf(row: ProfileRow): Consents {
+  return {
+    friendSensitive: (row.friend_sensitive_consent_at ?? 0) > 0,
+    publicSensitive: (row.public_sensitive_consent_at ?? 0) > 0,
   };
 }
 
@@ -214,12 +238,14 @@ async function readStats(env: ProfileEnv, userId: string): Promise<unknown | nul
  * `currentlyWatching` and `recentWatches` in the JSON even though its layout hides them —
  * putting the privacy boundary in the viewer's renderer rather than on the server.
  */
-async function readStatsFor(env: ProfileEnv, userId: string, audience: ForeignAudience): Promise<unknown | null> {
-  if (audience === "friend") return readStats(env, userId);
-  const row = await env.DB.prepare("SELECT public_stats FROM profile_stats WHERE user_id = ?")
-    .bind(userId)
-    .first<{ public_stats: string | null }>();
-  return row ? jsonColumn<unknown | null>(row.public_stats, null) : null;
+async function readStatsFor(
+  env: ProfileEnv,
+  userId: string,
+  audience: ForeignAudience,
+  consents: Consents,
+): Promise<unknown | null> {
+  const stats = (await readStats(env, userId)) as Record<string, unknown> | null;
+  return visibleStats(stats, audience, consents);
 }
 
 // ── Incoming payload validation ──────────────────────────────────────────────
@@ -507,7 +533,11 @@ export async function handleGetProfile(
   // would otherwise show them the stranger view of themselves.
   const audience: ForeignAudience = grant === "public" ? "public" : "friend";
   // toForeignWire, NOT toWire: the latter carries the owner's unfiltered layout.
-  return json({ profile: toForeignWire(row, audience), stats: await readStatsFor(env, userId, audience) });
+  const consents = consentsOf(row);
+  return json({
+    profile: toForeignWire(row, audience),
+    stats: await readStatsFor(env, userId, audience, consents),
+  });
 }
 
 /**

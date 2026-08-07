@@ -187,6 +187,9 @@ const authed = (
     headers: { Authorization: `Bearer ${token}`, ...(init.headers as Record<string, string>) },
   });
 
+/** An unauthenticated request for a profile — what `/u/{id}` sends. */
+const anonReq = (id: string = OWNER) => new Request(`https://flickto.app/api/profile/${id}`);
+
 /**
  * A fresh env with both test sessions valid. `resolveSession` hashes the bearer
  * token with a real sha256, so the fake's session map has to be keyed on that same
@@ -609,24 +612,78 @@ describe("foreign profile", () => {
     }
   });
 
-  it("serves public_layout and public_stats to a stranger", async () => {
+  it("filters the CANONICAL layout instead of reading a stored copy", async () => {
     const env = await env0();
-    await seedBothLayouts(env);
-    const body = await foreignBody(env, "tok-other");
-    expect(body.profile.layout).toEqual([{ type: "bio" }]);
-    expect(body.stats.recentWatches).toEqual([]);
-    expect(body.stats.uniqueShows).toBe(0);
+    // Only `layout` is written — no friendLayout, no publicLayout.
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "bio" }, { type: "stat_mosaic" }, { type: "trophy_case" }],
+      }),
+      env,
+    );
+    env.DB.profiles[0].public_sensitive_consent_at = 1;
+
+    const body = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    // trophy_case is owner-only and must never appear; order is preserved.
+    expect(body.profile.layout).toEqual([{ type: "bio" }, { type: "stat_mosaic" }]);
   });
 
-  it("serves friend_layout and the full stats to a friend of a PUBLIC profile", async () => {
+  it("withholds the behavioural half from a stranger with no public consent", async () => {
     const env = await env0();
-    const [fa, fb] = friendshipKey(OWNER, OTHER);
-    env.DB.friendships.push({ user_a: fa, user_b: fb, state: "accepted" });
+    await handlePutMyProfile(
+      put("tok-owner", {
+        displayName: "Pear",
+        visibility: "public",
+        layout: [{ type: "bio" }, { type: "stat_mosaic" }],
+      }),
+      env,
+    );
+    const body = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    expect(body.profile.layout).toEqual([{ type: "bio" }]);
+  });
+
+  it("serves ONE stats blob, stripped per audience", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public" }), env);
+    await handlePutMyStats(
+      authed("tok-owner", "/api/me/stats", {
+        method: "PUT",
+        body: JSON.stringify({ stats: { uniqueShows: 9, recentWatches: [{ tmdbId: 1 }] } }),
+      }),
+      env,
+    );
+
+    const withheld = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    expect(withheld.stats).toEqual({ uniqueShows: 9 });
+
+    env.DB.profiles[0].public_sensitive_consent_at = 1;
+    const shared = (await (await handleGetProfile(OWNER, anonReq(), env)).json()) as any;
+    expect(shared.stats.recentWatches).toEqual([{ tmdbId: 1 }]);
+  });
+
+  it("serves the curated half and stripped stats to a stranger", async () => {
+    const env = await env0();
     await seedBothLayouts(env);
+    // No public consent, so the behavioural blocks and per-title stats are
+    // withheld — derived from the canonical layout, not a stored copy.
     const body = await foreignBody(env, "tok-other");
-    expect(body.profile.layout).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(body.profile.layout).toEqual([{ type: "bio" }]);
+    expect(body.stats.recentWatches).toBeUndefined();
     expect(body.stats.uniqueShows).toBe(42);
-    expect(body.stats.recentWatches).toHaveLength(1);
+  });
+
+  it("serves the friend view, with sensitive blocks, to a friend of a PUBLIC profile", async () => {
+    const env = await env0();
+    await seedBothLayouts(env);
+    env.DB.profiles[0].friend_sensitive_consent_at = 1;
+    env.DB.friendships.push({ user_a: OWNER < OTHER ? OWNER : OTHER, user_b: OWNER < OTHER ? OTHER : OWNER, state: "accepted" });
+    const body = await foreignBody(env, "tok-other");
+    // The friendship is checked BEFORE `public`, so a friend keeps the richer
+    // view even on a public profile.
+    expect(body.profile.layout).toEqual([{ type: "bio" }, { type: "recent_activity" }]);
+    expect(body.stats.recentWatches).toEqual([{ tmdbId: 1, mediaType: "SHOW" }]);
   });
 
   it("never leaks the owner's unfiltered layout to a stranger", async () => {
@@ -640,21 +697,6 @@ describe("foreign profile", () => {
    * back to friend_layout would serve strangers a layout filtered under a consent given
    * for FRIENDS — the exact thing the third column exists to prevent.
    */
-  it("does NOT fall back to friend_layout when public_layout is null", async () => {
-    const env = await env0();
-    await handlePutMyProfile(
-      put("tok-owner", {
-        displayName: "Pear",
-        visibility: "public",
-        layout: [{ type: "bio" }],
-        friendLayout: [{ type: "bio" }],
-      }),
-      env,
-    );
-    const body = await foreignBody(env, "tok-other");
-    expect(env.DB.profiles[0].public_layout).toBeNull();
-    expect(body.profile.layout).toBeNull();
-  });
 
   // The non-enumeration property: these two responses must be indistinguishable.
   it("returns an IDENTICAL response for private and nonexistent", async () => {
@@ -738,11 +780,22 @@ describe("foreign profile", () => {
    * flip every friend of an un-updated client to the default layout, which looks like a
    * rendering bug and is really a wire-compat one.
    */
-  it("sends null, not an empty list, when the owner has never published one", async () => {
+  it("sends null when nothing has ever been published, and [] when nothing is shareable", async () => {
     const env = await env0();
-    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public", layout: [{ type: "stat_mosaic" }] }), env);
-    const foreign = (await (await handleGetProfile(OWNER, authed("tok-other", `/api/profile/${OWNER}`), env)).json()) as any;
-    expect(foreign.profile.layout).toBeNull();
+    // Never published a layout at all: the reader keeps whatever it had.
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public" }), env);
+    expect(env.DB.profiles[0].layout).toBeNull();
+    let body = await foreignBody(env, "tok-other");
+    expect(body.profile.layout).toBeNull();
+
+    // Published, but none of it is a stranger's to see. That is a real answer,
+    // not "unchanged" — the old derived columns could not tell these apart.
+    await handlePutMyProfile(
+      put("tok-owner", { layout: [{ type: "stat_mosaic" }] }, "1"),
+      env,
+    );
+    body = await foreignBody(env, "tok-other");
+    expect(body.profile.layout).toEqual([]);
   });
 
   // ── Signed out: what flickto.app/u/{userId} serves ─────────────────────────
@@ -763,8 +816,7 @@ describe("foreign profile", () => {
       await seedBothLayouts(env);
       const body = (await (await handleGetProfile(OWNER, anon(), env)).json()) as any;
       expect(body.profile.layout).toEqual([{ type: "bio" }]);
-      expect(body.stats.uniqueShows).toBe(0);
-      expect(body.stats.recentWatches).toEqual([]);
+      expect(body.stats.recentWatches).toBeUndefined();
     });
 
     /**
