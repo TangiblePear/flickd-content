@@ -10,7 +10,7 @@
 // (§12 of the plan), which is why `/api/me/bootstrap` exists — one request on app
 // open instead of three.
 
-import { canView, parseVisibility, Visibility } from "./authz";
+import { canView, canViewAnonymous, parseVisibility, Visibility } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { loadFeed } from "./feed";
@@ -455,6 +455,13 @@ export async function handlePutMyStats(req: Request, env: ProfileEnv, ctx?: Exec
  *
  * Denied and nonexistent both return **404 `not_found`**, byte-identical, so this
  * cannot be used to enumerate accounts or detect a block.
+ *
+ * **Readable without a session** when the profile is public: this is what
+ * `flickto.app/u/{userId}` serves to someone who does not have an account, which is the
+ * whole point of a shareable link. A signed-out reader is judged by
+ * [canViewAnonymous] and can only ever reach the `public` audience — a friends-only or
+ * private profile answers 404, identically to one that does not exist, so signing out
+ * reveals strictly less than signing in, never more.
  */
 export async function handleGetProfile(
   userId: string,
@@ -463,12 +470,14 @@ export async function handleGetProfile(
   ctx?: ExecutionContext,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
-  if (!session) return unauthorized();
   if (!USER_ID_RE.test(userId)) return notFound();
 
   const row = await readProfileRow(env, userId);
   if (!row) return notFound();
-  const grant = await canView(env, session.userId, userId, parseVisibility(row.visibility));
+  const visibility = parseVisibility(row.visibility);
+  const grant = session
+    ? await canView(env, session.userId, userId, visibility)
+    : canViewAnonymous(visibility);
   if (grant === null) return notFound();
 
   // "owner" only reaches here if the owner uses the foreign route (they normally read

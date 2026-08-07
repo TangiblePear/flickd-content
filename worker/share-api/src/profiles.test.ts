@@ -654,10 +654,18 @@ describe("foreign profile", () => {
     expect((await handleGetProfile("not-an-id", authed("tok-other", "/api/profile/x"), env)).status).toBe(404);
   });
 
-  it("401s without a session", async () => {
+  /**
+   * Was `401s without a session`, until `flickto.app/u/{userId}` had to serve people
+   * who do not have an account. A session is no longer required — but the profile
+   * seeded here is the default `friends`, so a signed-out reader still gets nothing,
+   * and gets it as the ordinary not-found rather than as a 401 that would confirm the
+   * account exists. The signed-out contract is covered in "without a session" below.
+   */
+  it("404s, not 401s, for a signed-out reader who may not see the profile", async () => {
     const env = await env0();
+    await seedOwner(env, "friends");
     const res = await handleGetProfile(OWNER, new Request(`https://flickto.app/api/profile/${OWNER}`), env);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(404);
   });
 
   /**
@@ -704,6 +712,63 @@ describe("foreign profile", () => {
     await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility: "public", layout: [{ type: "stat_mosaic" }] }), env);
     const foreign = (await (await handleGetProfile(OWNER, authed("tok-other", `/api/profile/${OWNER}`), env)).json()) as any;
     expect(foreign.profile.layout).toBeNull();
+  });
+
+  // ── Signed out: what flickto.app/u/{userId} serves ─────────────────────────
+  // A reader with no session must reach the `public` audience and nothing else.
+  describe("without a session", () => {
+    const anon = (userId = OWNER) => new Request(`https://flickto.app/api/profile/${userId}`);
+
+    it("serves a public profile to a reader with no session", async () => {
+      const env = await env0();
+      await seedOwner(env, "public");
+      const res = await handleGetProfile(OWNER, anon(), env);
+      expect(res.status).toBe(200);
+      expect((await res.json()).profile.displayName).toBe("Pear");
+    });
+
+    it("serves the STRANGER view, never the friend view", async () => {
+      const env = await env0();
+      await seedBothLayouts(env);
+      const body = (await (await handleGetProfile(OWNER, anon(), env)).json()) as any;
+      expect(body.profile.layout).toEqual([{ type: "bio" }]);
+      expect(body.stats.uniqueShows).toBe(0);
+      expect(body.stats.recentWatches).toEqual([]);
+    });
+
+    /**
+     * The no-oracle rule from authz.ts, now that the endpoint answers strangers.
+     *
+     * Signing out must reveal strictly LESS than signing in. If a friends-only
+     * profile answered anything other than the not-found response — a 401, a
+     * different body, even a different header — the endpoint would confirm that
+     * an account exists, and `/u/{id}` would become an account enumerator that
+     * needs no credentials at all.
+     */
+    it("cannot be used to tell a hidden profile from one that does not exist", async () => {
+      const friendsEnv = await env0();
+      await seedOwner(friendsEnv, "friends");
+      const privateEnv = await env0();
+      await seedOwner(privateEnv, "private");
+      const emptyEnv = await env0();
+
+      const [friends, priv, missing] = await Promise.all([
+        handleGetProfile(OWNER, anon(), friendsEnv),
+        handleGetProfile(OWNER, anon(), privateEnv),
+        handleGetProfile(OWNER, anon(), emptyEnv),
+      ]);
+
+      for (const res of [friends, priv, missing]) expect(res.status).toBe(404);
+      const bodies = await Promise.all([friends.text(), priv.text(), missing.text()]);
+      expect(bodies[0]).toBe(bodies[2]);
+      expect(bodies[1]).toBe(bodies[2]);
+    });
+
+    it("404s a malformed id without touching the database", async () => {
+      const env = await env0();
+      const res = await handleGetProfile("not-a-user-id", anon("not-a-user-id"), env);
+      expect(res.status).toBe(404);
+    });
   });
 });
 

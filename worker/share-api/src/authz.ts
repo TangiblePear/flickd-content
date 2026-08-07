@@ -77,6 +77,33 @@ export type ViewGrant = "owner" | "friend" | "public" | null;
  * friendship — plus the profile row itself. A self read skips both; a private
  * profile skips the friendship lookup.
  */
+/**
+ * May a viewer with NO session read a profile at [visibility]?
+ *
+ * The signed-out case for `flickto.app/u/{userId}`. It lives here, beside [canView],
+ * because the rule at the top of this file is that one place decides who may read a
+ * profile — an anonymous branch that made its own decision inline would be the second
+ * place, and the one nobody re-reads when the rules change.
+ *
+ * ```
+ * visibility = public  → "public"
+ * otherwise            → null
+ * ```
+ *
+ * **There is no block check, because there is no viewer to check.** A public profile is
+ * readable by anyone holding the link, so someone who has been blocked can sign out and
+ * read it. That is a consequence of publishing profiles to the open web, not an
+ * oversight: with no session there is no identity to match against `blocks`. Blocking
+ * still holds everywhere a session exists. The privacy policy says so in as many words —
+ * if that ever stops being true, fix the policy, not this comment.
+ *
+ * Synchronous, and deliberately so: it touches no tables, which is also why an anonymous
+ * read costs one query (the profile row) rather than three.
+ */
+export function canViewAnonymous(visibility: Visibility): ViewGrant {
+  return visibility === "public" ? "public" : null;
+}
+
 export async function canView(
   env: AuthzEnv,
   viewerId: string,
