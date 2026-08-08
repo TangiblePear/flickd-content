@@ -126,7 +126,7 @@ import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
 import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
-import { handleVerifyPremiere } from "./premiere";
+import { handleVerifyPremiere, isPremiere } from "./premiere";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import { handleWebTelemetry } from "./telemetry";
 import {
@@ -859,6 +859,16 @@ function strongEtag(value: string | null): string | null {
 //   _moderation/{friendId}.json           — takedown tombstone (auto or admin)
 //   _reports/{targetId}/{ts}-{reporter}.json — one report record
 const MAX_PICTURE_BYTES = 512 * 1024;
+
+/**
+ * The cap for an animated avatar, which is a Premiere feature.
+ *
+ * Four times the still cap because animation is many frames of the same picture and
+ * 512 KB buys about a second of anything watchable. It is an ALLOWANCE, not a
+ * replacement: a still image is held to [MAX_PICTURE_BYTES] exactly as before, so
+ * nothing about the existing path changes.
+ */
+const MAX_ANIMATED_PICTURE_BYTES = 2 * 1024 * 1024;
 const picKey = (friendId: string) => `${friendId}/pics/picture.jpg`;
 const picMetaKey = (friendId: string) => `${friendId}/pics/meta.json`;
 const tombstoneKey = (friendId: string) => `_moderation/${friendId}.json`;
@@ -881,7 +891,7 @@ interface PictureMeta {
 }
 
 /** Sniff the leading bytes for a supported raster type. Returns a MIME or null. */
-function sniffImageType(bytes: Uint8Array): string | null {
+export function sniffImageType(bytes: Uint8Array): string | null {
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
   if (
     bytes.length >= 8 &&
@@ -893,7 +903,39 @@ function sniffImageType(bytes: Uint8Array): string | null {
     bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 && // "RIFF"
     bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50 // "WEBP"
   ) return "image/webp";
+  // "GIF87a" / "GIF89a". Added for Premiere animated avatars; still magic-byte sniffed
+  // like every other type, because Content-Type is never trusted here.
+  if (
+    bytes.length >= 6 &&
+    bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && // "GIF"
+    bytes[3] === 0x38 && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61
+  ) return "image/gif";
   return null;
+}
+
+/**
+ * Whether these bytes can animate.
+ *
+ * **All GIFs count**, including single-frame ones. Telling them apart means walking the
+ * block structure, and the only cheap approximations over-count — which would gate a
+ * still image behind a subscription, the wrong way to be wrong. GIF is a format people
+ * choose *for* animation; a user with a still image has PNG and JPEG.
+ *
+ * WebP is exact: the VP8X extended header carries an animation flag, and a WebP without
+ * VP8X cannot animate at all.
+ *
+ * ⚠️ Animated WebP passed the sniff long before GIF did, so this gate CLOSES a hole
+ * rather than opening one — until now a free account could upload one and get an
+ * animated avatar. Existing uploads are untouched; only new ones are checked.
+ */
+export function isAnimatedImage(contentType: string, bytes: Uint8Array): boolean {
+  if (contentType === "image/gif") return true;
+  if (contentType !== "image/webp") return false;
+  return (
+    bytes.length >= 21 &&
+    bytes[12] === 0x56 && bytes[13] === 0x50 && bytes[14] === 0x38 && bytes[15] === 0x58 && // "VP8X"
+    (bytes[20] & 0x02) !== 0 // animation bit
+  );
 }
 
 // PUT the owner's profile picture. Owner-auth (same secret + read token that
@@ -959,11 +1001,33 @@ async function handlePutMyPicture(req: Request, env: Env, ctx: ExecutionContext)
 
   const buf = new Uint8Array(await req.arrayBuffer());
   if (buf.byteLength === 0) return invalidJson();
-  if (buf.byteLength > MAX_PICTURE_BYTES) return tooLarge();
 
   const contentType = sniffImageType(buf);
   if (!contentType) return json({ error: "unsupported_type" }, { status: 400 });
 
+  // ── Animated avatars are a Premiere feature, enforced HERE and not on the client ──
+  //
+  // The client gates its own picker too, but that is a courtesy to the user, not a
+  // control: anyone can post bytes to this route with a session. This is the check that
+  // decides, and it reads `users.premiere_until`, which no request body can reach.
+  const animated = isAnimatedImage(contentType, buf);
+  if (animated) {
+    const row = await env.DB.prepare("SELECT premiere_until FROM users WHERE id = ?")
+      .bind(session.userId)
+      .first<{ premiere_until: number | null }>();
+    if (!isPremiere(row)) return json({ error: "premiere_required" }, { status: 402 });
+  }
+  if (buf.byteLength > (animated ? MAX_ANIMATED_PICTURE_BYTES : MAX_PICTURE_BYTES)) return tooLarge();
+
+  // ⚠️ SafeSearch sees the FIRST FRAME ONLY. Google's API documents that for animated
+  // GIF, and a Worker has no image decoder to hand it anything else — reconstructing a
+  // later frame means an LZW decode against a 10 ms CPU budget.
+  //
+  // Accepted rather than solved, because the exposure is narrow and the compensations
+  // are real: animated upload requires a subscription, so the uploader has a payment
+  // identity and something to lose; the first frame is still scanned, which catches the
+  // careless case; and the report → auto-hide path (`maybeAutoHidePicture`) is what
+  // actually covers deliberate abuse, as it already does for stills.
   const result = await moderateImage(buf, env);
   if (!result.allowed) {
     return json({ error: "rejected", categories: result.categories }, { status: 422 });
