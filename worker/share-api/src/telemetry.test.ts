@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
-import { maybeRollup, recordTelemetry, utcDay } from "./telemetry";
+import { maybeRollup, parseBrowser, recordTelemetry, utcDay } from "./telemetry";
 
 // Required, not imported: this Vite version's builtin list predates `node:sqlite`, so
 // a static `import` is rewritten to a bare `sqlite` specifier and the suite dies at
@@ -123,6 +123,64 @@ describe("utcDay", () => {
   it("buckets by UTC, not by local time", () => {
     expect(utcDay(Date.parse("2026-08-01T23:59:59.999Z"))).toBe("2026-08-01");
     expect(utcDay(Date.parse("2026-08-02T00:00:00.000Z"))).toBe("2026-08-02");
+  });
+});
+
+// Real User-Agents, captured rather than invented: the whole point of the table this
+// exercises is that these strings overlap, and a plausible-looking fake would not.
+const UA = {
+  chrome: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+  edge: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.3595.60",
+  opera:
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/125.0.0.0",
+  samsung:
+    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/27.0 Chrome/125.0.0.0 Mobile Safari/537.36",
+  firefox: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0",
+  safariMac:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Safari/605.1.15",
+  safariIos:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.6 Mobile/15E148 Safari/604.1",
+  chromeIos:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/142.0.7444.60 Mobile/15E148 Safari/604.1",
+  firefoxIos:
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/143.0 Mobile/15E148 Safari/605.1.15",
+};
+
+describe("parseBrowser", () => {
+  /**
+   * The one test that matters here. Every string above except Firefox-on-desktop
+   * contains `Safari/`, and Edge, Opera and Samsung all contain `Chrome/` — so a table
+   * in the wrong order does not fail loudly, it silently records the whole fleet as
+   * Chrome and Safari. Each of these would pass against a more general entry too;
+   * what is being pinned is that the SPECIFIC one wins.
+   */
+  it("picks the specific browser over the general token it also carries", () => {
+    expect(parseBrowser(UA.edge)).toEqual({ name: "Edge", version: "142" });
+    expect(parseBrowser(UA.opera)).toEqual({ name: "Opera", version: "125" });
+    expect(parseBrowser(UA.samsung)).toEqual({ name: "Samsung Internet", version: "27" });
+    expect(parseBrowser(UA.chrome)).toEqual({ name: "Chrome", version: "142" });
+    expect(parseBrowser(UA.safariMac)).toEqual({ name: "Safari", version: "18" });
+  });
+
+  // On iOS every browser is WebKit and says so. Chrome and Firefox there are still
+  // Chrome and Firefox to a person reading the panel, so they must not read "Safari".
+  it("names the iOS browsers by their wrapper, not by WebKit", () => {
+    expect(parseBrowser(UA.chromeIos)).toEqual({ name: "Chrome", version: "142" });
+    expect(parseBrowser(UA.firefoxIos)).toEqual({ name: "Firefox", version: "143" });
+    expect(parseBrowser(UA.safariIos)).toEqual({ name: "Safari", version: "18" });
+  });
+
+  it("keeps the major version only", () => {
+    // "142.0.3595.60" would give the models histogram a row per patch release.
+    expect(parseBrowser(UA.edge)?.version).toBe("142");
+    expect(parseBrowser(UA.firefox)).toEqual({ name: "Firefox", version: "143" });
+  });
+
+  it("returns null rather than guessing", () => {
+    expect(parseBrowser(null)).toBeNull();
+    expect(parseBrowser("")).toBeNull();
+    expect(parseBrowser("curl/8.4.0")).toBeNull();
+    expect(parseBrowser("FlickTo/1.4.0 okhttp/4.12.0")).toBeNull();
   });
 });
 
@@ -329,6 +387,74 @@ describe("recordTelemetry", () => {
   it("treats a missing version header as 0 rather than failing", async () => {
     await recordTelemetry(env, ME, req(null), undefined, DAY1);
     expect(one().version_code).toBe(0);
+  });
+});
+
+/**
+ * The block `handleWebTelemetry` builds, written through the same statement Android
+ * uses. The handler itself is not exercised here — it needs a `sessions` row and this
+ * suite deliberately runs only the telemetry migration — so what is pinned is the part
+ * that would be wrong silently: which COLUMNS a browser lands in.
+ */
+describe("a browser's row", () => {
+  const webBlock = (ua: string) => {
+    const b = parseBrowser(ua);
+    return { deviceId: "web-uuid-1", language: "en-GB", platform: "web", manufacturer: b?.name, model: b?.version };
+  };
+
+  it("lands where the roster already looks for a device name", async () => {
+    await recordTelemetry(env, ME, req(null, "GB"), webBlock(UA.chrome), DAY1);
+
+    const r = one();
+    // insights.ts draws `${manufacturer} ${model}` — so this row reads "Chrome 142"
+    // in the Device column with no change to the code that renders handsets.
+    expect(r.manufacturer).toBe("Chrome");
+    expect(r.model).toBe("142");
+    expect(r.platform).toBe("web");
+    expect(r.language).toBe("en-GB");
+    expect(r.country).toBe("GB");
+    // No X-App-Version from a browser, and none of the Android-only half.
+    expect(r.version_code).toBe(0);
+    expect(r.version_name).toBeNull();
+    expect(r.os_api).toBeNull();
+    expect(r.installer).toBeNull();
+  });
+
+  it("is one row per browser, not per account", async () => {
+    await recordTelemetry(env, ME, req(null), webBlock(UA.chrome), DAY1);
+    await recordTelemetry(env, ME, req(null), { ...webBlock(UA.firefox), deviceId: "web-uuid-2" }, DAY1);
+
+    expect(rows().length).toBe(2);
+    expect(rows().map((r) => `${r.manufacturer} ${r.model}`).sort()).toEqual(["Chrome 142", "Firefox 143"]);
+  });
+
+  /**
+   * The daily guard applies to browsers exactly as it does to handsets, which is what
+   * makes "report on every tab" affordable — the site can call the endpoint freely and
+   * still cost one write a day.
+   */
+  it("writes once a day however often the browser reports", async () => {
+    await recordTelemetry(env, ME, req(null), webBlock(UA.chrome), DAY1);
+    await recordTelemetry(env, ME, req(null), webBlock(UA.chrome), DAY1_LATER);
+    expect(one().last_seen_at).toBe(DAY1);
+
+    await recordTelemetry(env, ME, req(null), webBlock(UA.chrome), DAY2);
+    expect(one().last_seen_at).toBe(DAY2);
+  });
+
+  /**
+   * A browser we cannot name must still produce a row. It is one `Unknown` line in the
+   * panel; dropping the write instead would take the account back to "no device", which
+   * is the exact hole this endpoint was built to close.
+   */
+  it("still records a device we cannot name", async () => {
+    await recordTelemetry(env, ME, req(null), webBlock("curl/8.4.0"), DAY1);
+
+    const r = one();
+    expect(r.device_id).toBe("web-uuid-1");
+    expect(r.platform).toBe("web");
+    expect(r.manufacturer).toBeNull();
+    expect(r.model).toBeNull();
   });
 });
 

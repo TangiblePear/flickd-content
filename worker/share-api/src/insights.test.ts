@@ -154,6 +154,60 @@ describe("handleInsights", () => {
   });
 
   /**
+   * A browser as `handleWebTelemetry` writes it: no `X-App-Version` (so `version_code`
+   * is 0, NOT null), no build, no API level, and the browser's name and major version
+   * in the handset columns.
+   */
+  const browser = (o: Partial<Record<string, unknown>> = {}) =>
+    device({
+      device_id: "web-1",
+      platform: "web",
+      version_code: 0,
+      version_name: null,
+      build_type: null,
+      os_api: null,
+      manufacturer: "Chrome",
+      model: "142",
+      installer: null,
+      ...o,
+    });
+
+  /**
+   * The regression this guards is silent and expensive. `version_code` is 0 for every
+   * browser, so an unfiltered `belowFloor` counts all of them as ancient clients — and
+   * that number is what the legacy-relay purge decision rests on. It would never have
+   * reached zero, and nothing on the page would have said why.
+   */
+  it("does not count browsers as clients below the social floor", async () => {
+    device({ device_id: "phone", version_code: 34 });
+    browser();
+    browser({ user_id: YOU });
+
+    const b = await body();
+    expect(b.totals.devices).toBe(3);
+    expect(b.belowFloor).toBe(0);
+    // And no phantom "version 0" bucket in the histogram beside it.
+    expect(b.versions.map((v: any) => v.key)).toEqual(["34"]);
+  });
+
+  it("keeps browsers out of the handset tallies but in the fleet ones", async () => {
+    device({ device_id: "phone" });
+    browser();
+
+    const b = await body();
+    // "Chrome" is not a manufacturer, and these two panels answer handset questions.
+    expect(b.manufacturers.map((m: any) => m.key)).toEqual(["Google"]);
+    expect(b.models.map((m: any) => m.key)).toEqual(["Google Pixel 8"]);
+    // But it is a real device used by a real person, so it counts where that matters.
+    expect(b.totals.devices).toBe(2);
+    expect(Object.fromEntries(b.platforms.map((p: any) => [p.key, p.devices]))).toEqual({ android: 1, web: 1 });
+    expect(b.roster.find((r: any) => r.deviceId === "web-1")).toMatchObject({
+      platform: "web",
+      device: "Chrome 142",
+    });
+  });
+
+  /**
    * A debug build can force premium from the developer menu, so counting it would
    * inflate conversion with our own testing.
    */

@@ -264,8 +264,15 @@ function edgeCache(): Cache | null {
 /**
  * POST /api/auth/session — exchange a Firebase ID token (Bearer) for a FlickTo
  * session token. Creates the `users` + `identities` rows on first sight of a
- * uid. Returns `{ sessionToken, userId, expiresAt }` where `expiresAt` is epoch
- * MILLISECONDS. 503 not_configured / 401 unauthorized / 403 forbidden.
+ * uid. Returns `{ sessionToken, userId, expiresAt, created }` where `expiresAt`
+ * is epoch MILLISECONDS. 503 not_configured / 401 unauthorized / 403 forbidden.
+ *
+ * `created` reports which branch this call took: true when the account was made
+ * here and now, false when the uid was already known. With Google as the only
+ * provider, registering and signing in are the SAME call — this flag is the only
+ * thing that can tell them apart, and without it the web has no way to greet a
+ * first-time account differently from a returning one. Additive: the Android
+ * client parses with `ignoreUnknownKeys` and never sees it.
  *
  * `X-Revoke-Session: <old session token>` retires the caller's outgoing session
  * in the same request. A client renewing its session MUST send this: without it
@@ -283,12 +290,14 @@ export async function handleAuthSession(req: Request, env: AuthEnv): Promise<Res
     .first<{ user_id: string }>();
 
   let userId: string;
+  let created = false;
   if (identity) {
     userId = identity.user_id;
     const user = await env.DB.prepare("SELECT status FROM users WHERE id = ?").bind(userId).first<{ status: string }>();
     if (!user || user.status !== "active") return json({ error: "forbidden" }, 403);
   } else {
     userId = newUserId();
+    created = true;
     // One batch so a user never exists without its identity, or vice versa.
     await env.DB.batch([
       env.DB.prepare("INSERT INTO users (id, created_at, status) VALUES (?, ?, 'active')").bind(userId, now),
@@ -326,7 +335,7 @@ export async function handleAuthSession(req: Request, env: AuthEnv): Promise<Res
   await env.DB.batch(statements);
   if (outgoing) await edgeCache()?.delete(sessionCacheKey(await sha256Hex(outgoing)));
 
-  return json({ sessionToken: token, userId, expiresAt });
+  return json({ sessionToken: token, userId, expiresAt, created });
 }
 
 /**

@@ -121,6 +121,7 @@ import { handleInsights } from "./insights";
 import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
+import { handleWebTelemetry } from "./telemetry";
 import {
   handleBlock,
   handleDeleteAccount,
@@ -503,6 +504,10 @@ export default {
     if (p === "/api/sync" && req.method === "POST") {
       return handleSync(req, env as unknown as SyncEnv, ctx, (_e, _uid, relayReq) => loadRelay(env, relayReq));
     }
+
+    // The web's equivalent of the telemetry that rides `/api/sync` on Android. The
+    // browser has no sync to ride, so it gets the one row and nothing else.
+    if (p === "/api/telemetry" && req.method === "POST") return handleWebTelemetry(req, env, ctx);
 
     // ── Activity feed (Phase 6). Replaces the E2EE feed blob; opinions stay E2EE. ──
     if (p === "/api/feed" && req.method === "GET") return handleGetFeed(req, env, ctx);

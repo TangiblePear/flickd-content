@@ -20,6 +20,7 @@
 // Never record a token, a URL, a username or an API key. `integrations` says only
 // WHETHER a thing is configured.
 
+import { resolveSession } from "./auth";
 import { appVersion } from "./profiles";
 
 export interface TelemetryEnv {
@@ -243,6 +244,110 @@ export async function recordTelemetry(
       featuresJson(b.features),
     )
     .run();
+}
+
+// ── The browser as a device ──────────────────────────────────────────────────
+//
+// The website reported nothing at all. `recordTelemetry` hangs off `/api/sync` and
+// `/api/history/sync`, and the web calls neither — so every web account landed in the
+// admin's "Accounts with no device" panel: signed in, session issued, never reported.
+// True, and useless.
+//
+// This is its own endpoint rather than a call to `/api/sync` because that handler
+// loads feed, friends, profile, settings, achievements and runs two sweeps. That is a
+// great deal of D1 work to record one row.
+
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...CORS } });
+
+/**
+ * ⚠️ **The order of this table IS the algorithm.** Every Chromium browser carries
+ * `Chrome/` in its User-Agent, and Chrome itself carries `Safari/` — so Edge, Opera
+ * and Samsung Internet must be tried before Chrome, and Chrome before Safari. Sort
+ * this list alphabetically and every Edge user is recorded as Chrome and every
+ * Chrome user as Safari.
+ *
+ * Major version only, deliberately. The full build string ("142.0.6613.120") would
+ * shatter the admin's model histogram into one row per patch release.
+ */
+const BROWSERS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["Edge", /\bEdg(?:e|A|iOS)?\/(\d+)/],
+  ["Opera", /\bOPR\/(\d+)/],
+  ["Samsung Internet", /\bSamsungBrowser\/(\d+)/],
+  ["Firefox", /\b(?:Firefox|FxiOS)\/(\d+)/],
+  ["Chrome", /\b(?:Chrome|CriOS)\/(\d+)/],
+  ["Safari", /\bVersion\/(\d+)[.\d]*.*\bSafari\//],
+];
+
+/** Browser name and major version, or null for a User-Agent we do not recognise. */
+export function parseBrowser(ua: string | null | undefined): { name: string; version: string } | null {
+  if (!ua) return null;
+  for (const [name, re] of BROWSERS) {
+    const m = re.exec(ua);
+    if (m) return { name, version: m[1] };
+  }
+  return null;
+}
+
+/**
+ * POST /api/telemetry — one `user_telemetry` row for a signed-in browser.
+ *
+ * The client sends `{ deviceId, language }` and nothing else. Everything that
+ * describes the browser is read from the User-Agent **here**: a client trusted to
+ * name its own platform could claim to be Android and quietly corrupt every fleet
+ * figure on the admin page.
+ *
+ * `deviceId` is a UUID the site keeps in localStorage and deliberately does NOT clear
+ * on sign out. Clearing site data mints a new one, which for a browser is honest — it
+ * genuinely is a fresh profile — but a sign-out/in cycle must not invent a device.
+ *
+ * The once-per-UTC-day guard in `recordTelemetry` applies unchanged, so a browser that
+ * calls this on every tab it opens still costs one write a day.
+ */
+export async function handleWebTelemetry(
+  req: Request,
+  env: TelemetryEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+  if (!body || typeof body !== "object") return json({ error: "invalid_payload" }, 400);
+
+  const browser = parseBrowser(req.headers.get("User-Agent"));
+  // Passed raw: every field of `TelemetryBlock` is `unknown` and `recordTelemetry`
+  // sanitises and caps all of them.
+  const block: TelemetryBlock = {
+    deviceId: body.deviceId,
+    language: body.language,
+    // Not from the body, on purpose — see above.
+    platform: "web",
+    // The roster draws `${manufacturer} ${model}`, so this reads "Chrome 142" with no
+    // change to the panel that renders handsets.
+    manufacturer: browser?.name,
+    model: browser?.version,
+  };
+
+  // NOT `ctx?.waitUntil(recordTelemetry(...))`: optional chaining short-circuits the
+  // ARGUMENT too, so on a call with no ctx the write would never even be started.
+  const write = recordTelemetry(env, session.userId, req, block).catch(() => {});
+  const rollup = maybeRollup(env).catch(() => {});
+  if (ctx) {
+    ctx.waitUntil(write);
+    ctx.waitUntil(rollup);
+  } else {
+    await write;
+    await rollup;
+  }
+
+  return json({ ok: true });
 }
 
 // ── The daily rollup ─────────────────────────────────────────────────────────

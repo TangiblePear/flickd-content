@@ -96,6 +96,14 @@ interface RosterRow {
   acct: string;
   deviceId: string;
   device: string | null;
+  /**
+   * `android` or `web`. Already stored and already SELECTed, but never reached the
+   * panel — so a browser row was indistinguishable from a handset that had failed to
+   * report, and drew as the alarming "header only". Every Android-shaped column
+   * (build, API level, installer, entitlement) is empty for a browser by design, and
+   * this is the only field that says so.
+   */
+  platform: string | null;
   versionName: string | null;
   versionCode: number | null;
   osApi: number | null;
@@ -208,13 +216,32 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
     // header-only writes from clients predating the telemetry block land here too.
     if (r.version_name) reportingNewClient++;
 
-    bump(versions, r.version_code == null ? null : String(r.version_code));
-    if (r.version_code != null && r.version_name) versionNames[String(r.version_code)] = r.version_name;
+    // ⚠️ A browser is a device, but it is not an APK and not a handset.
+    //
+    // `version_code` is the `X-App-Version` header, which a browser never sends — so
+    // it is 0, not NULL, and the two tallies below would read that as "an app on
+    // version 0". That is not a cosmetic wrong: `belowFloor` counts exactly this
+    // column against MIN_SOCIAL_VERSION, and it is the number the legacy-relay purge
+    // decision rests on. Every browser on the site would have sat in it forever,
+    // and the purge would never have looked safe to run.
+    //
+    // `manufacturer`/`model` carry the browser name and major version, which is what
+    // makes the roster read "Chrome 142" — but those two tallies feed the panels that
+    // answer handset questions ("can minSdk rise", "which devices do we support"), and
+    // "Chrome" is not a manufacturer.
+    //
+    // Everything else is left in deliberately: country, language and the activity
+    // counters above describe a real person using FlickTo, whichever client they used.
+    const isApp = r.platform !== "web";
+    if (isApp) {
+      bump(versions, r.version_code == null ? null : String(r.version_code));
+      if (r.version_code != null && r.version_name) versionNames[String(r.version_code)] = r.version_name;
+      bump(manufacturers, r.manufacturer);
+      bump(models, r.manufacturer && r.model ? `${r.manufacturer} ${r.model}` : r.model);
+    }
     bump(osApi, r.os_api == null ? null : String(r.os_api));
     bump(countries, r.country);
     bump(languages, r.language);
-    bump(manufacturers, r.manufacturer);
-    bump(models, r.manufacturer && r.model ? `${r.manufacturer} ${r.model}` : r.model);
     bump(installers, r.installer);
     bump(buildTypes, r.build_type);
     bump(platforms, r.platform);
@@ -269,7 +296,11 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
       // needs to address an account — so it does not carry one.
       acct: r.user_id.slice(0, 6),
       deviceId: r.device_id,
+      // A browser sends its name and major version in these two columns, so this
+      // reads "Chrome 142" for the web exactly as it reads "Google Pixel 8" for a
+      // handset — see handleWebTelemetry.
       device: r.manufacturer && r.model ? `${r.manufacturer} ${r.model}` : r.model,
+      platform: r.platform,
       versionName: r.version_name,
       versionCode: r.version_code,
       osApi: r.os_api,
@@ -376,7 +407,11 @@ export async function handleInsights(req: Request, env: InsightsEnv): Promise<Re
     excludeDebug,
     /** 0 = no gate. Devices below it are blocked from the social surface. */
     minSocialVersion: floor,
-    belowFloor: floor === 0 ? 0 : rows.filter((r) => (r.version_code ?? 0) < floor).length,
+    // Browsers excluded: they send no `X-App-Version`, so every one of them scores 0
+    // and would count as a client below the floor forever. This number gates the
+    // legacy-relay purge — it has to mean "old APKs still out there", nothing else.
+    belowFloor:
+      floor === 0 ? 0 : rows.filter((r) => r.platform !== "web" && (r.version_code ?? 0) < floor).length,
 
     /**
      * The page's honesty rail: how much of the account base can be measured at all.

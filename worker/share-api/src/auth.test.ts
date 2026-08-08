@@ -330,6 +330,11 @@ describe("session lifecycle", () => {
     expect(b.sessionToken).not.toBe(a.sessionToken);
     expect(env.DB.users.length).toBe(1);
     expect(env.DB.sessions.length).toBe(2);
+    // The registration signal. Google is the only provider, so these two calls are
+    // identical in every other respect — `created` is the ONLY thing that tells the
+    // web it just made an account rather than resumed one.
+    expect(a.created).toBe(true);
+    expect(b.created).toBe(false);
   });
 
   // Without X-Revoke-Session a renewed token stayed valid for its full 90 days
