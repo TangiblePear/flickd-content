@@ -63,7 +63,7 @@ class FakeStmt {
       const user = this.db.sessions.get(this.args[0] as string);
       return user ? ({ user_id: user, expires_at: Date.now() + 86400_000, revoked_at: null } as T) : null;
     }
-    if (s.includes("FROM profiles WHERE user_id = ?")) {
+    if (s.includes("FROM profiles p LEFT JOIN users")) {
       const row = this.db.profiles.find((p) => p.user_id === this.args[0]);
       if (!row) return null;
       return (s.startsWith("SELECT version") ? { version: row.version } : row) as T;

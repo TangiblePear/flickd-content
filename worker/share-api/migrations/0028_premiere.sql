@@ -1,0 +1,31 @@
+-- FlickTo Premiere entitlement becomes server-owned.
+--
+-- The Premiere badge is a claim ABOUT a person that OTHER people read, which is
+-- exactly why it cannot live on `profiles`. That table is a client-declared merge
+-- (`mergeValidated` in profiles.ts): it truncates strings and validates shapes, but
+-- it does not and cannot verify that a claim is true. Anyone holding a session could
+-- PUT `premiere: true`. A verification badge that any client can set is worth less
+-- than no badge at all, because it looks like proof.
+--
+-- So the flag lives on `users`, which no request body can reach. It is written in
+-- exactly one place — the handler for POST /api/me/premiere/verify — and only after
+-- the worker has checked a Google Play purchase token against the Play Developer
+-- API itself.
+--
+-- `premiere_until` is the epoch-millis expiry Google reported, NOT a boolean. A
+-- boolean would need a cron to expire it; a timestamp expires itself, and every read
+-- path compares it against `now`. It is allowed to move backwards (a refund or
+-- cancellation reports an earlier expiry) but ONLY on a successful verification —
+-- see the handler, which writes nothing when Google is unreachable, so a network
+-- blip can never revoke a paying subscriber.
+--
+-- `premiere_since` is the first time this account ever verified, kept because it is
+-- unrecoverable after the fact: once someone's subscription lapses there is no way
+-- to learn when it started. A future founder/early-supporter badge needs it, and
+-- back-filling it later would be inventing data.
+--
+-- Erasure: both columns sit on `users`, and `handleDeleteAccount` already runs
+-- `DELETE FROM users WHERE id = ?` in its batch (friends.ts), so they go with the
+-- row. No separate erasure statement is needed — verified, not assumed.
+ALTER TABLE users ADD COLUMN premiere_until INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN premiere_since INTEGER NOT NULL DEFAULT 0;

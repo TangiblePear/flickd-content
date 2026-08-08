@@ -15,6 +15,7 @@
 
 import { areFriends, friendshipKey, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
+import { isPremiere } from "./premiere";
 
 export interface FriendsEnv {
   DB: D1Database;
@@ -527,7 +528,16 @@ export interface PublicCard {
  * since step 2. This only hands it to accepted friends, who are the intended audience,
  * and it rides the `users` query this handler already runs.
  */
-export type FriendCardWithTopic = PublicCard & { userId: string; friendTopic: string };
+/**
+ * [isPremiere] is the one field here the SERVER vouches for. Everything else on the
+ * card is client-published and inherits that trust level; this is read from
+ * `users.premiere_until`, which no client can write. See premiere.ts.
+ */
+export type FriendCardWithTopic = PublicCard & {
+  userId: string;
+  friendTopic: string;
+  isPremiere: boolean;
+};
 
 const MAX_CARD_LOOKUPS = 25;
 
@@ -586,11 +596,16 @@ export async function handleGetFriendCards(
   // 2026-07-30: 1 of 5 active accounts was in exactly that state. The column is on its
   // way out (8c-3) and was never what authorised the card — the friendship edge is.
   const { results } = await env.DB.prepare(
-    `SELECT id, friend_code, push_friend_topic FROM users
+    `SELECT id, friend_code, push_friend_topic, premiere_until FROM users
       WHERE id IN (${placeholders}) AND status = 'active'`,
   )
     .bind(...allowed)
-    .all<{ id: string; friend_code: string | null; push_friend_topic: string | null }>();
+    .all<{
+      id: string;
+      friend_code: string | null;
+      push_friend_topic: string | null;
+      premiere_until: number | null;
+    }>();
 
   const cards: FriendCardWithTopic[] = [];
   for (const row of results ?? []) {
@@ -612,7 +627,16 @@ export async function handleGetFriendCards(
     // reader on either side — and it leaves the wire when the publish side does, with
     // the device identity handle. Do not re-introduce a reader for it.
     if (!card) continue;
-    cards.push({ userId: row.id, ...card, friendTopic: row.push_friend_topic ?? "" });
+    // ⚠️ `isPremiere` goes AFTER the spread, deliberately. `card` is the client-written
+    // R2 blob; a key placed before the spread could be overridden by whatever the card
+    // author published. This is the one field here the server vouches for, and it rides
+    // the `users` query above, so it costs no extra read.
+    cards.push({
+      userId: row.id,
+      ...card,
+      friendTopic: row.push_friend_topic ?? "",
+      isPremiere: isPremiere(row),
+    });
   }
   return json({ cards });
 }

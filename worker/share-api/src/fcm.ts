@@ -4,15 +4,24 @@ export interface FcmConfig {
   privateKey: string;
 }
 
-// Minimal JWT builder for Google OAuth2 using Web Crypto API
-async function getGoogleAccessToken(config: FcmConfig): Promise<string | null> {
+/**
+ * Minimal JWT builder for Google OAuth2 using Web Crypto API.
+ *
+ * Exported and scope-parameterised because Play Billing verification needs the same
+ * service-account dance against a different scope (`androidpublisher`). The default
+ * keeps every existing FCM caller unchanged.
+ */
+export async function getGoogleAccessToken(
+  config: FcmConfig,
+  scope = "https://www.googleapis.com/auth/firebase.messaging",
+): Promise<string | null> {
   try {
     const header = { alg: "RS256", typ: "JWT" };
     const iat = Math.floor(Date.now() / 1000);
     const exp = iat + 3600;
     const claimSet = {
       iss: config.clientEmail,
-      scope: "https://www.googleapis.com/auth/firebase.messaging",
+      scope,
       aud: "https://oauth2.googleapis.com/token",
       exp,
       iat,

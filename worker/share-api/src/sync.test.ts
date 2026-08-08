@@ -44,7 +44,7 @@ class FakeStmt {
       const u = this.db.sessions.get(this.args[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
     }
-    if (s.includes("FROM profiles WHERE user_id = ?")) {
+    if (s.includes("FROM profiles p LEFT JOIN users")) {
       return (this.db.profiles.find((p) => p.user_id === this.args[0]) ?? null) as T | null;
     }
     // Migration 0024, both version-gated in the response exactly as `profile` is.

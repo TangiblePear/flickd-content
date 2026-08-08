@@ -121,7 +121,7 @@ class FakeStmt {
       const p = this.db.profiles.find((x) => x.user_id === a[0]);
       return p ? ({ display_name: p.display_name ?? null, avatar_id: p.avatar_id ?? null } as T) : null;
     }
-    if (s.includes("FROM profiles WHERE user_id = ?")) return null;
+    if (s.includes("FROM profiles p LEFT JOIN users")) return null;
     throw new Error(`FakeD1: unhandled first() ${s}`);
   }
 
@@ -138,7 +138,7 @@ class FakeStmt {
     // "omits a friend who never claimed a friendId" case was being produced by the
     // FAKE rather than by the handler. The real filter went in 9a and the column in
     // 8c-3; a card is now located by `friend_code` alone.
-    if (s.startsWith("SELECT id, friend_code, push_friend_topic FROM users WHERE id IN")) {
+    if (s.startsWith("SELECT id, friend_code, push_friend_topic, premiere_until FROM users WHERE id IN")) {
       return {
         results: this.db.users.filter((u) => a.includes(u.id) && u.status === "active") as T[],
       };
@@ -453,7 +453,10 @@ describe("friend cards", () => {
 
     const res = (await (await handleGetFriendCards(post("tok-b", "/api/friends/cards", { userIds: [A] }), env, loader)).json()) as any;
     // feedReadToken must ride along: without it the new friend's feed is unreadable.
-    expect(res.cards).toEqual([{ userId: A, ...cards.CODEAAA, friendTopic: "" }]);
+    // `isPremiere` is the one field the SERVER vouches for — it comes from
+    // `users.premiere_until`, not the client-written card — so it is asserted here
+    // rather than spread from the fixture. False because this fixture never paid.
+    expect(res.cards).toEqual([{ userId: A, ...cards.CODEAAA, friendTopic: "", isPremiere: false }]);
   });
 
   /**

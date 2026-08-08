@@ -12,15 +12,23 @@
 
 import { canView, canViewAnonymous, parseVisibility, Visibility } from "./authz";
 import { visibleLayout, visibleStats, type Consents } from "./visibility";
+import { dailyActivityFor } from "./history";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
+import { isPremiere } from "./premiere";
 
 export interface ProfileEnv {
   DB: D1Database;
+  /**
+   * History documents. Optional here, and only read to build the heatmap on a
+   * foreign profile — a deployment without it simply serves profiles with no
+   * `dailyCounts`, which the client renders as a profile with no heatmap.
+   */
+  BUCKET?: R2Bucket;
   FIREBASE_PROJECT_ID?: string;
   /**
    * Lowest Android `versionCode` still allowed on the social surface, as a string
@@ -106,13 +114,22 @@ interface ProfileRow {
   /** >0 means granted. Back-filled by migration 0027; the app sends the real time. */
   friend_sensitive_consent_at: number | null;
   public_sensitive_consent_at: number | null;
+  /**
+   * Joined from `users`, NOT a column on `profiles` — this table is a client-declared
+   * merge and a badge anyone could PUT would be worthless. Server-written only, by
+   * premiere.ts. See migration 0028.
+   */
+  premiere_until: number | null;
 }
 
+// Every column is qualified with `p.` because the read now JOINs `users` for the
+// Premiere flag. An unqualified list would break the moment a column name existed on
+// both tables.
 const PROFILE_COLUMNS =
-  "user_id, display_name, avatar_id, border_id, picture_url, header_color, header_backdrop_url, " +
-  "layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows, favourite_people, " +
-  "featured_achievements, personality_id, visibility, version, updated_at, " +
-  "friend_sensitive_consent_at, public_sensitive_consent_at";
+  "p.user_id, p.display_name, p.avatar_id, p.border_id, p.picture_url, p.header_color, p.header_backdrop_url, " +
+  "p.layout, p.friend_layout, p.public_layout, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
+  "p.featured_achievements, p.personality_id, p.visibility, p.version, p.updated_at, " +
+  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -141,6 +158,9 @@ export function toWire(row: ProfileRow) {
     favouritePeople: jsonColumn<unknown[]>(row.favourite_people, []),
     featuredAchievements: jsonColumn<unknown[]>(row.featured_achievements, []),
     personalityId: row.personality_id ?? "",
+    // Derived, never echoed back from a write. `toForeignWire` builds on this
+    // function, so friends and strangers see the same server-checked answer.
+    isPremiere: isPremiere(row),
     visibility: parseVisibility(row.visibility),
     version: row.version,
     updatedAt: row.updated_at,
@@ -217,7 +237,13 @@ export function consentsOf(row: ProfileRow): Consents {
 }
 
 export async function readProfileRow(env: ProfileEnv, userId: string): Promise<ProfileRow | null> {
-  return env.DB.prepare(`SELECT ${PROFILE_COLUMNS} FROM profiles WHERE user_id = ?`)
+  // LEFT, not INNER. Orphaned profiles — a row whose `users` parent is gone — do occur
+  // here; there is a reaper for them. An INNER JOIN would silently turn every one of
+  // those from "readable profile" into a 404, which is a behaviour change nothing in
+  // this feature asked for. A LEFT JOIN reads them exactly as before, with no badge.
+  return env.DB.prepare(
+    `SELECT ${PROFILE_COLUMNS} FROM profiles p LEFT JOIN users u ON u.id = p.user_id WHERE p.user_id = ?`,
+  )
     .bind(userId)
     .first<ProfileRow>();
 }
@@ -577,10 +603,23 @@ export async function handleGetProfile(
   const audience: ForeignAudience = grant === "public" ? "public" : "friend";
   // toForeignWire, NOT toWire: the latter carries the owner's unfiltered layout.
   const consents = consentsOf(row);
-  return json({
-    profile: toForeignWire(row, audience),
-    stats: await readStatsFor(env, userId, audience, consents),
-  });
+  const profile = toForeignWire(row, audience);
+  const stats = (await readStatsFor(env, userId, audience, consents)) as Record<string, unknown> | null;
+
+  // Day-level counts, ONLY when the reader is actually being shown the block.
+  // It costs an R2 read, and the layout has already been filtered by audience
+  // and consent — so asking after filtering means a profile that does not
+  // publish a heatmap never pays for one, and a reader who may not see it
+  // cannot be sent it.
+  const showsHeatmap = Array.isArray(profile.layout)
+    && (profile.layout as { type?: string }[]).some((b) => b?.type === "wrapped");
+  if (showsHeatmap && env.BUCKET) {
+    const dailyCounts = await dailyActivityFor(env as never, userId);
+    if (Object.keys(dailyCounts).length) {
+      return json({ profile, stats: { ...(stats ?? {}), dailyCounts } });
+    }
+  }
+  return json({ profile, stats });
 }
 
 /**

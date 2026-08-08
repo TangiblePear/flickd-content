@@ -10,6 +10,12 @@ interface Env {
   // uploads skip the paid scan (dev mode) and are accepted.
   MODERATION_ENABLED?: string;
   VISION_API_KEY?: string;
+  // Play Developer API service account, used only to verify a Premiere purchase
+  // token. All three are SECRETS; unset ⇒ /api/me/premiere/verify 503s and no
+  // stored entitlement changes in either direction. See premiere.ts.
+  PLAY_SA_CLIENT_EMAIL?: string;
+  PLAY_SA_PRIVATE_KEY?: string;
+  PLAY_PACKAGE_NAME?: string;
   // Distinct-reporter threshold that auto-hides a picture pending admin review.
   REPORT_AUTOHIDE?: string;
   // Orphan-profile reaper: delete a friendId folder untouched for this long.
@@ -120,6 +126,7 @@ import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
 import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
+import { handleVerifyPremiere } from "./premiere";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import { handleWebTelemetry } from "./telemetry";
 import {
@@ -437,6 +444,10 @@ export default {
 
     // ── Friendships, blocks, reports (Phase 3/4). Session-authenticated. ──
     if (p === "/api/me/account" && req.method === "DELETE") return handleDeleteAccount(req, env, ctx);
+    // FlickTo Premiere. The ONLY writer of `users.premiere_until` — there is
+    // deliberately no way to set it through the profile PUT, which is a
+    // client-declared merge (see migration 0028).
+    if (p === "/api/me/premiere/verify" && req.method === "POST") return handleVerifyPremiere(req, env, ctx);
     if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
     if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx, wake);
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);

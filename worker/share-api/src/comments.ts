@@ -34,6 +34,7 @@ import { areFriends, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
+import { isPremiere } from "./premiere";
 
 export interface CommentsEnv {
   DB: D1Database;
@@ -220,6 +221,8 @@ export interface CommentRow {
   border_id?: string | null;
   avatar_id?: string | null;
   picture_url?: string | null;
+  /** Joined from `users`, not `profiles` — see premiere.ts and migration 0028. */
+  premiere_until?: number | null;
 }
 
 /**
@@ -252,6 +255,7 @@ function toWire(r: CommentRow, reactions: Record<string, number> = {}, translati
     authorAvatarId: r.avatar_id ?? null,
     authorBorderId: r.border_id ?? null,
     authorPictureUrl: r.picture_url ?? null,
+    authorIsPremiere: isPremiere(r),
     body: r.body,
     reaction: r.reaction,
     visibility: r.visibility,
@@ -278,7 +282,8 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
        c.reaction, c.visibility, c.spoiler, c.lang, c.media_kind, c.media_provider,
        c.media_id, c.media_url, c.media_w, c.media_h, c.hidden_at, c.deleted_at,
        c.created_at, c.updated_at,
-       p.display_name, p.avatar_id, p.border_id, p.picture_url`;
+       p.display_name, p.avatar_id, p.border_id, p.picture_url,
+       u.premiere_until`;
 
 /**
  * A comment is only rendered — and only counted — when it has something to show.
@@ -569,6 +574,7 @@ export async function loadPublicComments(env: CommentsEnv, s: Subject, lang: str
   const { results } = await env.DB.prepare(
     `SELECT ${SELECT_COLUMNS}
        FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
+                       LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
         AND c.visibility = 'public' AND c.created_at < ? AND ${RENDERABLE}${langFilter}
       ORDER BY c.created_at DESC
@@ -703,6 +709,7 @@ export async function handleGetFriendComments(
   const { results } = await env.DB.prepare(
     `SELECT ${SELECT_COLUMNS}
        FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
+                       LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
         AND c.visibility = 'friends' AND c.author_id IN (${placeholders})
         AND c.created_at < ? AND ${RENDERABLE}
