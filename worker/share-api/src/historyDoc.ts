@@ -491,3 +491,32 @@ export function parseEventId(id: string): IncomingEvent | null {
   }
   return null;
 }
+
+/**
+ * Watch activity bucketed by calendar day: `{ "2026-03-01": [episodes, films] }`.
+ *
+ * The heatmap a visitor sees on somebody else's profile. The web computes the
+ * owner's own from the history it already fetched, but a visitor has no route
+ * to another user's — and adding one would publish every title and every
+ * timestamp, far more than the profile summary does. The server holds the whole
+ * document in a single read, so it aggregates here and publishes only the
+ * counts: how much, on which day, and nothing about what.
+ *
+ * Days with no activity are OMITTED rather than zero-filled. A year of zeroes
+ * is several KB of nothing, and the client already fills the gaps to draw a
+ * continuous grid.
+ *
+ * UTC, matching `recentEvents`. A local-midnight boundary would put the same
+ * watch on different days for two viewers of the same profile.
+ */
+export function dailyActivity(doc: HistoryDoc, sinceMs: number): Record<string, [number, number]> {
+  const out: Record<string, [number, number]> = {};
+  for (const e of recentEvents(doc, Number.MAX_SAFE_INTEGER)) {
+    if (e.watchedAt < sinceMs) continue;
+    const day = new Date(e.watchedAt).toISOString().slice(0, 10);
+    const cell = out[day] ?? (out[day] = [0, 0]);
+    if (e.mediaType?.toUpperCase() === "MOVIE") cell[1] += 1;
+    else cell[0] += 1;
+  }
+  return out;
+}

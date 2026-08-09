@@ -9,17 +9,7 @@
 // rather than a fake of them.
 
 import { describe, it, expect } from "vitest";
-import {
-  applyToDoc,
-  emptyDoc,
-  parseDoc,
-  recentEvents,
-  serialiseDoc,
-  statsFor,
-  type IncomingEvent,
-  TOMBSTONE_TTL_MS,
-  MAX_TOMBSTONES,
-} from "./historyDoc";
+import { applyToDoc, emptyDoc, parseDoc, recentEvents, serialiseDoc, statsFor, type IncomingEvent, TOMBSTONE_TTL_MS, MAX_TOMBSTONES, dailyActivity } from "./historyDoc";
 
 const SEC = 1_700_000_000;
 const ms = (s: number) => s * 1000;
@@ -447,5 +437,47 @@ describe("history doc: version stamps", () => {
     applyToDoc(doc, [], [{ mediaType: "MOVIE", tmdbId: 550, rating: 3, updatedAt: 1000 }], 2);
     expect(doc.titles["MOVIE|550"].rating).toBe(9); // stale rating rejected
     expect(doc.titles["MOVIE|550"].mv).toBe(1);     // so the title did not change
+  });
+});
+
+// ── Daily activity ───────────────────────────────────────────────────────────
+// The heatmap on a foreign profile. The web buckets its OWN history in the
+// browser, but a visitor has no route to somebody else's — and giving them one
+// would publish every title and timestamp. The server already holds the whole
+// document in a single read, so it buckets there instead.
+describe("dailyActivity", () => {
+  /** Seconds since epoch for midday on an ISO date, matching the `ms()` helper. */
+  const sec = (iso: string) => Math.floor(new Date(iso + "T12:00:00Z").getTime() / 1000);
+
+  it("counts films and episodes into their own day", () => {
+    const doc = applyToDoc(
+      emptyDoc(),
+      [movie(550, sec("2026-03-01")), ep(1396, 1, 1, sec("2026-03-01")), ep(1396, 1, 2, sec("2026-03-02"))],
+      [],
+      1,
+    );
+    const out = dailyActivity(doc, 0);
+    expect(out["2026-03-01"]).toEqual([1, 1]);
+    expect(out["2026-03-02"]).toEqual([1, 0]);
+  });
+
+  /** Only days with something on them: a year of zeroes is the client's to fill in. */
+  it("omits empty days", () => {
+    const doc = applyToDoc(emptyDoc(), [movie(550, sec("2026-03-01"))], [], 1);
+    expect(Object.keys(dailyActivity(doc, 0))).toEqual(["2026-03-01"]);
+  });
+
+  it("drops anything older than the cutoff", () => {
+    const doc = applyToDoc(
+      emptyDoc(),
+      [movie(550, sec("2020-01-01")), movie(551, sec("2026-03-01"))],
+      [],
+      1,
+    );
+    expect(Object.keys(dailyActivity(doc, ms(sec("2026-01-01"))))).toEqual(["2026-03-01"]);
+  });
+
+  it("is empty for an empty document", () => {
+    expect(dailyActivity(emptyDoc(), 0)).toEqual({});
   });
 });

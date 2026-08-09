@@ -43,6 +43,7 @@ import {
   type IncomingEvent,
   type IncomingRating,
   type PackedTitle,
+  dailyActivity,
 } from "./historyDoc";
 import { notifyHistoryWrite, type NotifyEnv } from "./notify";
 import { maybeRollup, recordTelemetry } from "./telemetry";
@@ -863,3 +864,32 @@ async function queryTopTitles(env: HistoryEnv): Promise<GlobalStats["topTitles"]
 export const historyObjectKeys = (userId: string) => [historyKey(userId), publicRecentKey(userId)];
 
 export { WATCHED_THRESHOLD_PCT, MAX_EVENTS_PER_SYNC, MAX_RATINGS_PER_SYNC };
+
+
+/** A year is what the heatmap draws; older days would be fetched and thrown away. */
+const HEATMAP_WINDOW_MS = 365 * 24 * 60 * 60 * 1000;
+
+/**
+ * Day-by-day watch counts for [userId], for a profile heatmap.
+ *
+ * Exported for `profiles.ts`, which cannot reach `loadDoc` and must not read
+ * the bucket itself — the document's shape and its versioning belong to this
+ * module. Returns `{}` rather than throwing when there is no document.
+ *
+ * ⚠️ Costs one R2 read. The caller is expected to ask ONLY when the profile it
+ * is serving actually publishes the block, so a profile without a heatmap costs
+ * nothing.
+ */
+export async function dailyActivityFor(
+  env: HistoryEnv,
+  userId: string,
+  now: number = Date.now(),
+): Promise<Record<string, [number, number]>> {
+  try {
+    const { doc } = await loadDoc(env, userId);
+    return dailyActivity(doc, now - HEATMAP_WINDOW_MS);
+  } catch {
+    // A heatmap is decoration; a profile must still render without it.
+    return {};
+  }
+}
