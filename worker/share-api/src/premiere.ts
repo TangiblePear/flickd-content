@@ -114,6 +114,31 @@ export function visibleBorderId(
   return isPremiere(row, now) ? id : "";
 }
 
+/**
+ * The header colour a reader should receive.
+ *
+ * A DUOTONE — two hexes comma-separated, `"#RRGGBB,#RRGGBB"` — is the Premiere form; a
+ * single colour is free and passes through untouched. Same rule as [visibleBorderId]:
+ * rented, not earned, so it stops being published when the subscription ends.
+ *
+ * ⚠️ Degrades to the FIRST stop rather than to empty. Emptying would drop the person's
+ * header back to the genre Flare gradient, which reads as "they changed their profile"
+ * rather than "they stopped paying"; keeping the first colour is the honest degrade, and
+ * the stored pair is untouched so resubscribing restores the gradient.
+ *
+ * The comma encoding lives in the existing `header_color` text column deliberately —
+ * `mergeValidated` stores it as free text, so no migration was needed.
+ */
+export function visibleHeaderColor(
+  headerColor: string | null | undefined,
+  row: PremiereRow | null | undefined,
+  now = Date.now(),
+): string {
+  const spec = (headerColor ?? "").trim();
+  if (!spec.includes(",")) return spec;
+  return isPremiere(row, now) ? spec : spec.split(",")[0].trim();
+}
+
 /** The Play states that mean "this person has paid and should be treated as such". */
 const ENTITLED_STATES = new Set([
   "SUBSCRIPTION_STATE_ACTIVE",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach, beforeAll } from "vitest";
-import { handleVerifyPremiere, isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
+import { handleVerifyPremiere, isPremiere, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
 
 const USER = "AAAAH73X7P55T48R4CFHDED9CW";
 
@@ -290,5 +290,34 @@ describe("visibleBorderId", () => {
     expect(visibleBorderId("", { premiere_until: now + 1 }, now)).toBe("");
     expect(visibleBorderId(null, null, now)).toBe("");
     expect(visibleBorderId("bd_pre_gold", null, now)).toBe("");
+  });
+});
+
+describe("visibleHeaderColor", () => {
+  const now = 1_700_000_000_000;
+
+  it("passes a single colour through regardless of entitlement", () => {
+    expect(visibleHeaderColor("#3949AB", { premiere_until: 0 }, now)).toBe("#3949AB");
+    expect(visibleHeaderColor("#3949AB", { premiere_until: now + 1 }, now)).toBe("#3949AB");
+  });
+
+  it("serves a duotone while entitled", () => {
+    expect(visibleHeaderColor("#FFD700,#8A6100", { premiere_until: now + 1 }, now))
+      .toBe("#FFD700,#8A6100");
+  });
+
+  /**
+   * The first stop, NOT empty — emptying drops them to the genre Flare gradient, which
+   * reads as "they changed their profile" rather than "they stopped paying".
+   */
+  it("degrades a lapsed duotone to its first stop", () => {
+    expect(visibleHeaderColor("#FFD700,#8A6100", { premiere_until: now - 1 }, now)).toBe("#FFD700");
+    expect(visibleHeaderColor("#FFD700, #8A6100", { premiere_until: 0 }, now)).toBe("#FFD700");
+  });
+
+  it("treats a missing users row as not entitled", () => {
+    expect(visibleHeaderColor("#FFD700,#8A6100", null, now)).toBe("#FFD700");
+    expect(visibleHeaderColor("", null, now)).toBe("");
+    expect(visibleHeaderColor(null, null, now)).toBe("");
   });
 });

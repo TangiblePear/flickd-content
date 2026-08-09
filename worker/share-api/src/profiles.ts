@@ -19,7 +19,7 @@ import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
-import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
+import { isPremiere, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
 import { isBetaTester } from "./install";
 
 export interface ProfileEnv {
@@ -156,7 +156,8 @@ export function toWire(row: ProfileRow) {
     borderId: visibleBorderId(row.border_id, row),
     // Withheld once Premiere lapses if the picture animates — see visiblePictureUrl.
     pictureUrl: visiblePictureUrl(row.picture_url, row),
-    headerColor: row.header_color ?? "",
+    // Degraded to its first stop once Premiere lapses — see visibleHeaderColor.
+    headerColor: visibleHeaderColor(row.header_color, row),
     headerBackdropUrl: row.header_backdrop_url ?? "",
     layout: jsonColumn<unknown[]>(row.layout, []),
     bio: row.bio ?? "",
