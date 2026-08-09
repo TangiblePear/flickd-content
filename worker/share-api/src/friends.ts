@@ -15,7 +15,7 @@
 
 import { areFriends, friendshipKey, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
-import { isPremiere, visiblePictureUrl } from "./premiere";
+import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
 
 export interface FriendsEnv {
   DB: D1Database;
@@ -641,6 +641,7 @@ export async function handleGetFriendCards(
       // subscription that paid for it ends, and the card's own copy of the URL is
       // client-written so it cannot be trusted to reflect that.
       pictureUrl: visiblePictureUrl(card.pictureUrl, row),
+      borderId: visibleBorderId(card.borderId, row),
     });
   }
   return json({ cards });

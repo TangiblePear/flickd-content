@@ -34,7 +34,7 @@ import { areFriends, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
-import { isPremiere, visiblePictureUrl } from "./premiere";
+import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
 
 export interface CommentsEnv {
   DB: D1Database;
@@ -254,7 +254,7 @@ function toWire(r: CommentRow, reactions: Record<string, number> = {}, translati
     authorId: r.author_id,
     authorName: r.display_name ?? null,
     authorAvatarId: r.avatar_id ?? null,
-    authorBorderId: r.border_id ?? null,
+    authorBorderId: visibleBorderId(r.border_id, r) || null,
     authorPictureUrl: visiblePictureUrl(r.picture_url, r) || null,
     authorIsPremiere: isPremiere(r),
     body: r.body,

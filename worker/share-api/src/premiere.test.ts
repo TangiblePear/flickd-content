@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach, beforeAll } from "vitest";
-import { handleVerifyPremiere, isPremiere, visiblePictureUrl } from "./premiere";
+import { handleVerifyPremiere, isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
 
 const USER = "AAAAH73X7P55T48R4CFHDED9CW";
 
@@ -265,5 +265,30 @@ describe("visiblePictureUrl", () => {
     expect(visiblePictureUrl(null, null, now)).toBe("");
     // Orphaned profile: LEFT JOIN yields no user columns at all.
     expect(visiblePictureUrl(URL, {}, now)).toBe(URL);
+  });
+});
+
+describe("visibleBorderId", () => {
+  const now = 1_000_000;
+
+  it("never touches an earned border, subscribed or not", () => {
+    // Genre, achievement and meta borders are earned and permanent — suppressing one
+    // would take away something the user worked for.
+    for (const id of ["bd_g_horror_anim", "bd_ach_inferno", "bd_meta_supreme", "bd_ach_beta_tester"]) {
+      expect(visibleBorderId(id, { premiere_until: 0 }, now)).toBe(id);
+      expect(visibleBorderId(id, { premiere_until: now + 1 }, now)).toBe(id);
+    }
+  });
+
+  it("shows a Premiere border only while the subscription is live", () => {
+    expect(visibleBorderId("bd_pre_gold", { premiere_until: now + 1 }, now)).toBe("bd_pre_gold");
+    expect(visibleBorderId("bd_pre_gold", { premiere_until: now - 1 }, now)).toBe("");
+    expect(visibleBorderId("bd_pre_aurora", { premiere_until: 0 }, now)).toBe("");
+  });
+
+  it("is safe on empty and on a missing row", () => {
+    expect(visibleBorderId("", { premiere_until: now + 1 }, now)).toBe("");
+    expect(visibleBorderId(null, null, now)).toBe("");
+    expect(visibleBorderId("bd_pre_gold", null, now)).toBe("");
   });
 });

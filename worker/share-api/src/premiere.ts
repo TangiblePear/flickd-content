@@ -91,6 +91,29 @@ export function visiblePictureUrl(
   return animated && !isPremiere(row, now) ? "" : url;
 }
 
+/**
+ * The border id a reader should receive.
+ *
+ * Same rule as [visiblePictureUrl], for the cosmetic equivalent: a Premiere border is
+ * rented, not earned, so it stops being shown when the subscription ends.
+ *
+ * ⚠️ Matched by PREFIX because the worker cannot know the client's cosmetic catalog.
+ * `bd_pre_` is therefore a contract, not a naming convention — see `CosmeticCatalog`
+ * on the Android side, which documents the same thing from the other end.
+ *
+ * The stored value is left alone; only the published one is withheld. The user's
+ * selection survives a lapse and returns on resubscribe.
+ */
+export function visibleBorderId(
+  borderId: string | null | undefined,
+  row: PremiereRow | null | undefined,
+  now = Date.now(),
+): string {
+  const id = borderId ?? "";
+  if (!id.startsWith("bd_pre_")) return id;
+  return isPremiere(row, now) ? id : "";
+}
+
 /** The Play states that mean "this person has paid and should be treated as such". */
 const ENTITLED_STATES = new Set([
   "SUBSCRIPTION_STATE_ACTIVE",

@@ -19,7 +19,7 @@ import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
-import { isPremiere, visiblePictureUrl } from "./premiere";
+import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -149,7 +149,8 @@ export function toWire(row: ProfileRow) {
     userId: row.user_id,
     displayName: row.display_name ?? "",
     avatarId: row.avatar_id ?? "",
-    borderId: row.border_id ?? "",
+    // Withheld once Premiere lapses if it is a Premiere border — see visibleBorderId.
+    borderId: visibleBorderId(row.border_id, row),
     // Withheld once Premiere lapses if the picture animates — see visiblePictureUrl.
     pictureUrl: visiblePictureUrl(row.picture_url, row),
     headerColor: row.header_color ?? "",
