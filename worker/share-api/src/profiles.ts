@@ -20,6 +20,7 @@ import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
 import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
+import { isBetaTester } from "./install";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -122,6 +123,8 @@ interface ProfileRow {
   premiere_until: number | null;
   /** Joined from `users`. 1 = the stored picture animates; see visiblePictureUrl. */
   picture_animated: number | null;
+  /** Joined from `users`. One-way latch derived from `first_install_at`; migration 0030. */
+  beta_tester: number | null;
 }
 
 // Every column is qualified with `p.` because the read now JOINs `users` for the
@@ -131,7 +134,7 @@ const PROFILE_COLUMNS =
   "p.user_id, p.display_name, p.avatar_id, p.border_id, p.picture_url, p.header_color, p.header_backdrop_url, " +
   "p.layout, p.friend_layout, p.public_layout, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
   "p.featured_achievements, p.personality_id, p.visibility, p.version, p.updated_at, " +
-  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.picture_animated";
+  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.picture_animated, u.beta_tester";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -165,6 +168,9 @@ export function toWire(row: ProfileRow) {
     // Derived, never echoed back from a write. `toForeignWire` builds on this
     // function, so friends and strangers see the same server-checked answer.
     isPremiere: isPremiere(row),
+    // Server-derived from the account's earliest known install date, so it survives a
+    // reinstall that the device's own `firstInstallTime` would not.
+    betaTester: isBetaTester(row),
     visibility: parseVisibility(row.visibility),
     version: row.version,
     updatedAt: row.updated_at,

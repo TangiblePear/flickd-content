@@ -1,0 +1,43 @@
+-- When someone first installed FlickTo, and whether that makes them a beta tester.
+--
+-- ── Why this could not be answered before ──
+--
+-- Nothing recorded it. Checked 2026-08-09 against production: no first-install date in
+-- DataStore, Room, D1 or telemetry. `users.created_at` is ACCOUNT creation, which is a
+-- different and much later event — accounts shipped after the beta cutoff, so the
+-- earliest account is 2026-07-26 and keying anything on it awards the beta border to
+-- nobody. Telemetry only begins 2026-07-31. The question "who was here first" was
+-- genuinely unanswerable.
+--
+-- The device knew all along: `PackageManager.firstInstallTime`. That is retroactive, so
+-- existing users do not need to have been recording anything — their phone can report a
+-- date from months ago the first time a build that asks for it runs.
+--
+-- ── first_install_at ──
+--
+-- Epoch millis, and **only ever moves EARLIER**. The merge is MIN over non-zero values,
+-- for two reasons that both bite in practice:
+--
+--   * A reinstall resets `firstInstallTime` to today. Taking the newest report would let
+--     a user destroy their own history by clearing app data.
+--   * A second device reports its own, later, install. The account's answer is the
+--     earliest of everywhere they have been, not the most recent.
+--
+-- ── beta_tester ──
+--
+-- A ONE-WAY LATCH, derived server-side from the merged date against the cutoff. Never
+-- cleared, deliberately: someone who qualified in July and reinstalls in September has
+-- no early `firstInstallTime` left to prove it with, and taking the badge away because
+-- their phone forgot would be punishing them for owning a phone.
+--
+-- Derived rather than claimed. The client reports a FACT (its install date) and the
+-- server applies the RULE, so the cutoff lives in one place and a client cannot simply
+-- assert that it is a beta tester.
+ALTER TABLE users ADD COLUMN first_install_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN beta_tester INTEGER NOT NULL DEFAULT 0;
+
+-- Seed from what we already know, so the one account wearing the beta avatar does not
+-- lose it on the next sync. `created_at` is an UPPER BOUND on the install date — you
+-- cannot make an account before installing the app — so this is conservative: it can
+-- only ever be later than the truth, and the device's own report will pull it earlier.
+UPDATE users SET first_install_at = created_at WHERE first_install_at = 0;

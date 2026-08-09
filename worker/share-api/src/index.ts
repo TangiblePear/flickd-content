@@ -127,6 +127,7 @@ import { handleInsights } from "./insights";
 import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
 import { handleVerifyPremiere, isPremiere } from "./premiere";
+import { handlePutInstall } from "./install";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import { handleWebTelemetry } from "./telemetry";
 import {
@@ -448,6 +449,9 @@ export default {
     // deliberately no way to set it through the profile PUT, which is a
     // client-declared merge (see migration 0028).
     if (p === "/api/me/premiere/verify" && req.method === "POST") return handleVerifyPremiere(req, env, ctx);
+    // First-install date. The device is the only thing that knows it; this is where it
+    // reaches the account so it survives a reinstall. See migration 0030.
+    if (p === "/api/me/install" && req.method === "POST") return handlePutInstall(req, env, ctx);
     if (p === "/api/friends" && req.method === "GET") return handleGetFriends(req, env, ctx);
     if (p === "/api/friends/request" && req.method === "POST") return handleFriendRequest(req, env, ctx, wake);
     if (p === "/api/friends/accept" && req.method === "POST") return handleFriendAccept(req, env, ctx, wake);
