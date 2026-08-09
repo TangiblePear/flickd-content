@@ -1049,6 +1049,13 @@ async function handlePutMyPicture(req: Request, env: Env, ctx: ExecutionContext)
   // since either hide path may have written either key.
   await env.BUCKET.delete(accountTombstoneKey(session.userId));
 
+  // Records what this picture IS, so a lapse can stop serving it. Set on every upload,
+  // not just animated ones — replacing a GIF with a JPEG has to clear the flag, or the
+  // still would go on being suppressed after the subscription ended.
+  await env.DB.prepare("UPDATE users SET picture_animated = ? WHERE id = ?")
+    .bind(animated ? 1 : 0, session.userId)
+    .run();
+
   ctx.waitUntil(fanOutAccountProfileUpdate(env, session.userId));
 
   const url = `https://flickto.app/api/profile/${session.userId}/picture?v=${version}`;
@@ -1085,6 +1092,7 @@ async function handleDeleteMyPicture(req: Request, env: Env, ctx: ExecutionConte
   if (!session) return json({ error: "unauthorized" }, { status: 401 });
   await env.BUCKET.delete(accountPicKey(session.userId));
   await env.BUCKET.delete(accountPicMetaKey(session.userId));
+  await env.DB.prepare("UPDATE users SET picture_animated = 0 WHERE id = ?").bind(session.userId).run();
   return json({ ok: true });
 }
 

@@ -1,0 +1,31 @@
+-- Remember that a profile picture animates, so it can stop being served when the
+-- subscription that paid for it ends.
+--
+-- Without this, an animated avatar uploaded during a subscription is permanent: the
+-- gate on `PUT /api/me/picture` only ever sees NEW uploads, so someone could subscribe
+-- for one month, upload a GIF, cancel, and keep it forever. The feature would be a
+-- one-off purchase wearing a subscription's clothes.
+--
+-- On `users`, beside `premiere_until`, because it is the same kind of fact: server-owned,
+-- written only by the upload handler, and unreachable from any request body.
+--
+-- ── Why a column and not a check of the stored bytes ──
+--
+-- The obvious alternative is to sniff the R2 object on read. That would put an R2 GET on
+-- the avatar path, which is public, uncached-by-us and served `immutable` for a year —
+-- the single hottest read in the app. This column rides the `users` JOIN that the profile,
+-- friend-card and comment reads ALREADY perform, so suppression costs nothing.
+--
+-- ── Why suppress rather than delete ──
+--
+-- The bytes stay in R2 and only the published URL is withheld. Resubscribing therefore
+-- restores the avatar with no action from the user, and a billing hiccup cannot destroy
+-- something they made. Deletion would be irreversible in a way the rule does not require.
+ALTER TABLE users ADD COLUMN picture_animated INTEGER NOT NULL DEFAULT 0;
+
+-- Back-fill: every picture uploaded before this migration was accepted under a worker
+-- that had no animated gate, so animated WebP got through (GIF never did — it failed the
+-- sniff). Those are grandfathered as stills rather than hunted down: the flag records what
+-- the CURRENT rule would have decided at upload time, and re-deciding retroactively would
+-- take away avatars people have had for months under a rule that did not exist.
+-- The next upload sets the flag honestly either way.

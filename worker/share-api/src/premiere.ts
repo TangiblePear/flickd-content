@@ -66,6 +66,31 @@ export function isPremiere(row: PremiereRow | null | undefined, now = Date.now()
   return (row?.premiere_until ?? 0) > now;
 }
 
+/**
+ * The picture URL a reader should actually receive.
+ *
+ * An animated avatar is a Premiere feature, so it stops being served when the
+ * subscription ends — otherwise one paid month buys a permanent GIF and the feature is a
+ * one-off purchase wearing a subscription's clothes.
+ *
+ * Empty rather than deleted: the bytes stay in R2, so resubscribing restores the avatar
+ * with no action from the user and a billing hiccup cannot destroy something they made.
+ * Clients already treat an empty `pictureUrl` as "fall back to the pack avatar", which is
+ * exactly the intended result.
+ *
+ * Costs nothing — every caller already joins `users` for [isPremiere].
+ */
+export function visiblePictureUrl(
+  pictureUrl: string | null | undefined,
+  row: (PremiereRow & { picture_animated?: number | null }) | null | undefined,
+  now = Date.now(),
+): string {
+  const url = pictureUrl ?? "";
+  if (!url) return "";
+  const animated = (row?.picture_animated ?? 0) !== 0;
+  return animated && !isPremiere(row, now) ? "" : url;
+}
+
 /** The Play states that mean "this person has paid and should be treated as such". */
 const ENTITLED_STATES = new Set([
   "SUBSCRIPTION_STATE_ACTIVE",

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, afterEach, beforeAll } from "vitest";
-import { handleVerifyPremiere, isPremiere } from "./premiere";
+import { handleVerifyPremiere, isPremiere, visiblePictureUrl } from "./premiere";
 
 const USER = "AAAAH73X7P55T48R4CFHDED9CW";
 
@@ -238,5 +238,32 @@ describe("POST /api/me/premiere/verify", () => {
       expect((await handleVerifyPremiere(post({ purchaseToken: "tok" }), e)).status).toBe(502);
       expect(e.DB.writes).toHaveLength(0);
     });
+  });
+});
+
+describe("visiblePictureUrl", () => {
+  const now = 1_000_000;
+  const URL = "https://flickto.app/api/profile/X/picture?v=1";
+
+  it("serves a still picture whatever the subscription state", () => {
+    expect(visiblePictureUrl(URL, { premiere_until: 0, picture_animated: 0 }, now)).toBe(URL);
+    expect(visiblePictureUrl(URL, { premiere_until: now + 1, picture_animated: 0 }, now)).toBe(URL);
+  });
+
+  it("serves an animated picture while the subscription is live", () => {
+    expect(visiblePictureUrl(URL, { premiere_until: now + 1, picture_animated: 1 }, now)).toBe(URL);
+  });
+
+  /** The whole point: one paid month must not buy a permanent GIF. */
+  it("withholds an animated picture once Premiere lapses", () => {
+    expect(visiblePictureUrl(URL, { premiere_until: now - 1, picture_animated: 1 }, now)).toBe("");
+    expect(visiblePictureUrl(URL, { premiere_until: 0, picture_animated: 1 }, now)).toBe("");
+  });
+
+  it("is empty for no picture, and safe on a missing row", () => {
+    expect(visiblePictureUrl("", { premiere_until: now + 1, picture_animated: 1 }, now)).toBe("");
+    expect(visiblePictureUrl(null, null, now)).toBe("");
+    // Orphaned profile: LEFT JOIN yields no user columns at all.
+    expect(visiblePictureUrl(URL, {}, now)).toBe(URL);
   });
 });

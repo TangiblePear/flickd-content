@@ -138,7 +138,7 @@ class FakeStmt {
     // "omits a friend who never claimed a friendId" case was being produced by the
     // FAKE rather than by the handler. The real filter went in 9a and the column in
     // 8c-3; a card is now located by `friend_code` alone.
-    if (s.startsWith("SELECT id, friend_code, push_friend_topic, premiere_until FROM users WHERE id IN")) {
+    if (s.startsWith("SELECT id, friend_code, push_friend_topic, premiere_until, picture_animated FROM users WHERE id IN")) {
       return {
         results: this.db.users.filter((u) => a.includes(u.id) && u.status === "active") as T[],
       };

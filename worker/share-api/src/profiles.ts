@@ -19,7 +19,7 @@ import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
-import { isPremiere } from "./premiere";
+import { isPremiere, visiblePictureUrl } from "./premiere";
 
 export interface ProfileEnv {
   DB: D1Database;
@@ -120,6 +120,8 @@ interface ProfileRow {
    * premiere.ts. See migration 0028.
    */
   premiere_until: number | null;
+  /** Joined from `users`. 1 = the stored picture animates; see visiblePictureUrl. */
+  picture_animated: number | null;
 }
 
 // Every column is qualified with `p.` because the read now JOINs `users` for the
@@ -129,7 +131,7 @@ const PROFILE_COLUMNS =
   "p.user_id, p.display_name, p.avatar_id, p.border_id, p.picture_url, p.header_color, p.header_backdrop_url, " +
   "p.layout, p.friend_layout, p.public_layout, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
   "p.featured_achievements, p.personality_id, p.visibility, p.version, p.updated_at, " +
-  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until";
+  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.picture_animated";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -148,7 +150,8 @@ export function toWire(row: ProfileRow) {
     displayName: row.display_name ?? "",
     avatarId: row.avatar_id ?? "",
     borderId: row.border_id ?? "",
-    pictureUrl: row.picture_url ?? "",
+    // Withheld once Premiere lapses if the picture animates — see visiblePictureUrl.
+    pictureUrl: visiblePictureUrl(row.picture_url, row),
     headerColor: row.header_color ?? "",
     headerBackdropUrl: row.header_backdrop_url ?? "",
     layout: jsonColumn<unknown[]>(row.layout, []),
