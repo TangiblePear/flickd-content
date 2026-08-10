@@ -652,7 +652,7 @@ export async function handleGetFriendCards(
 // ── Account deletion (§9b — legal requirement) ───────────────────────────────
 
 /**
- * DELETE /api/me/account — erase the account from D1.
+ * Erase account [id] from R2, D1 and KV. **The only implementation of erasure.**
  *
  * Children before parents, so a failure part-way leaves the account recoverable
  * rather than orphaned. GDPR erasure has to actually erase: a stale `users` row
@@ -665,12 +665,17 @@ export async function handleGetFriendCards(
  *
  * The caller is still responsible for the Firebase Auth user and the relay purge —
  * both live outside D1, and both must happen after this returns.
+ *
+ * ⚠️ Called by BOTH the self-service route below and the admin Users panel
+ * (`usersAdmin.ts`). It is a separate function precisely so there is one erasure batch
+ * rather than two: a second implementation would drift from this one, and the way it
+ * would drift is by omitting a table — which fails silently and looks like success.
+ * Add tables here, never at a call site.
+ *
+ * Takes no session: authorization belongs to the caller, which is what lets an admin
+ * erase an account whose session it does not hold.
  */
-export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
-  const session = await requireSession(req, env, ctx);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  const id = session.userId;
-
+export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
   // The account-keyed objects that live in R2, not D1, so the batch below cannot reach
   // them. Done BEFORE the batch: once the `users` row is gone, nothing can name them —
   // the friend code in particular is only findable through that row — and they become
@@ -801,7 +806,18 @@ export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: E
   // outlive the rows it was derived from. Best-effort: a KV failure here must not
   // turn a completed D1 erasure into an error the client will retry.
   await env.HISTORY_STATS_KV?.delete(`history:stats:${id}`).catch(() => {});
+}
 
+/**
+ * DELETE /api/me/account — erase the CALLER's own account.
+ *
+ * Nothing but session resolution: the erasure itself is [eraseAccount], shared with the
+ * admin panel so both paths delete exactly the same set.
+ */
+export async function handleDeleteAccount(req: Request, env: FriendsEnv, ctx?: ExecutionContext): Promise<Response> {
+  const session = await requireSession(req, env, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+  await eraseAccount(env, session.userId);
   return noContent();
 }
 

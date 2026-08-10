@@ -6,6 +6,7 @@ import {
   handleAuthSession,
   handleAuthLogout,
   resolveSession,
+  revokeAllSessions,
   __setKeyCacheForTest,
 } from "./auth";
 import worker from "./index";
@@ -148,6 +149,13 @@ class FakeStmt {
     } else if (s.startsWith("INSERT INTO sessions")) {
       const [token_hash, user_id, created_at, expires_at] = this.args as [string, string, number, number];
       this.db.sessions.push({ token_hash, user_id, created_at, expires_at, revoked_at: null });
+    } else if (s.startsWith("UPDATE sessions SET revoked_at") && !s.includes("token_hash")) {
+      // `revokeAllSessions` — every live session for one user, in one statement. No
+      // token_hash, which is what distinguishes it from the two by-hash shapes below.
+      const [revoked_at, user_id] = this.args as [number, string];
+      for (const row of this.db.sessions) {
+        if (row.user_id === user_id && row.revoked_at == null) row.revoked_at = revoked_at;
+      }
     } else if (s.startsWith("UPDATE sessions SET revoked_at")) {
       // Two shapes: logout revokes by hash alone; the session-mint path also
       // scopes to user_id so a Firebase token can't revoke another user's session.
@@ -166,6 +174,16 @@ class FakeStmt {
     return { success: true };
   }
   async all() {
+    const s = this.sql;
+    if (s.startsWith("SELECT token_hash FROM sessions")) {
+      const [user_id] = this.args as [string];
+      return {
+        results: this.db.sessions
+          .filter((x) => x.user_id === user_id && x.revoked_at == null)
+          .map((x) => ({ token_hash: x.token_hash })),
+        success: true,
+      };
+    }
     return { results: [], success: true };
   }
 }
@@ -335,6 +353,49 @@ describe("session lifecycle", () => {
     // web it just made an account rather than resumed one.
     expect(a.created).toBe(true);
     expect(b.created).toBe(false);
+  });
+
+  // The helper a ban depends on. `resolveSession` never re-reads `users`, so flipping
+  // `users.status` alone leaves every existing session working for its full 90 days —
+  // a ban that does nothing and reports success.
+  describe("revokeAllSessions", () => {
+    it("ends every live session for one user and reports how many", async () => {
+      const env = makeEnv();
+      const a = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      const b = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      expect(await resolveSession(bearerReq(a.sessionToken), env)).not.toBeNull();
+      expect(await resolveSession(bearerReq(b.sessionToken), env)).not.toBeNull();
+
+      expect(await revokeAllSessions(env, a.userId)).toBe(2);
+
+      expect(await resolveSession(bearerReq(a.sessionToken), env)).toBeNull();
+      expect(await resolveSession(bearerReq(b.sessionToken), env)).toBeNull();
+      expect(env.DB.sessions.every((s: any) => s.revoked_at != null)).toBe(true);
+    });
+
+    it("leaves other accounts alone", async () => {
+      const env = makeEnv();
+      const mine = (await (await handleAuthSession(bearerReq(await makeToken(validClaims())), env)).json()) as any;
+      const theirs = (await (
+        await handleAuthSession(bearerReq(await makeToken(validClaims({ sub: "firebase-uid-2" }))), env)
+      ).json()) as any;
+      expect(theirs.userId).not.toBe(mine.userId);
+
+      expect(await revokeAllSessions(env, mine.userId)).toBe(1);
+
+      expect(await resolveSession(bearerReq(mine.sessionToken), env)).toBeNull();
+      expect(await resolveSession(bearerReq(theirs.sessionToken), env)).toEqual({ userId: theirs.userId });
+    });
+
+    it("is a no-op, not an error, for an account with nothing live", async () => {
+      const env = makeEnv();
+      expect(await revokeAllSessions(env, "AAAAH73X7P55T48R4CFHDED9CW")).toBe(0);
+    });
+
+    // ⚠️ The edge-cache purge is NOT covered here: node has no Cache API, so
+    // `edgeCache()` returns null and that half is skipped entirely. It is the half that
+    // decides whether a ban bites now or in up to SESSION_CACHE_MAX_TTL_S, and only a
+    // real request against a deployed Worker can prove it.
   });
 
   // Without X-Revoke-Session a renewed token stayed valid for its full 90 days

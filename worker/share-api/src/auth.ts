@@ -356,6 +356,46 @@ export async function handleAuthLogout(req: Request, env: AuthEnv): Promise<Resp
 }
 
 /**
+ * Revoke EVERY live session for [userId] and drop each one's edge-cache entry.
+ * Returns how many were revoked, so a caller can report "3 sessions ended".
+ *
+ * ⚠️ **This is what makes a ban actually bite.** [resolveSession] never re-reads `users`,
+ * so `users.status` is consulted only when a NEW session is minted (handleAuthSession) —
+ * flipping it alone leaves every existing session working for the remainder of its fixed,
+ * non-sliding 90 days, with the account still syncing, commenting and posting throughout.
+ * A status flip without this call is a ban that does nothing and reports success.
+ *
+ * The cache purge is the second half and is just as load-bearing: a positive session
+ * lookup is cached for up to SESSION_CACHE_MAX_TTL_S, so a D1 revocation alone is honoured
+ * only once that lapses. Purging is possible without holding any raw token because
+ * [sessionCacheKey] is derived from the stored `token_hash` — the same trick
+ * [handleAuthLogout] uses for one session, generalised to all of them.
+ *
+ * Best-effort on the cache, mandatory on D1: a cache delete that throws must not leave the
+ * revocation half-done, and its worst case is the 300s lag that already exists.
+ */
+export async function revokeAllSessions(env: AuthEnv, userId: string): Promise<number> {
+  const { results } = await env.DB.prepare(
+    "SELECT token_hash FROM sessions WHERE user_id = ? AND revoked_at IS NULL",
+  )
+    .bind(userId)
+    .all<{ token_hash: string }>();
+  const hashes = (results ?? []).map((r) => r.token_hash);
+
+  await env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+    .bind(Date.now(), userId)
+    .run();
+
+  const cache = edgeCache();
+  if (cache) {
+    for (const hash of hashes) {
+      await cache.delete(sessionCacheKey(hash)).catch(() => {});
+    }
+  }
+  return hashes.length;
+}
+
+/**
  * Resolve the Bearer session token on an authenticated request to its `userId`,
  * or null. Checks the Workers Cache API first so the common case costs no D1
  * read at all; a positive result is cached for at most SESSION_CACHE_MAX_TTL_S
