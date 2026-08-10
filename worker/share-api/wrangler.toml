@@ -115,6 +115,17 @@ routes = [
   # under `/api/admin/*`: that prefix is already flickto-scoring-api's, and a route
   # belongs to exactly one worker, so reusing it rejects the deploy outright.
   { pattern = "flickto.app/api/insights*", zone_name = "flickto.app" },
+  # The admin Users panel (src/usersAdmin.ts, src/devicesAdmin.ts). Same ADMIN_KEY gate
+  # and the same reason for not being under `/api/admin/*` as insights above.
+  #
+  # One pattern each: a route `*` matches any string INCLUDING `/`, so `/api/users*` covers
+  # the bare list, `/api/users/act` and `/api/users/{id}` together.
+  #
+  # ⚠️ `/api/users*` does NOT overlap the existing public `flickto.app/api/user/*`
+  # (singular) — different subtree, and not an exact duplicate, so the deploy is clean.
+  # Only an EXACTLY duplicated pattern is a deploy error; overlapping ones are fine.
+  { pattern = "flickto.app/api/users*", zone_name = "flickto.app" },
+  { pattern = "flickto.app/api/devices*", zone_name = "flickto.app" },
   # GIF picker (src/giphy.ts). Trailing `*` is load-bearing as always — routes
   # match the full URL including the query string, and every call carries `?q=`
   # or `?limit=`.

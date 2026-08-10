@@ -124,6 +124,8 @@ import {
 import { handleAdminCommentAction, handleAdminCommentReports } from "./commentsAdmin";
 import { handleModerationAct, handleModerationQueue } from "./moderationQueue";
 import { handleInsights } from "./insights";
+import { handleUserDetail, handleUsersAct, handleUsersList } from "./usersAdmin";
+import { handleDevicesAct, handleDevicesList } from "./devicesAdmin";
 import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } from "./feedback";
 import { handleKlipy } from "./klipy";
 import { handleVerifyPremiere, isPremiere } from "./premiere";
@@ -642,6 +644,23 @@ export default {
     // that prefix belongs to flickto-scoring-api, and Cloudflare gives a route to exactly
     // one worker, so reusing it REJECTS the whole deploy rather than merging.
     if (p === "/api/insights" && req.method === "GET") return handleInsights(req, env);
+
+    // ── The admin Users panel ──
+    //
+    // Own patterns (`/api/users*`, `/api/devices*`) for the same reason as insights above:
+    // `/api/admin/*` belongs to flickto-scoring-api. `/api/users` is also distinct from the
+    // existing PUBLIC `/api/user/*` (singular) — a different subtree, not a widening of it.
+    //
+    // ⚠️ `/api/users/act` is matched BEFORE the `{id}` route. `act` is a valid-looking id
+    // to any pattern loose enough to accept one, so an id-first order would send every
+    // action to the detail handler and 404 it.
+    if (p === "/api/users" && req.method === "GET") return handleUsersList(req, env);
+    if (p === "/api/users/act" && req.method === "POST") return handleUsersAct(req, env);
+    if (p === "/api/devices" && req.method === "GET") return handleDevicesList(req, env);
+    if (p === "/api/devices/act" && req.method === "POST") return handleDevicesAct(req, env);
+
+    const userDetail = p.match(/^\/api\/users\/([0-9A-HJKMNP-TV-Z]{26})$/);
+    if (userDetail && req.method === "GET") return handleUserDetail(req, env, userDetail[1]);
 
     // ── Account / data deletion (Google Play deletion policy) ──
     if (p === "/api/social/delete" && req.method === "POST") return handleSocialDelete(req, env);
