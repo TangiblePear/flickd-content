@@ -52,18 +52,29 @@ export interface PremiereEnv {
  */
 export interface PremiereRow {
   premiere_until?: number | null;
+  /**
+   * An admin-granted comp, from the Users panel. A SEPARATE column because
+   * [handleVerifyPremiere] owns `premiere_until` and overwrites it with whatever Play
+   * reports, including 0 — see migration 0031. Never written by this file.
+   */
+  premiere_comp_until?: number | null;
 }
 
 /**
- * Whether a row is entitled right now.
+ * Whether a row is entitled right now, from EITHER source — a Play subscription or an
+ * admin comp, whichever runs longer.
  *
- * `premiere_until` is an expiry, not a boolean, so it expires itself — there is no
- * cron to forget to run and no state to reconcile. Every read path must go through
- * this rather than testing the column directly, or "expired" and "never subscribed"
- * will drift apart somewhere.
+ * Both columns are expiries, not booleans, so they expire themselves — there is no cron
+ * to forget to run and no state to reconcile. Every read path must go through this rather
+ * than testing a column directly, or "expired", "never subscribed" and "comped" will
+ * drift apart somewhere.
+ *
+ * ⚠️ Every SELECT feeding this must fetch BOTH columns. A query that fetches only
+ * `premiere_until` yields `undefined` for the other, which reads as 0 and silently
+ * downgrades every comped account on that path — a missing badge with nothing logged.
  */
 export function isPremiere(row: PremiereRow | null | undefined, now = Date.now()): boolean {
-  return (row?.premiere_until ?? 0) > now;
+  return Math.max(row?.premiere_until ?? 0, row?.premiere_comp_until ?? 0) > now;
 }
 
 /**

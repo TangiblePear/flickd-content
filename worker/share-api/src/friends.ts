@@ -596,7 +596,8 @@ export async function handleGetFriendCards(
   // 2026-07-30: 1 of 5 active accounts was in exactly that state. The column is on its
   // way out (8c-3) and was never what authorised the card — the friendship edge is.
   const { results } = await env.DB.prepare(
-    `SELECT id, friend_code, push_friend_topic, premiere_until, picture_animated FROM users
+    `SELECT id, friend_code, push_friend_topic, premiere_until, premiere_comp_until, picture_animated
+       FROM users
       WHERE id IN (${placeholders}) AND status = 'active'`,
   )
     .bind(...allowed)
@@ -605,6 +606,7 @@ export async function handleGetFriendCards(
       friend_code: string | null;
       push_friend_topic: string | null;
       premiere_until: number | null;
+      premiere_comp_until: number | null;
       picture_animated: number | null;
     }>();
 

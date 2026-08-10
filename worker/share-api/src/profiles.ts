@@ -121,6 +121,11 @@ interface ProfileRow {
    * premiere.ts. See migration 0028.
    */
   premiere_until: number | null;
+  /**
+   * Joined from `users`. An admin-granted comp; `isPremiere` takes the max of this and
+   * `premiere_until`. See migration 0031.
+   */
+  premiere_comp_until: number | null;
   /** Joined from `users`. 1 = the stored picture animates; see visiblePictureUrl. */
   picture_animated: number | null;
   /** Joined from `users`. One-way latch derived from `first_install_at`; migration 0030. */
@@ -134,7 +139,8 @@ const PROFILE_COLUMNS =
   "p.user_id, p.display_name, p.avatar_id, p.border_id, p.picture_url, p.header_color, p.header_backdrop_url, " +
   "p.layout, p.friend_layout, p.public_layout, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
   "p.featured_achievements, p.personality_id, p.visibility, p.version, p.updated_at, " +
-  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.picture_animated, u.beta_tester";
+  "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.premiere_comp_until, " +
+  "u.picture_animated, u.beta_tester";
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {

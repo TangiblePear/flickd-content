@@ -103,6 +103,43 @@ describe("isPremiere", () => {
     expect(isPremiere({ premiere_until: now }, now)).toBe(false);
     expect(isPremiere({ premiere_until: now - 1 }, now)).toBe(false);
   });
+
+  // ── The admin comp (migration 0031) ────────────────────────────────────────
+  it("entitles on an admin comp alone, with no Play subscription", () => {
+    expect(isPremiere({ premiere_until: 0, premiere_comp_until: now + 1 }, now)).toBe(true);
+  });
+
+  it("takes the LONGER of the two, in either direction", () => {
+    // A comp outliving a lapsed subscription.
+    expect(isPremiere({ premiere_until: now - 1, premiere_comp_until: now + 1 }, now)).toBe(true);
+    // A subscription outliving an expired comp.
+    expect(isPremiere({ premiere_until: now + 1, premiere_comp_until: now - 1 }, now)).toBe(true);
+    // Both gone.
+    expect(isPremiere({ premiere_until: now - 1, premiere_comp_until: now - 1 }, now)).toBe(false);
+  });
+
+  it("comps expire themselves too", () => {
+    expect(isPremiere({ premiere_comp_until: now }, now)).toBe(false);
+    expect(isPremiere({ premiere_comp_until: now - 1 }, now)).toBe(false);
+  });
+
+  /**
+   * ⚠️ The regression the second column exists for.
+   *
+   * `handleVerifyPremiere` writes Play's answer to `premiere_until` and is entitled to
+   * write 0 — a refund, a cancellation, or a token Play has never heard of. Had the comp
+   * been stored in that column it would have been erased here, and only for people who
+   * HAVE a subscription: `PremiereVerifier.reconcile` returns early without a purchase
+   * token, so the bug would have passed every test on a comped non-subscriber and failed
+   * in production. See the note in migration 0031.
+   */
+  it("survives a Play verification that revokes the subscription", () => {
+    const comped = { premiere_until: now + 86_400_000, premiere_comp_until: now + 30 * 86_400_000 };
+    expect(isPremiere(comped, now)).toBe(true);
+    // Play reports the subscription is gone. Only its own column is touched.
+    const afterRevoke = { ...comped, premiere_until: 0 };
+    expect(isPremiere(afterRevoke, now)).toBe(true);
+  });
 });
 
 describe("POST /api/me/premiere/verify", () => {

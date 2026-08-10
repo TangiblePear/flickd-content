@@ -223,6 +223,8 @@ export interface CommentRow {
   picture_url?: string | null;
   /** Joined from `users`, not `profiles` — see premiere.ts and migration 0028. */
   premiere_until?: number | null;
+  /** Admin comp, joined from `users`. Both columns feed `isPremiere`; migration 0031. */
+  premiere_comp_until?: number | null;
   picture_animated?: number | null;
 }
 
@@ -284,7 +286,7 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
        c.media_id, c.media_url, c.media_w, c.media_h, c.hidden_at, c.deleted_at,
        c.created_at, c.updated_at,
        p.display_name, p.avatar_id, p.border_id, p.picture_url,
-       u.premiere_until, u.picture_animated`;
+       u.premiere_until, u.premiere_comp_until, u.picture_animated`;
 
 /**
  * A comment is only rendered — and only counted — when it has something to show.

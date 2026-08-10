@@ -1016,9 +1016,10 @@ async function handlePutMyPicture(req: Request, env: Env, ctx: ExecutionContext)
   // decides, and it reads `users.premiere_until`, which no request body can reach.
   const animated = isAnimatedImage(contentType, buf);
   if (animated) {
-    const row = await env.DB.prepare("SELECT premiere_until FROM users WHERE id = ?")
+    const row = await env.DB
+      .prepare("SELECT premiere_until, premiere_comp_until FROM users WHERE id = ?")
       .bind(session.userId)
-      .first<{ premiere_until: number | null }>();
+      .first<{ premiere_until: number | null; premiere_comp_until: number | null }>();
     if (!isPremiere(row)) return json({ error: "premiere_required" }, { status: 402 });
   }
   if (buf.byteLength > (animated ? MAX_ANIMATED_PICTURE_BYTES : MAX_PICTURE_BYTES)) return tooLarge();

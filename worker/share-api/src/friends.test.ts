@@ -138,7 +138,12 @@ class FakeStmt {
     // "omits a friend who never claimed a friendId" case was being produced by the
     // FAKE rather than by the handler. The real filter went in 9a and the column in
     // 8c-3; a card is now located by `friend_code` alone.
-    if (s.startsWith("SELECT id, friend_code, push_friend_topic, premiere_until, picture_animated FROM users WHERE id IN")) {
+    // Matched on a distinctive PREFIX rather than the full column list. Spelling out
+    // every column made this double break whenever the card query gained one — which
+    // it did in 0031 (`premiere_comp_until`), failing three tests that have nothing to
+    // do with entitlements. The prefix is still unambiguous: the only other `users`
+    // query below starts `SELECT id, push_friend_topic`.
+    if (s.startsWith("SELECT id, friend_code, push_friend_topic")) {
       return {
         results: this.db.users.filter((u) => a.includes(u.id) && u.status === "active") as T[],
       };
