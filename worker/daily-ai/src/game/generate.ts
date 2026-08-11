@@ -32,7 +32,7 @@ export interface GameEnv {
 const LATEST_KEY = "content/game/latest.json";
 const RECENT_KEY = "game-state/recent.json";
 const ANSWER_PREFIX = "game-state/answers/";
-const TITLE_INDEX = "titles.v1.json";
+const TITLE_INDEX = "titles.v2.json";
 
 /** Puzzle #1. Fixed forever — the number is cosmetic but it must never renumber. */
 const EPOCH_DATE = "2026-08-11";
@@ -58,8 +58,8 @@ type PublishedAnswer = {
   t: string;
   year: number;
   genreMask: number;
-  runtime: number;
-  buzzTier: number;
+  /** Audience score times ten, so clients compare integers. See the fixture. */
+  ratingTenths: number;
   posterUrl: string;
   backdropUrl: string;
 };
@@ -257,8 +257,7 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
       t: obfuscateTitle(chosen.title),
       year: chosen.year,
       genreMask: chosen.genreMask,
-      runtime: chosen.runtime,
-      buzzTier: chosen.buzzTier,
+      ratingTenths: chosen.ratingTenths,
       posterUrl: chosen.posterUrl,
       backdropUrl: chosen.backdropUrl,
     },

@@ -2,7 +2,7 @@
  * Builds the two static inputs One Take needs.
  *
  *   src/game/pool.ts                      the candidate answers, bundled INTO the worker
- *   content/content/game/titles.v1.json   the guess universe, published to R2
+ *   content/content/game/titles.v2.json   the OFFLINE guess universe, published to R2
  *
  * Run by hand, not in CI — the source is an 84 MB local file. Re-run when the catalogue
  * has grown enough to matter, look at the printed diff, commit both outputs.
@@ -13,8 +13,15 @@
  *
  * The pool is the list of titles that can be an answer. It ships inside the worker, which
  * has no fetch handler, so it is never served. Publishing it would hand anyone a 2,500-name
- * shortlist for every future puzzle. The guess index is the opposite: all ~31k titles, and
- * every client needs it to offer autocomplete, so it is public and immutable-cacheable.
+ * shortlist for every future puzzle. The guess index is the opposite: public and
+ * immutable-cacheable.
+ *
+ * ## The index is the OFFLINE path only
+ *
+ * Online, clients search Trakt directly -- which finds titles this catalogue does not have
+ * (Back to the Future 1985 and Jaws are both missing) and returns posters. The index is
+ * what autocomplete falls back to with no connection, so it deliberately carries NO poster
+ * data: that would triple its raw size for a path that does not render posters anyway.
  *
  * ## The genre vocabulary is duplicated here, once, deliberately
  *
@@ -36,7 +43,7 @@ const REPO_ROOT = resolve(HERE, "../../../..");
 const CATALOG_PATH = process.argv[2] ?? join(REPO_ROOT, "master_catalog.json");
 const FIXTURE_PATH = join(REPO_ROOT, "docs/game/grading-fixtures.json");
 const POOL_OUT = join(DAILY_AI, "src/game/pool.ts");
-const TITLES_OUT = join(FLICKD_CONTENT, "content/content/game/titles.v1.json");
+const TITLES_OUT = join(FLICKD_CONTENT, "content/content/game/titles.v2.json");
 
 // MUST match cloudflare-backend/src/catalogMeta.ts and GenreBitmask.kt. Append only.
 const GENRE_SLUGS = [
@@ -65,7 +72,20 @@ const TYPE_MOVIE = 0;
 const TYPE_SHOW = 1;
 
 const fixture = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
-const BUZZ_TIER_MIN_VOTES = fixture.buzzTierMinVotes;
+
+/**
+ * Minimum vote counts for the popularity tiers.
+ *
+ * These are NOT graded any more -- Buzz was removed as an axis because nobody has
+ * intuition for a popularity tier. They survive here for one job: BANDING the answer pool
+ * by difficulty, so Monday draws from the most-watched titles and Sunday from the least.
+ * That is a generator-only concern, which is why the thresholds moved out of the shared
+ * fixture and into this file when the axis went.
+ *
+ * Measured, not chosen: the most-voted title has 61,344 votes, so a 100,000 ceiling would
+ * leave the top tier permanently empty.
+ */
+const BUZZ_TIER_MIN_VOTES = [0, 250, 1000, 3000, 8000, 20000];
 
 const SLUG_BIT = new Map(GENRE_SLUGS.map((slug, i) => [slug, i]));
 
@@ -83,7 +103,6 @@ function encodeGenreMask(genres) {
   return mask;
 }
 
-/** Thresholds come from the fixture so there is one definition, not three. */
 function buzzTier(votes) {
   for (let i = BUZZ_TIER_MIN_VOTES.length - 1; i >= 0; i--) {
     if (votes >= BUZZ_TIER_MIN_VOTES[i]) return i;
@@ -94,14 +113,6 @@ function buzzTier(votes) {
 // ── self-check before producing anything ────────────────────────────────────
 
 {
-  const unknown = [];
-  for (const c of fixture.buzzTierCases) {
-    if (buzzTier(c.votes) !== c.expect) unknown.push(`${c.votes} -> ${buzzTier(c.votes)}, expected ${c.expect}`);
-  }
-  if (unknown.length) {
-    console.error("buzz tier thresholds disagree with the fixture:\n  " + unknown.join("\n  "));
-    process.exit(1);
-  }
   // The mask is written into JSON as a Number. 33 slugs is 33 bits, far inside the
   // 53-bit safe range — but if the vocabulary ever grows past 53 the index would start
   // shipping silently rounded masks, so fail here rather than there.
@@ -109,7 +120,15 @@ function buzzTier(votes) {
     console.error(`genre vocabulary is ${GENRE_SLUGS.length} slugs; a JSON number can no longer hold the mask exactly`);
     process.exit(1);
   }
-  console.log(`self-check ok (${fixture.buzzTierCases.length} tier cases, ${GENRE_SLUGS.length} genre slugs)`);
+  // The rating thresholds ARE shared, so make sure this file is reading the fixture the
+  // clients read -- a generator writing tenths against different bands than the clients
+  // grade with would be invisible until someone compared two devices.
+  if (typeof fixture.thresholds?.ratingHitTenths !== "number") {
+    console.error("grading-fixtures.json has no ratingHitTenths; is this the right file?");
+    process.exit(1);
+  }
+  console.log(`self-check ok (${GENRE_SLUGS.length} genre slugs, rating bands ` +
+    `${fixture.thresholds.ratingHitTenths}/${fixture.thresholds.ratingNearTenths} tenths)`);
 }
 
 // ── read ────────────────────────────────────────────────────────────────────
@@ -122,13 +141,23 @@ console.log(`  ${rows.length} rows`);
 const guessable = rows.filter((r) => r.title && r.year > 0 && Number.isFinite(r.tmdbId));
 console.log(`  ${guessable.length} guessable (title, year, tmdbId)`);
 
+/**
+ * Trakt's 0-10 rating as integer TENTHS: 7.8 becomes 78.
+ *
+ * Never ship the float. `7.8 - 7.5` is `0.30000000000000027` in both Kotlin and
+ * JavaScript, so a threshold expressed in decimals would depend on which side of the
+ * subtraction the implementation sat. Rounding once, here, means the clients only ever
+ * compare integers and cannot disagree on a boundary.
+ */
+const ratingTenths = (rating) =>
+  !rating || rating <= 0 ? 0 : Math.round(rating * 10);
+
 const titleRows = guessable.map((r) => [
   r.title,
   r.year,
   r.type === "SHOW" ? TYPE_SHOW : TYPE_MOVIE,
   Number(encodeGenreMask(r.genres)),
-  Math.max(0, Math.trunc(r.runtime ?? 0)),
-  buzzTier(r.voteCount ?? 0),
+  ratingTenths(r.rating),
   r.tmdbId,
 ]);
 
@@ -178,6 +207,7 @@ const pool = ranked.map(({ r }, i) => ({
   genres: (r.genres ?? []).filter((g) => SLUG_BIT.has(String(g).trim().toLowerCase())),
   genreMask: Number(encodeGenreMask(r.genres)),
   runtime: Math.max(0, Math.trunc(r.runtime)),
+  ratingTenths: ratingTenths(r.rating),
   buzzTier: buzzTier(r.voteCount ?? 0),
   posterUrl: r.posterUrl,
   backdropUrl: r.backdropUrl,
@@ -224,6 +254,8 @@ export type PoolEntry = {
   genres: string[];
   genreMask: number;
   runtime: number;
+  /** Audience score times ten. Buzz tier is kept only to BAND difficulty, never graded. */
+  ratingTenths: number;
   buzzTier: number;
   posterUrl: string;
   backdropUrl: string;
