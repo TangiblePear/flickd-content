@@ -41,6 +41,19 @@ foreach ($file in Get-ChildItem content/content/awards -File -Filter "*.json") {
     cmd /c "npx wrangler r2 object put $BUCKET/$key --file `"$($file.FullName)`" --ct application/json --remote"
 }
 
+# ── One Take guess index ──
+# The whole guess universe (~31k titles, ~1.4 MB), read once by every client for
+# autocomplete and for grading. The filename carries the version so it can be cached
+# hard and forever; content/game/latest.json names the one currently in use. Publish a
+# NEW version rather than overwriting, or clients holding the old file will grade
+# against a guess list the puzzle no longer agrees with.
+# Regenerate with: worker/daily-ai/scripts/build-game-data.mjs
+foreach ($file in Get-ChildItem content/content/game -File -Filter "*.json" -ErrorAction SilentlyContinue) {
+    $key = "content/game/$($file.Name)"
+    Write-Host "  $key" -ForegroundColor Gray
+    cmd /c "npx wrangler r2 object put $BUCKET/$key --file `"$($file.FullName)`" --ct application/json --remote"
+}
+
 # ── .well-known (Android App Links) ──
 if (Test-Path content/.well-known/assetlinks.json) {
     Write-Host "  .well-known/assetlinks.json" -ForegroundColor Gray
