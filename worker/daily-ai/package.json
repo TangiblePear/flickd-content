@@ -2,11 +2,15 @@
   "name": "daily-ai",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "trigger:once": "wrangler dev --test-scheduled"
+    "trigger:once": "wrangler dev --test-scheduled",
+    "test": "node --experimental-strip-types test/clues.test.mjs",
+    "_comment_game": "build-game-data regenerates the answer pool and the guess index from the local master_catalog.json. Run it deliberately, look at the printed band report, commit both outputs.",
+    "game:data": "node --max-old-space-size=6144 scripts/build-game-data.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240925.0",

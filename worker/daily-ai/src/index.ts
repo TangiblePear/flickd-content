@@ -1,6 +1,7 @@
 import { generateTitles } from "./gemini";
 import { pickPromptFor } from "./prompts";
 import { resolveTmdb } from "./tmdb";
+import { generateGameForDate } from "./game/generate";
 
 interface Env {
   CONTENT_BUCKET: R2Bucket;
@@ -29,8 +30,28 @@ export default {
   // No fetch handler — files are served directly via R2 public access
   // on the flickto-content bucket (mapped to flickto.app).
 
+  /**
+   * Two independent daily jobs share this cron because the Cloudflare account is at the
+   * hard five-cron-per-account limit and this worker already holds the R2 binding both
+   * need. They are isolated from each other on purpose: the AI list depends on Gemini and
+   * TMDB, the puzzle depends on the detail cache, and a bad day for one of those must not
+   * take the other down with it. An unhandled throw here would abandon whichever job had
+   * not run yet.
+   */
   async scheduled(event: ScheduledController, env: Env): Promise<void> {
-    await generateForDate(new Date(event.scheduledTime), env);
+    const at = new Date(event.scheduledTime);
+
+    try {
+      await generateForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: list generation failed", err);
+    }
+
+    try {
+      await generateGameForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: One Take generation failed", err);
+    }
   },
 };
 

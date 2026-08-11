@@ -6,9 +6,20 @@ compatibility_date = "2025-01-01"
 # bucket). This worker exists solely for the daily cron that generates the
 # list and writes it to R2.
 
-# Cron: 06:00 UTC every day.
+# Cron: 00:05 UTC every day.
+#
+# This slot runs BOTH daily jobs: the AI list and the One Take puzzle. The Cloudflare
+# account is at the hard five-cron-PER-ACCOUNT limit, so adding a second trigger would
+# mean taking one from another worker. Do not add one here without freeing a slot first.
+#
+# Moved from 06:00 so the puzzle rolls over at midnight UTC, which is what every other
+# daily game does and what players expect. 00:05 rather than 00:00 because a cron can
+# fire a moment early and `new Date(scheduledTime)` would then label the file with
+# yesterday's date -- five minutes of slack is cheaper than a date-off-by-one that only
+# shows up occasionally. The AI list is unaffected: it derives its own date the same way
+# and produces the same file it always did, five hours earlier in the day.
 [triggers]
-crons = ["0 6 * * *"]
+crons = ["5 0 * * *"]
 
 [[r2_buckets]]
 binding = "CONTENT_BUCKET"
