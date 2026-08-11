@@ -1,5 +1,13 @@
 import { describe, expect, it, vi, afterEach, beforeAll } from "vitest";
-import { handleVerifyPremiere, isPremiere, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
+import {
+  handleVerifyPremiere,
+  isPremiere,
+  readPremiereWire,
+  visibleBorderId,
+  visibleHeaderColor,
+  visiblePictureUrl,
+} from "./premiere";
+import { TestD1, seedUser, uid } from "./testD1";
 
 const USER = "AAAAH73X7P55T48R4CFHDED9CW";
 
@@ -356,5 +364,44 @@ describe("visibleHeaderColor", () => {
     expect(visibleHeaderColor("#FFD700,#8A6100", null, now)).toBe("#FFD700");
     expect(visibleHeaderColor("", null, now)).toBe("");
     expect(visibleHeaderColor(null, null, now)).toBe("");
+  });
+});
+
+// ── readPremiereWire ─────────────────────────────────────────────────────────
+// Real SQL against the real migrations: this reads a table the rest of this file
+// only ever fakes, and the whole point of the function is WHICH table it reads.
+
+describe("readPremiereWire", () => {
+  const DAY = 86_400_000;
+
+  it("returns both expiries so the client can tell paid from comped", async () => {
+    const db = new TestD1();
+    const paid = Date.now() + 10 * DAY;
+    const comp = Date.now() + 30 * DAY;
+    const a = seedUser(db, { id: uid(70), premiereUntil: paid, premiereCompUntil: comp });
+
+    expect(await readPremiereWire(db as never, a)).toEqual({
+      premiereUntil: paid,
+      premiereCompUntil: comp,
+    });
+  });
+
+  /**
+   * ⚠️ The reason this reads `users` and not `readProfileRow`. Someone who has never
+   * opened the social half of the app has no `profiles` row at all, and the profile join
+   * would hand them a silent 0 — comped by the admin, ordinary in the app, nothing logged.
+   */
+  it("answers for an account that has never written a profile", async () => {
+    const db = new TestD1();
+    const comp = Date.now() + 30 * DAY;
+    const a = seedUser(db, { id: uid(71), displayName: null, premiereCompUntil: comp });
+    expect(db.count("profiles")).toBe(0);
+
+    expect(await readPremiereWire(db as never, a)).toEqual({ premiereUntil: 0, premiereCompUntil: comp });
+  });
+
+  it("reads a missing account as no entitlement rather than throwing", async () => {
+    const db = new TestD1();
+    expect(await readPremiereWire(db as never, uid(72))).toEqual({ premiereUntil: 0, premiereCompUntil: 0 });
   });
 });

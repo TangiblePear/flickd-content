@@ -20,6 +20,7 @@ import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEn
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
+import { readPremiereWire } from "./premiere";
 import { maybeRollup, recordTelemetry, type TelemetryBlock, type TelemetryEnv } from "./telemetry";
 
 export type SyncEnv = FeedEnv & ProfileEnv & ListsEnv & MatchEnv & RetirementEnv & TelemetryEnv;
@@ -175,6 +176,15 @@ export async function handleSync(
   const achievements =
     achievementsRow && achievementsRow.version > achievementsHeld ? toAchievementsWire(achievementsRow) : null;
 
+  // The owner's own entitlement, so an admin comp reaches the device that has it.
+  //
+  // ⚠️ UNCONDITIONAL, and deliberately NOT carried inside `profile` above. A comp is
+  // written straight to `users` and bumps no `profiles.version`, so the version-gated
+  // object is null on precisely the sync that ought to deliver the news — the steady
+  // state, for a user whose profile has not changed in months. Riding it there is a
+  // field that is present in every test and absent in production.
+  const premiere = await readPremiereWire(env.DB, session.userId);
+
   // Has this account claimed a device friendId? It is the ONLY route from an account
   // to a push topic (topics are keyed by friendId, and the record lives in R2), so
   // without it `notifyAccount` finds nothing and every push silently does not happen.
@@ -236,6 +246,7 @@ export async function handleSync(
     lists,
     match,
     relay,
+    ...premiere,
     // Server-controlled so the date can move without an app release — a date baked
     // into a build cannot be corrected for anyone who never updates. Null until one
     // is set, which is the default, so this changes nothing until you schedule it.

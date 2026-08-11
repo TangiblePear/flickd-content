@@ -19,7 +19,7 @@ import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
-import { isPremiere, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
+import { isPremiere, readPremiereWire, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
 import { isBetaTester } from "./install";
 
 export interface ProfileEnv {
@@ -664,6 +664,10 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
   // case and must be read as "push yours", never as "you have none, adopt the blank".
   const settingsRow = await readSettingsRow(env, session.userId);
   const achievementsRow = await readAchievementsRow(env, session.userId);
+  // Top-level and read from `users`, for the reason `handleSync` gives at its own call
+  // site: `row` is null for an account that has never written a profile, and a comped
+  // user is exactly as likely to be one of those as anybody else.
+  const premiere = await readPremiereWire(env.DB, session.userId);
   return json({
     userId: session.userId,
     profile: row ? toOwnerWire(row) : null,
@@ -685,6 +689,7 @@ export async function handleBootstrap(req: Request, env: ProfileEnv, ctx?: Execu
     // refuse up front instead of letting someone type a comment that will 403 on the
     // next outbox sweep, minutes later and out of sight.
     postingSuspendedUntil: await postingSuspendedUntil(env.DB, session.userId),
+    ...premiere,
     serverTime: Date.now(),
   });
 }

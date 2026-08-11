@@ -78,6 +78,43 @@ export function isPremiere(row: PremiereRow | null | undefined, now = Date.now()
 }
 
 /**
+ * The owner's entitlement, as the client is told it.
+ *
+ * **Two expiries, not a boolean.** The client caches this and resolves it locally on
+ * every read, so a boolean would never expire on a device that is offline or simply not
+ * syncing — one comp would be permanent. Expiries expire themselves, which is the same
+ * property the columns have server-side.
+ *
+ * Both halves travel because the client needs to tell them apart: a comped user has no
+ * Play subscription, so "Manage subscription" must not be offered to them.
+ */
+export interface PremiereWire {
+  /** Play-verified expiry, from `users.premiere_until`. 0 = never, or lapsed. */
+  premiereUntil: number;
+  /** Admin comp expiry, from `users.premiere_comp_until`. 0 = none. */
+  premiereCompUntil: number;
+}
+
+/**
+ * Read [PremiereWire] for one account.
+ *
+ * ⚠️ Reads `users` DIRECTLY rather than reusing `readProfileRow`, which joins from
+ * `profiles`. An account that has never written a profile has no row there, and reusing
+ * it would hand exactly those people a silent 0 — entitled by the server, ordinary in the
+ * app, with nothing logged. One PK lookup, and D1 subrequests are free.
+ */
+export async function readPremiereWire(db: D1Database, userId: string): Promise<PremiereWire> {
+  const row = await db
+    .prepare("SELECT premiere_until, premiere_comp_until FROM users WHERE id = ?")
+    .bind(userId)
+    .first<PremiereRow>();
+  return {
+    premiereUntil: row?.premiere_until ?? 0,
+    premiereCompUntil: row?.premiere_comp_until ?? 0,
+  };
+}
+
+/**
  * The picture URL a reader should actually receive.
  *
  * An animated avatar is a Premiere feature, so it stops being served when the

@@ -61,6 +61,15 @@ class FakeStmt {
       const claimed = (this.db as any).friendIds?.get(this.args[0]) ?? "CLAIMED000000000";
       return ({ friend_id: claimed || null } as T);
     }
+    // The owner's entitlement, read straight off `users` so a comp reaches an account
+    // with no profile row. `users` is otherwise not modelled here, so the default is
+    // "no entitlement"; tests that care set `db.premiere`.
+    if (s.startsWith("SELECT premiere_until, premiere_comp_until FROM users")) {
+      return ((this.db as any).premiere?.get(this.args[0]) ?? {
+        premiere_until: 0,
+        premiere_comp_until: 0,
+      }) as T;
+    }
     throw new Error(`unhandled first(): ${s}`);
   }
   async all<T>(): Promise<{ results: T[] }> {
@@ -261,6 +270,43 @@ describe("POST /api/sync", () => {
 
     expect((await sync(env, "tok-me", { profileVersion: 8 })).profile).toBeNull();
     expect((await sync(env, "tok-me", { profileVersion: 7 })).profile.displayName).toBe("Pear2");
+  });
+
+  // ── Entitlement ─────────────────────────────────────────────────────────
+  //
+  // ⚠️ These two are the whole reason the entitlement is top-level. Both describe a
+  // steady state — nothing about the profile has changed — which is exactly when an
+  // admin comp needs to arrive.
+
+  it("carries the entitlement on a sync that returns NO profile", async () => {
+    const env = await env0();
+    const comp = NOW + 30 * 86_400_000;
+    env.DB.profiles.push({ user_id: ME, display_name: "Pear2", version: 8, updated_at: t(0) });
+    env.DB.premiere = new Map([[ME, { premiere_until: 0, premiere_comp_until: comp }]]);
+
+    // The client is already current, so `profile` is null — and a comp carried inside it
+    // would be delivered to nobody whose profile had not just changed.
+    const out = await sync(env, "tok-me", { profileVersion: 8 });
+    expect(out.profile).toBeNull();
+    expect(out.premiereCompUntil).toBe(comp);
+    expect(out.premiereUntil).toBe(0);
+  });
+
+  it("carries the entitlement for an account with no profile row at all", async () => {
+    const env = await env0();
+    const comp = NOW + 30 * 86_400_000;
+    env.DB.premiere = new Map([[ME, { premiere_until: 0, premiere_comp_until: comp }]]);
+
+    const out = await sync(env, "tok-me", {});
+    expect(out.profile).toBeNull();
+    expect(out.premiereCompUntil).toBe(comp);
+  });
+
+  it("reports no entitlement as zeroes, never as an absent field", async () => {
+    const env = await env0();
+    const out = await sync(env, "tok-me", {});
+    expect(out.premiereUntil).toBe(0);
+    expect(out.premiereCompUntil).toBe(0);
   });
 
   it("returns the profile to a client that has never seen one", async () => {

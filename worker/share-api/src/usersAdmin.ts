@@ -29,8 +29,9 @@ import { eraseAccount, type FriendsEnv } from "./friends";
 // "no end date" across every expiry column, so a single `>` covers every case everywhere.
 import { suspensionUntil, PERMANENT_UNTIL } from "./suspension";
 import { actorOf, recordAdminAction, adminActionsFor } from "./adminAudit";
+import { notifyAccount, type NotifyEnv } from "./notify";
 
-export interface UsersAdminEnv extends FriendsEnv {
+export interface UsersAdminEnv extends FriendsEnv, NotifyEnv {
   ADMIN_KEY?: string;
   MIN_SOCIAL_VERSION?: string;
 }
@@ -764,7 +765,36 @@ export function compUntil(durationMs: number): number | null {
   return durationMs === 0 ? PERMANENT_UNTIL : Date.now() + durationMs;
 }
 
-export async function handleUsersAct(req: Request, env: UsersAdminEnv): Promise<Response> {
+/**
+ * Wake every device on an account so it re-reads its entitlement now rather than at the
+ * next 6-hour sync.
+ *
+ * `notifyAccount` sends the bare `inbox_update` that already means "sync now" to every
+ * build in the field — see its own note on why inventing a new `type` would reach nobody.
+ * The client picks the comp up from the top-level `premiereCompUntil` that
+ * `handleSync` returns.
+ *
+ * Awaited rather than deferred to `ctx.waitUntil`: an admin action has no latency budget
+ * worth protecting, and `ctx?.waitUntil(f())` does not call `f` at all when `ctx` is
+ * undefined. Best-effort — a push that fails must not fail the comp that succeeded.
+ */
+async function wake(env: UsersAdminEnv, userId: string, notify: NotifyAccount): Promise<void> {
+  try {
+    await notify(env, userId);
+  } catch {
+    // Deliberately silent: the entitlement is already written, and the 6-hour sync is
+    // the fallback this only shortens.
+  }
+}
+
+/** Injectable so tests assert the wake without an FCM round trip. */
+export type NotifyAccount = (env: UsersAdminEnv, userId: string) => Promise<void>;
+
+export async function handleUsersAct(
+  req: Request,
+  env: UsersAdminEnv,
+  notify: NotifyAccount = notifyAccount,
+): Promise<Response> {
   if (!adminAuthorized(req, env as never)) return json({ error: "unauthorized" }, 401);
 
   let body: Record<string, unknown>;
@@ -844,12 +874,17 @@ export async function handleUsersAct(req: Request, env: UsersAdminEnv): Promise<
       if (until == null) return json({ error: "invalid_duration" }, 400);
       await env.DB.prepare("UPDATE users SET premiere_comp_until = ? WHERE id = ?").bind(until, userId).run();
       await log({ durationMs: Number(body.durationMs), until });
+      await wake(env, userId, notify);
       return json({ ok: true, until });
     }
 
     case "comp_revoke":
       await env.DB.prepare("UPDATE users SET premiere_comp_until = 0 WHERE id = ?").bind(userId).run();
       await log();
+      // Revoke wakes them too. A comp that is removed the moment the person opens the app
+      // and one that lingers for six hours are different products, and support removing a
+      // comp usually means it is going to somebody else.
+      await wake(env, userId, notify);
       return json({ ok: true });
 
     /**

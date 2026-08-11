@@ -103,6 +103,11 @@ class FakeStmt {
       const row = this.db.users.find((u) => u.id === this.args[0]);
       return row ? ({ until: row.posting_suspended_until ?? null } as T) : null;
     }
+    if (s.startsWith("SELECT premiere_until, premiere_comp_until FROM users")) {
+      // Off `users`, not off the profile join — which is the whole point of
+      // `readPremiereWire`, and why a bootstrap with no profile row still answers.
+      return (this.db.users.find((u) => u.id === this.args[0]) ?? null) as T | null;
+    }
     throw new Error(`FakeD1: unhandled first() for ${s}`);
   }
 
@@ -925,6 +930,28 @@ describe("bootstrap", () => {
     const env = await env0();
     const body = (await (await handleBootstrap(authed("tok-owner", "/api/me/bootstrap"), env)).json()) as any;
     expect(body.minSocialVersion).toBe(0);
+  });
+
+  /**
+   * Top-level, and read off `users` — so it survives the case immediately below, which is
+   * the normal state for anyone who has never opened the social half of the app.
+   */
+  it("carries the entitlement, including for a user with no profile", async () => {
+    const env = await env0();
+    const comp = Date.now() + 30 * 86_400_000;
+    env.DB.users.push({ id: OWNER, premiere_until: 0, premiere_comp_until: comp });
+
+    const body = (await (await handleBootstrap(authed("tok-owner", "/api/me/bootstrap"), env)).json()) as any;
+    expect(body.profile).toBeNull();
+    expect(body.premiereCompUntil).toBe(comp);
+    expect(body.premiereUntil).toBe(0);
+  });
+
+  it("reports no entitlement as zeroes rather than an absent field", async () => {
+    const env = await env0();
+    const body = (await (await handleBootstrap(authed("tok-owner", "/api/me/bootstrap"), env)).json()) as any;
+    expect(body.premiereUntil).toBe(0);
+    expect(body.premiereCompUntil).toBe(0);
   });
 });
 

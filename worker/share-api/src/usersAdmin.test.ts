@@ -15,7 +15,8 @@ const list = async (db: TestD1, env = testEnv(db)) => {
   };
 };
 
-const act = (db: TestD1, body: unknown, env = testEnv(db)) => handleUsersAct(adminPost("/api/users/act", body), env);
+const act = (db: TestD1, body: unknown, env = testEnv(db), notify: any = async () => {}) =>
+  handleUsersAct(adminPost("/api/users/act", body), env, notify);
 
 // The shim runs the real migrations, so a failure here means the schema and the queries
 // disagree — which is the whole point of not using a string-matching double.
@@ -472,6 +473,43 @@ describe("POST /api/users/act", () => {
 
     await act(db, { userId: a, action: "comp_revoke" });
     expect(db.one<{ c: number }>(`SELECT premiere_comp_until AS c FROM users WHERE id = ?`, a)!.c).toBe(0);
+  });
+
+  /**
+   * The comp is worth nothing until the device it belongs to knows about it. Without the
+   * wake it lands at the next 6-hour sync, which is a support conversation ("I gave you
+   * Premiere" / "I don't have it") rather than a feature.
+   */
+  it("wakes the account's devices on grant AND on revoke", async () => {
+    const db = new TestD1();
+    const a = seedUser(db, { id: uid(36) });
+    const woke: string[] = [];
+    const notify = async (_env: never, userId: string) => {
+      woke.push(userId);
+    };
+
+    await act(db, { userId: a, action: "comp_grant", durationMs: 30 * DAY }, testEnv(db), notify);
+    await act(db, { userId: a, action: "comp_revoke" }, testEnv(db), notify);
+    expect(woke).toEqual([a, a]);
+
+    // Nothing else wakes anyone — a ban already revokes sessions, and a wake there would
+    // only tell a banned device to go and be refused.
+    await act(db, { userId: a, action: "ban" }, testEnv(db), notify);
+    expect(woke).toHaveLength(2);
+  });
+
+  it("keeps the comp when the wake fails — a push is never load-bearing", async () => {
+    const db = new TestD1();
+    const a = seedUser(db, { id: uid(37) });
+    const notify = async () => {
+      throw new Error("FCM down");
+    };
+
+    const res = await act(db, { userId: a, action: "comp_grant", durationMs: 30 * DAY }, testEnv(db), notify);
+    expect(res.status).toBe(200);
+    expect(db.one<{ c: number }>(`SELECT premiere_comp_until AS c FROM users WHERE id = ?`, a)!.c).toBeGreaterThan(
+      Date.now(),
+    );
   });
 
   it("beta_grant is grant-only — the latch has no revoke", async () => {
