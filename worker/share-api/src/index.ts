@@ -109,6 +109,12 @@ import {
 } from "./comments";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
+  handleGetDistribution,
+  handleGetFriendsDay,
+  handleGetLeaderboard,
+  handlePostResult,
+} from "./dailyGame";
+import {
   handleConfirmPush,
   handleGetIntegrations,
   handleReconcileLease,
@@ -583,6 +589,18 @@ export default {
       if (pollSubject[3] === "poll" && req.method === "GET") return handleGetPoll(req, env, subject, ctx);
       if (pollSubject[3] === "vote" && req.method === "PUT") return handlePutVote(req, env, subject, ctx);
     }
+
+    // ── One Take, the daily puzzle ──
+    //
+    // ⚠️ Two of these four do NOT gate on a session, against the house style, and both
+    // are deliberate. The game is fully playable signed out and most web players never
+    // sign in, so a signed-out player must be able to read the distribution AND count
+    // towards it. `/result` verifies every submission against the archived answer whether
+    // or not a session is present; the session only decides how much gets written.
+    if (p === "/api/daily-game/result" && req.method === "POST") return handlePostResult(req, env, ctx);
+    if (p === "/api/daily-game/friends" && req.method === "GET") return handleGetFriendsDay(req, env, ctx);
+    if (p === "/api/daily-game/leaderboard" && req.method === "GET") return handleGetLeaderboard(req, env, ctx);
+    if (p === "/api/daily-game/distribution" && req.method === "GET") return handleGetDistribution(req, env);
 
     // One notifier for both comment paths. The collapse key is derived from the
     // KIND as well as the comment, so a "friend commented" notification and a

@@ -793,6 +793,17 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     // feedback is just this person's own words about the app. Anonymous submissions
     // carry no `user_id` and are unreachable from here by construction.
     env.DB.prepare("DELETE FROM feedback WHERE user_id = ?").bind(id),
+    // One Take, the daily puzzle (migration 0032). The per-day rows are a record of when
+    // this person played and how well, and the rollup is years of that summarised.
+    //
+    // `daily_game_anon_distribution` is deliberately NOT here, for the same reason as
+    // `telemetry_daily` above: it holds aggregate counts and no user ids, so there is
+    // nothing in it to erase. It also cannot double-count this account — signed-in
+    // results are counted by GROUPING `daily_game_results` on read rather than from a
+    // counter, precisely so deleting the rows below removes this person from every
+    // historical distribution automatically, with nothing left to unpick.
+    env.DB.prepare("DELETE FROM daily_game_results WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM daily_game_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_settings WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_achievements WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),

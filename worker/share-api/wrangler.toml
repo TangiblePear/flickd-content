@@ -148,7 +148,12 @@ routes = [
   # Its own pattern rather than a bare `/api/stats*`: that prefix is deliberately
   # left free, and a narrow pattern cannot accidentally swallow a future
   # per-user `/api/stats/...` route and serve it to the internet.
-  { pattern = "flickto.app/api/stats/global*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/stats/global*", zone_name = "flickto.app" },
+  # One Take. Every endpoint carries a path segment after the prefix, so `/*` covers them
+  # all -- and it must, because `/api/daily-game/*` does NOT match a bare
+  # `/api/daily-game`. `*` also spans the query string, which `?date=` and `?window=`
+  # rely on.
+  { pattern = "flickto.app/api/daily-game/*", zone_name = "flickto.app" }
 ]
 
 
@@ -182,6 +187,33 @@ routes = [
 [[r2_buckets]]
 binding = "BUCKET"
 bucket_name = "flickto-social"
+
+# One Take answers. READ ONLY, and only `game-state/answers/*` -- the plaintext answer
+# daily-ai writes for the day, which this worker verifies submissions against. That prefix
+# is not served: the Pages function routes `content/*` and nothing else, which is the whole
+# reason the answer can sit in a public bucket and still be private.
+[[r2_buckets]]
+binding = "CONTENT_BUCKET"
+bucket_name = "flickto-content"
+
+# ── Anonymous submit rate limit (NOT YET ENABLED) ──
+#
+# `POST /api/daily-game/result` accepts a session-less submission, because the game is
+# playable signed out and most web players never sign in. It is fully verified, so nobody
+# can inflate a score without knowing the answer -- but nothing stops one client posting
+# many VALID results to skew the public distribution.
+#
+# The handler already uses this binding when present and degrades to no limit when absent,
+# so enabling it is a config change with no code change:
+#
+#   [[unsafe.bindings]]
+#   name = "ANON_RATE_LIMITER"
+#   type = "ratelimit"
+#   namespace_id = "1001"
+#   simple = { limit = 10, period = 60 }
+#
+# Left commented because it has not been exercised against this account. A WAF rate-limit
+# rule on the route is the equivalent alternative and needs no binding at all.
 
 
 # Accounts, profiles, friendships, blocks (server-authoritative — NOT zero-knowledge).

@@ -260,6 +260,9 @@ class FakeStmt {
       ["DELETE FROM user_settings", "user_settings", "user_id"],
       ["DELETE FROM user_achievements", "user_achievements", "user_id"],
       ["DELETE FROM feedback", "feedback", "user_id"],
+      // Migration 0032, One Take. See the note in friends.test.ts.
+      ["DELETE FROM daily_game_results", "daily_game_results", "user_id"],
+      ["DELETE FROM daily_game_stats", "daily_game_stats", "user_id"],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM blocks", "blocks", null],
       ["DELETE FROM friendships", "friendships", null],
