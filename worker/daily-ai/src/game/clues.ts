@@ -10,6 +10,8 @@
  * the wire as text, because those are not translated anywhere.
  */
 
+import { castHash } from "./castHash";
+
 const DETAIL_BASE = "https://data.flickto.app";
 
 export type Clue =
@@ -20,7 +22,7 @@ export type Clue =
   | { kind: "creator"; person: string; role: "director" | "creator" };
 
 /** Only the fields used here; the real payload is far larger. */
-type TraktPerson = { name?: string };
+type TraktPerson = { name?: string; ids?: { trakt?: number } };
 type CastMember = { character?: string; characters?: string[]; person?: TraktPerson };
 type CrewMember = { job?: string; jobs?: string[]; person?: TraktPerson };
 type Crew = { directing?: CrewMember[]; "created by"?: CrewMember[] };
@@ -166,7 +168,33 @@ export type ClueSource = {
  * puzzle with a hole in it: only ~10,200 of the 31k titles have a cached detail payload,
  * and some of those are partial, so this rejects more often than it looks like it should.
  */
-export async function buildClues(source: ClueSource): Promise<Clue[] | null> {
+/** The clue ladder plus the answer's cast, hashed. */
+export type ClueBundle = { clues: Clue[]; castHashes: string[] };
+
+/**
+ * Every person credited on the answer, hashed.
+ *
+ * Cast AND crew: a shared director is as good a reveal as a shared actor, and the client
+ * shows whichever it finds. Deduplicated, and capped -- a long-running show can credit
+ * hundreds of people, and the payload is downloaded by every player every day.
+ */
+function castHashesFrom(payload: DetailPayload): string[] {
+  const people: Array<{ person?: TraktPerson }> = [
+    ...(payload.trakt_people?.cast ?? []),
+    ...Object.values(payload.trakt_people?.crew ?? {}).flat(),
+  ];
+  const ids = new Set<number>();
+  for (const p of people) {
+    const id = p.person?.ids?.trakt;
+    if (typeof id === "number" && id > 0) ids.add(id);
+  }
+  return [...ids].slice(0, MAX_CAST_HASHES).map(castHash);
+}
+
+/** Bounds the payload. Enough for a full principal cast and the main crew. */
+const MAX_CAST_HASHES = 60;
+
+export async function buildClues(source: ClueSource): Promise<ClueBundle | null> {
   const isShow = source.type === 1;
   const url = `${DETAIL_BASE}/${isShow ? "shows" : "movies"}/${source.tmdbId}.json`;
 
@@ -190,11 +218,13 @@ export async function buildClues(source: ClueSource): Promise<Clue[] | null> {
 
   const certification = payload.trakt?.certification?.trim() || null;
 
-  return [
+  const clues: Clue[] = [
     { kind: "decade", decade: Math.floor(source.year / 10) * 10 },
     { kind: "genres", genres: source.genres },
     { kind: "runtime", runtime: source.runtime, certification },
     { kind: "character", character },
     { kind: "creator", person: creator.person, role: creator.role },
   ];
+
+  return { clues, castHashes: castHashesFrom(payload) };
 }

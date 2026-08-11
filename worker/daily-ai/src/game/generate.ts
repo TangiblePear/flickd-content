@@ -73,6 +73,13 @@ type Puzzle = {
   answer: PublishedAnswer;
   reveal: { focusX: number; focusY: number };
   clues: Clue[];
+  /**
+   * Hashed Trakt person ids for everyone credited on the answer.
+   *
+   * Public, and safe to be: a client can test whether a person IT already fetched also
+   * appears here, and cannot read any of them. See castHash.ts.
+   */
+  castHashes: string[];
 };
 
 function isoDate(d: Date): string {
@@ -222,6 +229,7 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
 
   let chosen: PoolEntry | null = null;
   let clues: Clue[] | null = null;
+  let castHashes: string[] = [];
   let rejected = 0;
 
   for (const candidate of candidates.slice(0, MAX_CANDIDATES)) {
@@ -236,7 +244,8 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
     if (!built) { rejected++; continue; }
     if (!(await backdropLoads(candidate.backdropUrl))) { rejected++; continue; }
     chosen = candidate;
-    clues = built;
+    clues = built.clues;
+    castHashes = built.castHashes;
     break;
   }
 
@@ -263,6 +272,7 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
     },
     reveal: focusPoint(rand),
     clues,
+    castHashes,
   };
 
   // The private, plaintext copy share-api verifies submissions against. Written BEFORE
@@ -285,6 +295,6 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
 
   console.log(
     `one-take: ${iso} #${puzzle.puzzleNumber} band ${band} -> ${chosen.title} (${chosen.year}) ` +
-      `[${rejected} rejected, ${nextRecent.length} recent, ${pruned} answers pruned]`,
+      `[${rejected} rejected, ${castHashes.length} cast hashes, ${nextRecent.length} recent, ${pruned} answers pruned]`,
   );
 }
