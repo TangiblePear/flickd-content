@@ -24,6 +24,12 @@ crons = ["5 0 * * *"]
 [[r2_buckets]]
 binding = "CONTENT_BUCKET"
 bucket_name = "flickto-content"
+# `wrangler dev` REFUSES to start without this, and the refusal is correct: this worker's
+# scheduled handler overwrites content/game/latest.json and content/daily/latest.json, so a
+# dev session bound to the production bucket would publish whatever you were testing to
+# every user. Pointing this at "flickto-content" to silence the error would disable exactly
+# the guard you want. A throwaway bucket keeps `--test-scheduled` usable AND harmless.
+preview_bucket_name = "flickto-content-preview"
 
 [vars]
 TARGET_COUNT = "10"
