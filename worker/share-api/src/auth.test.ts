@@ -5,11 +5,17 @@ import {
   verifyFirebaseIdToken,
   handleAuthSession,
   handleAuthLogout,
+  handleAuthProbe,
   resolveSession,
   revokeAllSessions,
   __setKeyCacheForTest,
 } from "./auth";
 import worker from "./index";
+// The probe tests use the real-SQLite shim rather than the hand-written FakeD1 below.
+// That fake interprets the exact statements auth.ts issues, so it can only ever confirm
+// that a handler called something it already knows about — a LEFT JOIN against real
+// migrations is precisely the thing it cannot check.
+import { TestD1 } from "./testD1";
 
 const PROJECT_ID = "flickto-cf7b6";
 const ISS = `https://securetoken.google.com/${PROJECT_ID}`;
@@ -541,5 +547,105 @@ describe("routing", () => {
 
     const out = await worker.fetch(bearerReq(body.sessionToken, "https://flickto.app/api/auth/logout"), env, ctx);
     expect(out.status).toBe(204);
+  });
+});
+
+// ── POST /api/auth/probe ─────────────────────────────────────────────────────
+// The point of this endpoint is a NEGATIVE: it must answer the question without
+// creating anything. Every test here asserts the row counts are unchanged, because a
+// probe that quietly created the account would satisfy every other assertion.
+describe("POST /api/auth/probe", () => {
+  const probeEnv = () => ({ DB: new TestD1(), FIREBASE_PROJECT_ID: PROJECT_ID }) as any;
+  const probeReq = (token: string) =>
+    new Request("https://flickto.app/api/auth/probe", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+  const probe = async (env: any, claims: Record<string, unknown> = {}) => {
+    const res = await handleAuthProbe(probeReq(await makeToken(validClaims(claims))), env);
+    return { status: res.status, body: (await res.json()) as { exists?: boolean; hasName?: boolean } };
+  };
+
+  it("reports an unknown identity as not existing, and CREATES NOTHING", async () => {
+    const env = probeEnv();
+
+    const { status, body } = await probe(env);
+
+    expect(status).toBe(200);
+    expect(body).toEqual({ exists: false, hasName: false });
+    // The whole reason the endpoint exists. If these ever become 1, the probe has
+    // become the thing it was built to avoid.
+    expect(env.DB.count("users")).toBe(0);
+    expect(env.DB.count("identities")).toBe(0);
+    expect(env.DB.count("sessions")).toBe(0);
+  });
+
+  it("reports an existing account WITHOUT a name — the case that repairs the 15", async () => {
+    const env = probeEnv();
+    // Mint the account the way production does, then probe the same uid.
+    await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+    expect(env.DB.count("users")).toBe(1);
+
+    const { body } = await probe(env);
+
+    expect(body).toEqual({ exists: true, hasName: false });
+    expect(env.DB.count("users")).toBe(1); // still no second account
+  });
+
+  it("reports an existing account WITH a name, so a returning user is never re-asked", async () => {
+    const env = probeEnv();
+    const minted = await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+    const { userId } = (await minted.json()) as { userId: string };
+    await env.DB.prepare(
+      "INSERT INTO profiles (user_id, display_name, updated_at) VALUES (?, ?, ?)",
+    )
+      .bind(userId, "Sam", Date.now())
+      .run();
+
+    expect((await probe(env)).body).toEqual({ exists: true, hasName: true });
+  });
+
+  it("treats an empty display name as no name, matching the client's isBlank test", async () => {
+    const env = probeEnv();
+    const minted = await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+    const { userId } = (await minted.json()) as { userId: string };
+    await env.DB.prepare("INSERT INTO profiles (user_id, display_name, updated_at) VALUES (?, '', ?)")
+      .bind(userId, Date.now())
+      .run();
+
+    expect((await probe(env)).body).toEqual({ exists: true, hasName: false });
+  });
+
+  it("answers only for the presented identity — a different uid is a different answer", async () => {
+    const env = probeEnv();
+    await handleAuthSession(bearerReq(await makeToken(validClaims())), env);
+
+    // Same signing key, different subject: this is the strongest statement the endpoint
+    // makes. Knowing somebody's uid is not enough — you must hold THEIR token.
+    expect((await probe(env, { sub: "firebase-uid-2" })).body).toEqual({ exists: false, hasName: false });
+  });
+
+  it("401s an unverifiable token and 503s with no project configured, creating nothing", async () => {
+    const env = probeEnv();
+
+    const bad = await handleAuthProbe(probeReq(await makeToken(validClaims(), { sign: false })), env);
+    expect(bad.status).toBe(401);
+
+    const unconfigured = await handleAuthProbe(
+      probeReq(await makeToken(validClaims())),
+      { DB: new TestD1() } as any,
+    );
+    expect(unconfigured.status).toBe(503);
+    expect(env.DB.count("users")).toBe(0);
+  });
+
+  it("is reachable through the worker's router", async () => {
+    const env = probeEnv();
+    const res = await worker.fetch(probeReq(await makeToken(validClaims())), env, { waitUntil: () => {} } as any);
+    // 404/405 here would mean the path never reached the handler — the failure mode this
+    // codebase has hit twice, and which --dry-run and every unit test pass regardless.
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ exists: false, hasName: false });
   });
 });

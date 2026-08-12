@@ -75,6 +75,7 @@ const ROUTES: Array<[string, string, unknown?]> = [
   // Sessions and accounts
   ["POST", "/api/auth/session"],
   ["POST", "/api/auth/logout"],
+  ["POST", "/api/auth/probe"],
   ["POST", "/api/account/link", { idToken: "x" }],
   ["GET", "/api/account/resolve"],
   ["POST", "/api/account/unlink"],

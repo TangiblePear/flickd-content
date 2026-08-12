@@ -262,6 +262,65 @@ function edgeCache(): Cache | null {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 /**
+ * POST /api/auth/probe — does this Firebase identity already have an account, and
+ * does that account have a name? **Reads only. Never writes, on any path.**
+ *
+ * This exists so the client can find out what signing in would MEAN before doing it.
+ * `handleAuthSession` is find-or-create, so calling it is the act of creating the
+ * account — and the app cannot ask for a display name first, because a returning user
+ * already has one on the server and asking again is the "why is it asking me this
+ * again?" complaint. Those two requirements only conflict while signing in and creating
+ * the account are the same call. Firebase authentication alone creates nothing here, so
+ * this splits the question from the act:
+ *
+ *  - `exists && hasName` → exchange immediately; the client skips its name step.
+ *  - `exists && !hasName` → exchange immediately (the row is already there, so nothing
+ *    new is created) and ask for a name, which repairs the account.
+ *  - `!exists` → do NOT exchange. Collect a name first, then exchange with it.
+ *
+ * Measured 2026-08-12, and the reason this is worth a request: 15 of 37 accounts had no
+ * name, 14 of them had never uploaded anything at all, and **not one had ever returned**
+ * — every one abandoned within ~30 s of the Google account picker, two pages before the
+ * app asks for a name. Those rows are pure cost: an email address and nothing else.
+ *
+ * ⚠️ **Not an enumeration oracle, and that is load-bearing.** It answers only for the
+ * identity the presented token belongs to, and a Firebase ID token is only obtainable by
+ * that identity's owner. Never widen it to take a uid, an email or a userId — with any of
+ * those as input this becomes "does this person have a FlickTo account?", answerable by
+ * anybody. There is deliberately no GET form for the same reason.
+ *
+ * Costs one extra Worker request per sign-in, which is the binding constraint on the free
+ * plan — but a sign-in happens about once per install, so this is noise against 100k/day.
+ */
+export async function handleAuthProbe(req: Request, env: AuthEnv): Promise<Response> {
+  if (!env.FIREBASE_PROJECT_ID) return json({ error: "not_configured" }, 503);
+  const verified = await verifyFirebaseIdToken(bearer(req), env);
+  if (!verified) return json({ error: "unauthorized" }, 401);
+
+  // One LEFT JOIN rather than two round trips: an identity with no profile row is the
+  // common case here and must answer `hasName: false`, not 404.
+  const row = await env.DB.prepare(
+    `SELECT i.user_id, p.display_name
+       FROM identities i
+       LEFT JOIN profiles p ON p.user_id = i.user_id
+      WHERE i.provider = ? AND i.subject = ?`,
+  )
+    .bind("firebase", verified.uid)
+    .first<{ user_id: string; display_name: string | null }>();
+
+  // `status` is deliberately NOT consulted. A banned account still `exists`, and
+  // reporting otherwise would send the client down the create-a-new-account path — which
+  // `handleAuthSession` then refuses with a 403 anyway. Let that one handler own the
+  // decision; two places deciding what a ban means is how they come to disagree.
+  return json({
+    exists: !!row,
+    // Empty string counts as absent, matching the client's own `isBlank()` test — a name
+    // the user cannot see is not a name they have.
+    hasName: !!row?.display_name,
+  });
+}
+
+/**
  * POST /api/auth/session — exchange a Firebase ID token (Bearer) for a FlickTo
  * session token. Creates the `users` + `identities` rows on first sight of a
  * uid. Returns `{ sessionToken, userId, expiresAt, created }` where `expiresAt`

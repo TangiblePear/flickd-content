@@ -83,7 +83,7 @@ import { fcmConfig, notifyAccount } from "./notify";
 import { moderateImage } from "./moderation";
 import { reapOrphanProfiles, reapOldReports, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
-import { handleAuthSession, handleAuthLogout, resolveSession } from "./auth";
+import { handleAuthSession, handleAuthLogout, handleAuthProbe, resolveSession } from "./auth";
 import { handleClearFeed, handleGetFeed, handlePublishFeed } from "./feed";
 import {
   handleAcceptSharedList,
@@ -396,6 +396,11 @@ export default {
     // ── Firebase Auth sessions (Phase 1) ──
     if (p === "/api/auth/session" && req.method === "POST") return handleAuthSession(req, env);
     if (p === "/api/auth/logout" && req.method === "POST") return handleAuthLogout(req, env);
+    // Read-only, and asked BEFORE /session so the client can decide whether creating an
+    // account is the right thing to do. Covered by the existing `flickto.app/api/auth/*`
+    // route pattern — a new pattern is not needed, but a new path outside it would be
+    // invisible in production while every test and --dry-run passed.
+    if (p === "/api/auth/probe" && req.method === "POST") return handleAuthProbe(req, env);
 
     // ── Server-authoritative profiles (Phase 2). Session-authenticated. ──
     // NOT the same as /api/user/{friendId}/profile above, which is the E2EE
