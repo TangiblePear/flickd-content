@@ -8,7 +8,7 @@
 //
 // Run: npm test  (from worker/daily-ai)
 import { leaksTitle, pickCharacter } from "../src/game/clues.ts";
-import { obfuscateTitle, deobfuscateTitle } from "../src/game/obfuscate.ts";
+import { obfuscateTitle, deobfuscateTitle, obfuscatePayload, deobfuscatePayload } from "../src/game/obfuscate.ts";
 
 let fails = 0;
 const ok = (name, cond, extra = "") => {
@@ -107,6 +107,40 @@ const eq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b), `${
   ok("the encoded form is not the plaintext", obfuscateTitle("Fight Club") !== "Fight Club");
   ok("and does not contain it", !obfuscateTitle("Fight Club").includes("Fight"));
 }
+
+
+// ── the whole-payload envelope ──
+//
+// Obfuscating only the title published `tmdbId` in the clear beside it, which IS the
+// answer to anyone who pastes it into TMDB. These assert the blob round-trips AND that
+// nothing identifying survives in the published text.
+{
+  const secret = {
+    puzzleNumber: 1,
+    date: "2026-08-12",
+    titleIndex: "titles.v2.json",
+    answer: {
+      tmdbId: 37165, type: 0, t: obfuscateTitle("The Truman Show"), year: 1998,
+      genreMask: 72, ratingTenths: 82,
+      posterUrl: "https://media.trakt.tv/images/movies/000/023/734/posters/medium/x.jpg.webp",
+      backdropUrl: "https://media.trakt.tv/images/movies/000/023/734/fanarts/medium/y.jpg.webp",
+    },
+    reveal: { focusX: 0.5, focusY: 0.42 },
+    clues: [{ kind: "creator", person: "Peter Weir", role: "director" }],
+    castHashes: ["abc"],
+  };
+
+  const p = obfuscatePayload(secret);
+  const published = JSON.stringify({ schemaVersion: 2, keyVersion: 1, date: secret.date, p });
+
+  eq("payload round trips", deobfuscatePayload(p), secret);
+  ok("published text hides the tmdbId", !published.includes("37165"));
+  ok("published text hides the art host", !published.includes("trakt.tv"));
+  ok("published text hides the director", !published.includes("Weir"));
+  ok("published text hides the year", !published.includes("1998"));
+  ok("date stays readable for routing", JSON.parse(published).date === "2026-08-12");
+}
+
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

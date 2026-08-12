@@ -14,10 +14,10 @@
 //
 //   node --experimental-strip-types scripts/override-today.mjs <tmdbId> [YYYY-MM-DD]
 //
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { POOL } from "../src/game/pool.ts";
 import { buildClues } from "../src/game/clues.ts";
-import { obfuscateTitle, KEY_VERSION } from "../src/game/obfuscate.ts";
+import { obfuscateTitle, obfuscatePayload, KEY_VERSION } from "../src/game/obfuscate.ts";
 
 const tmdbId = Number(process.argv[2]);
 const iso = process.argv[3] ?? new Date().toISOString().slice(0, 10);
@@ -65,7 +65,7 @@ if (!built) {
 const reveal = { focusX: 0.5, focusY: 0.42 };
 
 const puzzle = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   keyVersion: KEY_VERSION,
   puzzleNumber: daysBetween(EPOCH_DATE, iso) + 1,
   date: iso,
@@ -94,9 +94,31 @@ const answer = {
   title: entry.title,
 };
 
-writeFileSync("latest.json", JSON.stringify(puzzle));
+// Published shape: three routing fields and one blob. Obfuscating only the title left
+// `tmdbId` in the clear beside it, which IS the answer to anyone who pastes it into TMDB.
+const { schemaVersion, keyVersion, ...secret } = puzzle;
+const published = { schemaVersion, keyVersion, date: iso, p: obfuscatePayload(secret) };
+
+// ⚠️ The no-repeat memory. The cron filters candidates on this list, so a title published
+// by hand that never lands in it can be picked again by the cron a few weeks later. Reads
+// an existing recent.json from the working directory when there is one -- download the
+// live copy first for a mid-life override; after a reset, starting fresh is correct.
+const RECENT_LIMIT = 365;
+const priorRecent = existsSync("recent.json")
+  ? (JSON.parse(readFileSync("recent.json", "utf8")).tmdbIds ?? [])
+  : [];
+const tmdbIds = [entry.tmdbId, ...priorRecent.filter((id) => id !== entry.tmdbId)]
+  .slice(0, RECENT_LIMIT);
+
+writeFileSync("latest.json", JSON.stringify(published));
 writeFileSync(`answer-${iso}.json`, JSON.stringify(answer));
+writeFileSync("recent.json", JSON.stringify({ tmdbIds, updatedAt: Date.now() }));
 
 console.log(`puzzle #${puzzle.puzzleNumber}  ${iso}`);
 console.log(`clues: ${puzzle.clues.length}  castHashes: ${puzzle.castHashes.length}`);
-console.log("wrote latest.json and answer-" + iso + ".json");
+console.log(
+  priorRecent.length
+    ? `recent.json: ${entry.tmdbId} prepended to ${priorRecent.length} existing`
+    : `recent.json: started fresh with ${entry.tmdbId} (no prior file found)`,
+);
+console.log("wrote latest.json, answer-" + iso + ".json and recent.json");

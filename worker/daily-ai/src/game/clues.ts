@@ -10,7 +10,7 @@
  * the wire as text, because those are not translated anywhere.
  */
 
-import { castHash } from "./castHash";
+import { castHash } from "./castHash.ts";
 
 const DETAIL_BASE = "https://data.flickto.app";
 

@@ -39,6 +39,27 @@ const KEY = "flickto-one-take-2026";
 const KEY_BYTES = new TextEncoder().encode(KEY);
 
 /**
+ * The whole puzzle, as one blob.
+ *
+ * ⚠️ Obfuscating only the TITLE was close to useless: the payload published `tmdbId`
+ * beside it, which IS the answer to anyone who pastes it into TMDB, plus a poster URL that
+ * shows the film, the director, and a character name. One field was hidden and the field
+ * that gives the game away was not.
+ *
+ * Same scheme, same key, same caveats as below — this is still obfuscation, and a client
+ * that can grade offline must be able to read it. What it buys is CONSISTENCY: opening
+ * `latest.json` now yields noise rather than an id to look up.
+ */
+export function obfuscatePayload(payload: unknown): string {
+  return obfuscateTitle(JSON.stringify(payload));
+}
+
+/** Present so the worker's own tests can prove a round trip. */
+export function deobfuscatePayload<T>(encoded: string): T {
+  return JSON.parse(deobfuscateTitle(encoded)) as T;
+}
+
+/**
  * UTF-8 -> XOR with the repeating key -> base64.
  *
  * Goes through bytes rather than characters so non-ASCII titles survive intact; the

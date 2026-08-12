@@ -23,7 +23,7 @@
  */
 import { POOL, type PoolEntry } from "./pool";
 import { buildClues, type Clue } from "./clues";
-import { obfuscateTitle, KEY_VERSION } from "./obfuscate";
+import { obfuscateTitle, obfuscatePayload, KEY_VERSION } from "./obfuscate";
 
 export interface GameEnv {
   CONTENT_BUCKET: R2Bucket;
@@ -76,7 +76,7 @@ type PublishedAnswer = {
 };
 
 type Puzzle = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   keyVersion: number;
   puzzleNumber: number;
   date: string;
@@ -199,6 +199,26 @@ async function archiveCurrent(bucket: R2Bucket, todayIso: string): Promise<void>
   await putJson(bucket, `content/game/${current.date}.json`, current);
 }
 
+/**
+ * What actually gets published: three routing fields and one opaque blob.
+ *
+ * `date` and the two versions stay OUTSIDE so a client can tell what it is holding, and
+ * whether it can decode it at all, without decoding first. Everything that describes the
+ * answer — the id, the art, the clues, the reveal — goes inside.
+ *
+ * ⚠️ schemaVersion 2 is a FLAG DAY. A v1 client reads `{date, p}`, finds no `answer`, and
+ * fails to parse. That was acceptable exactly once: on the day the game was reset to #1
+ * with no players. It will not be acceptable again.
+ */
+function envelope(puzzle: Puzzle) {
+  const { schemaVersion, keyVersion, ...secret } = puzzle;
+  // `date` is deliberately in BOTH: outside for routing, inside so the decoded puzzle is
+  // self-contained. A client that decodes the blob gets a complete object rather than one
+  // it has to stitch back together from two places, and a mismatch between the two is
+  // detectable rather than silent.
+  return { schemaVersion, keyVersion, date: puzzle.date, p: obfuscatePayload(secret) };
+}
+
 /** Answer files outlive their backfill window, then go. */
 async function pruneAnswers(bucket: R2Bucket, todayIso: string): Promise<number> {
   const listed = await bucket.list({ prefix: ANSWER_PREFIX, limit: 1000 });
@@ -266,7 +286,7 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
   }
 
   const puzzle: Puzzle = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     keyVersion: KEY_VERSION,
     puzzleNumber: daysBetween(EPOCH_DATE, iso) + 1,
     date: iso,
@@ -297,7 +317,7 @@ export async function generateGameForDate(date: Date, env: GameEnv): Promise<voi
   });
 
   await archiveCurrent(bucket, iso);
-  await putJson(bucket, LATEST_KEY, puzzle);
+  await putJson(bucket, LATEST_KEY, envelope(puzzle));
 
   const nextRecent = [chosen.tmdbId, ...recent].slice(0, RECENT_LIMIT);
   await putJson(bucket, RECENT_KEY, { tmdbIds: nextRecent, updatedAt: Date.now() });
