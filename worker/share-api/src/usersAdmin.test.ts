@@ -61,6 +61,44 @@ describe("GET /api/users", () => {
     expect(u.flags.noEmail).toBe(true);
   });
 
+  // Regression, measured in production 2026-08-12. `noProfile` required BOTH columns to
+  // be null, i.e. no row at all, so a row that exists with no name in it drew as unnamed
+  // with no flag beside it — the one state the roster cannot explain. `seedUser` cannot
+  // express this (it skips the row entirely for a null name), so the row is written here.
+  it("flags a profile row that exists but carries no name", async () => {
+    const db = new TestD1();
+    seedUser(db, { id: uid(1), email: "sam@example.com", displayName: null });
+    // Exactly what the blank client push left behind: version 1, no name, default layout.
+    db.prepare(
+      "INSERT INTO profiles (user_id, display_name, updated_at, version, visibility) VALUES (?, NULL, ?, 1, 'friends')",
+    )
+      .bind(uid(1), Date.now())
+      .run();
+
+    const u = (await list(db)).users[0];
+    expect(u.displayName).toBeNull();
+    expect(u.profileUpdatedAt).not.toBeNull();
+    expect(u.flags.noProfile).toBe(true);
+  });
+
+  // The empty string reaches the same conclusion by a different route, and the panel
+  // renders both identically — so the flag must not distinguish them either.
+  it("flags an empty display name as no profile", async () => {
+    const db = new TestD1();
+    seedUser(db, { id: uid(1), email: "sam@example.com", displayName: "" });
+
+    const u = (await list(db)).users[0];
+    expect(u.flags.noProfile).toBe(true);
+  });
+
+  it("does not flag an account whose profile carries a name", async () => {
+    const db = new TestD1();
+    seedUser(db, { id: uid(1), email: "sam@example.com", displayName: "Sam" });
+
+    const u = (await list(db)).users[0];
+    expect(u.flags.noProfile).toBe(false);
+  });
+
   it("carries full identity — the whole difference from the Insights roster", async () => {
     const db = new TestD1();
     seedUser(db, { id: uid(2), email: "jamie@example.com", displayName: "Jamie R" });

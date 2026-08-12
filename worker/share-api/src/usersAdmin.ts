@@ -528,7 +528,23 @@ export async function handleUsersList(req: Request, env: UsersAdminEnv): Promise
          * it scores 0 and would sit here forever.
          */
         belowFloor: floor > 0 && t.versionCode != null && t.versionCode < floor,
-        noProfile: u.display_name == null && u.profile_updated_at == null,
+        /**
+         * No usable profile — which is NOT the same as no `profiles` row.
+         *
+         * ⚠️ This used to require `profile_updated_at == null` as well, i.e. no row at
+         * all, and so said nothing about a row that exists with no name in it. The
+         * roster then showed an unnamed account with no flag beside it, which reads as
+         * "named, but the name is missing" — the one reading that is impossible. Found
+         * 2026-08-12: `version = 1`, every column NULL, `layout` at its default,
+         * written by a client that pushed before the user had typed a name.
+         *
+         * Keyed on the display name alone, because that is what the panel actually
+         * renders and what a support question is about. `''` counts too: the client
+         * sends all 14 fields on every save, so an unset name arrives as an empty
+         * string and `str()` stores NULL — but a row written by any other path could
+         * hold the empty string, and both draw as "unnamed".
+         */
+        noProfile: !u.display_name,
         noEmail: !u.email,
         /** What the device believes about its entitlement, against what the server knows. */
         premiumMismatch: t.clientPremium != null && t.clientPremium !== isPremiere(u, now),
