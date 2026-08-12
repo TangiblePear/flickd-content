@@ -113,6 +113,7 @@ import {
   handleGetFriendsDay,
   handleGetLeaderboard,
   handleGetMine,
+  handleGetOpen,
   handlePostResult,
 } from "./dailyGame";
 import {
@@ -598,6 +599,10 @@ export default {
     // sign in, so a signed-out player must be able to read the distribution AND count
     // towards it. `/result` verifies every submission against the archived answer whether
     // or not a session is present; the session only decides how much gets written.
+    // One call to open the game: mine + stats + distribution + friends + all four
+    // leaderboard windows + the caller's own name and face. Works signed out, returning
+    // just the public distribution. The endpoints below stay for shipped app builds.
+    if (p === "/api/daily-game/open" && req.method === "GET") return handleGetOpen(req, env, ctx);
     if (p === "/api/daily-game/result" && req.method === "POST") return handlePostResult(req, env, ctx);
     if (p === "/api/daily-game/mine" && req.method === "GET") return handleGetMine(req, env, ctx);
     if (p === "/api/daily-game/friends" && req.method === "GET") return handleGetFriendsDay(req, env, ctx);

@@ -22,6 +22,7 @@
  * and would need server-validated guessing first. See docs/game/grading-fixtures.json.
  */
 import { resolveSession } from "./auth";
+import { visiblePictureUrl } from "./premiere";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -417,7 +418,32 @@ export async function handlePostResult(
   );
 
   const stats = await recomputeStats(env, session.userId);
-  return json({ accepted: verified.length, stats });
+
+  /*
+   * The round's fresh numbers ride back with the submission.
+   *
+   * The client used to POST here and then immediately GET /distribution, /friends and
+   * /leaderboard to redraw the reveal — four round trips for one event. Computing them
+   * here is also strictly MORE correct: they are read after this row has landed, so the
+   * player's own result is already counted. The follow-up GETs were racing their own
+   * write and could answer from before it.
+   *
+   * Keyed to the LATEST day submitted rather than today: a backfill flush posts a
+   * fortnight at once, and the day the player just finished is the one they are looking
+   * at. `?date=` overrides it for an archive replay.
+   */
+  const asked = new URL(req.url).searchParams.get("date");
+  const forDate =
+    asked && DATE_RE.test(asked)
+      ? asked
+      : verified.reduce((latest, v) => (v.date > latest ? v.date : latest), verified[0].date);
+
+  return json({
+    accepted: verified.length,
+    stats,
+    date: forDate,
+    ...(await readRoundState(env, session.userId, forDate)),
+  });
 }
 
 async function bumpAnonDistribution(env: DailyGameEnv, v: VerifiedResult): Promise<void> {
@@ -455,45 +481,11 @@ export async function handleGetMine(
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
-  const today = todayIso();
   const asked = new URL(req.url).searchParams.get("since");
-  const earliest = new Date(Date.parse(today + "T00:00:00Z") - BACKFILL_DAYS * 86_400_000)
-    .toISOString()
-    .slice(0, 10);
+  const earliest = backfillFloor();
   const since = asked && DATE_RE.test(asked) && asked > earliest ? asked : earliest;
 
-  const { results } = await env.DB.prepare(
-    `SELECT date, puzzle_number, guess_count, solved, score, guesses, guess_types
-       FROM daily_game_results
-      WHERE user_id = ?1 AND date >= ?2
-      ORDER BY date DESC`,
-  )
-    .bind(session.userId, since)
-    .all<{
-      date: string;
-      puzzle_number: number;
-      guess_count: number;
-      solved: number;
-      score: number;
-      guesses: string;
-      guess_types: string;
-    }>();
-
-  const stats = await readStats(env, session.userId);
-
-  return json({
-    since,
-    results: (results ?? []).map((r) => ({
-      date: r.date,
-      puzzleNumber: r.puzzle_number,
-      guessCount: r.guess_count,
-      solved: r.solved === 1,
-      score: r.score,
-      guesses: parseGuesses(r.guesses),
-      types: parseGuesses(r.guess_types),
-    })),
-    stats,
-  });
+  return json(await readMine(env, session.userId, since));
 }
 
 /** Stored as JSON text; a malformed row degrades to "no grid", never to a failed read. */
@@ -519,35 +511,7 @@ export async function handleGetFriendsDay(
   const date = new URL(req.url).searchParams.get("date") ?? todayIso();
   if (!DATE_RE.test(date)) return json({ error: "invalid_date" }, 400);
 
-  const { results } = await env.DB.prepare(
-    `SELECT r.user_id, r.guess_count, r.solved, r.score, p.display_name, p.avatar_id
-       FROM daily_game_results r
-       LEFT JOIN profiles p ON p.user_id = r.user_id
-      WHERE r.date = ?1
-        AND r.user_id IN (
-          SELECT CASE WHEN f.user_a = ?2 THEN f.user_b ELSE f.user_a END
-            FROM friendships f
-           WHERE (f.user_a = ?2 OR f.user_b = ?2) AND f.state = 'accepted'
-        )
-      ORDER BY r.solved DESC, r.guess_count ASC`,
-  )
-    .bind(date, session.userId)
-    .all<{
-      user_id: string; guess_count: number; solved: number; score: number;
-      display_name: string | null; avatar_id: string | null;
-    }>();
-
-  return json({
-    date,
-    friends: (results ?? []).map((r) => ({
-      userId: r.user_id,
-      displayName: r.display_name,
-      avatarId: r.avatar_id,
-      guessCount: r.guess_count,
-      solved: r.solved === 1,
-      score: r.score,
-    })),
-  });
+  return json({ date, friends: await readFriendsDay(env, session.userId, date) });
 }
 
 /**
@@ -569,72 +533,10 @@ export async function handleGetLeaderboard(
   // today | week | month | all. Anything unrecognised falls back to week, which is what
   // every existing client sends and what the finish panel still asks for.
   const asked = new URL(req.url).searchParams.get("window");
-  const window = asked === "all" || asked === "today" || asked === "month" ? asked : "week";
+  const window: BoardWindow =
+    asked === "all" || asked === "today" || asked === "month" ? asked : "week";
 
-  /** Days INCLUDED, counting today. `all` reads the lifetime rollup instead. */
-  const spanDays: Record<string, number> = { today: 1, week: 7, month: 30 };
-
-  // Friends PLUS the caller: a leaderboard you are absent from is not a leaderboard.
-  const membership = `(
-      SELECT CASE WHEN f.user_a = ?1 THEN f.user_b ELSE f.user_a END
-        FROM friendships f
-       WHERE (f.user_a = ?1 OR f.user_b = ?1) AND f.state = 'accepted'
-      UNION SELECT ?1
-    )`;
-
-  const query =
-    window === "all"
-      ? `SELECT s.user_id, s.total_score AS score, s.played, s.wins, s.current_streak,
-                p.display_name, p.avatar_id
-           FROM daily_game_stats s
-           LEFT JOIN profiles p ON p.user_id = s.user_id
-          WHERE s.user_id IN ${membership}
-          ORDER BY score DESC, s.wins DESC`
-      : `SELECT r.user_id, SUM(r.score) AS score, COUNT(*) AS played,
-                SUM(r.solved) AS wins, 0 AS current_streak,
-                p.display_name, p.avatar_id
-           FROM daily_game_results r
-           LEFT JOIN profiles p ON p.user_id = r.user_id
-          WHERE r.date >= ?2
-            AND r.user_id IN ${membership}
-          GROUP BY r.user_id
-          ORDER BY score DESC, wins DESC`;
-
-  // -1 because the span INCLUDES today: a 7-day week is today plus the six before it,
-  // and an off-by-one here silently makes every window a day too wide.
-  //
-  // ⚠️ `all` has no span, and `new Date(NaN).toISOString()` THROWS rather than returning
-  // anything — reading spanDays unguarded would have turned the all-time leaderboard into
-  // a 500 while every other window kept working.
-  const since =
-    window === "all"
-      ? null
-      : new Date(Date.now() - (spanDays[window] - 1) * 86_400_000).toISOString().slice(0, 10);
-  const stmt =
-    since === null
-      ? env.DB.prepare(query).bind(session.userId)
-      : env.DB.prepare(query).bind(session.userId, since);
-
-  const { results } = await stmt.all<{
-    user_id: string; score: number; played: number; wins: number;
-    current_streak: number; display_name: string | null; avatar_id: string | null;
-  }>();
-
-  return json({
-    window,
-    since,
-    entries: (results ?? []).map((r, i) => ({
-      rank: i + 1,
-      userId: r.user_id,
-      displayName: r.display_name,
-      avatarId: r.avatar_id,
-      score: r.score ?? 0,
-      played: r.played ?? 0,
-      wins: r.wins ?? 0,
-      currentStreak: r.current_streak ?? 0,
-      isSelf: r.user_id === session.userId,
-    })),
-  });
+  return json(await readBoardWindow(env, session.userId, window));
 }
 
 /**
@@ -652,7 +554,181 @@ export async function handleGetLeaderboard(
 export async function handleGetDistribution(req: Request, env: DailyGameEnv): Promise<Response> {
   const date = new URL(req.url).searchParams.get("date") ?? todayIso();
   if (!DATE_RE.test(date)) return json({ error: "invalid_date" }, 400);
+  return json(
+    await readDistribution(env, date),
+    200,
+    // Short: it moves all day as people play, and a stale percentile is worse than a
+    // slightly expensive one.
+    { "Cache-Control": "public, max-age=60" },
+  );
+}
 
+/* ══════════════════════════════════════════════════════════════════════════
+   The bundle
+   ══════════════════════════════════════════════════════════════════════════
+
+   Opening the game used to cost up to nine round trips: /mine, /distribution,
+   /friends, /leaderboard once per window, /me/profile, and /friends/cards for
+   the faces. Every one of them re-resolved the session and re-ran the same
+   friendship membership query.
+
+   `/api/me/bootstrap` already makes this argument for the rest of the site —
+   "the Worker deliberately bundles them because Worker requests bind far
+   tighter than rows". This is that, for the game.
+
+   ⚠️ The individual endpoints STAY. Shipped Android builds call them and always
+   will. These readers are the single implementation and the old handlers are
+   thin wrappers, so the two can never drift.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/** Friends PLUS the caller: a leaderboard you are absent from is not a leaderboard. */
+const MEMBERSHIP_SQL = `(
+      SELECT CASE WHEN f.user_a = ?1 THEN f.user_b ELSE f.user_a END
+        FROM friendships f
+       WHERE (f.user_a = ?1 OR f.user_b = ?1) AND f.state = 'accepted'
+      UNION SELECT ?1
+    )`;
+
+/** Accepted friends only — the caller is deliberately NOT in this one. */
+const FRIENDS_ONLY_SQL = `(
+          SELECT CASE WHEN f.user_a = ?2 THEN f.user_b ELSE f.user_a END
+            FROM friendships f
+           WHERE (f.user_a = ?2 OR f.user_b = ?2) AND f.state = 'accepted'
+        )`;
+
+type FaceRow = {
+  display_name: string | null;
+  avatar_id: string | null;
+  picture_url: string | null;
+  picture_animated: number | null;
+  premiere_until: number | null;
+  premiere_comp_until: number | null;
+};
+
+/**
+ * ⚠️ A picture goes through `visiblePictureUrl`, never straight out of the column.
+ *
+ * An animated picture is a Premiere cosmetic and is withheld once the subscription
+ * lapses. Selecting `p.picture_url` and returning it would publish it anyway — the
+ * gating lives in the read, not in the storage.
+ */
+const faceOf = (r: FaceRow) => ({
+  displayName: r.display_name,
+  avatarId: r.avatar_id,
+  pictureUrl: visiblePictureUrl(r.picture_url, r) || null,
+});
+
+/** The joins every row with a face needs. `u` carries the Premiere state. */
+const faceJoin = (idCol: string) =>
+  `LEFT JOIN profiles p ON p.user_id = ${idCol}
+   LEFT JOIN users u ON u.id = ${idCol}`;
+
+const FACE_COLS = `p.display_name, p.avatar_id, p.picture_url,
+                   u.picture_animated, u.premiere_until, u.premiere_comp_until`;
+
+export type BoardWindow = "today" | "week" | "month" | "all";
+const SPAN_DAYS: Record<string, number> = { today: 1, week: 7, month: 30 };
+
+/**
+ * `since` for a window, or null for `all`.
+ *
+ * ⚠️ -1 because the span INCLUDES today: a 7-day week is today plus the six before it.
+ * And `all` has no span — `new Date(NaN).toISOString()` THROWS rather than returning
+ * anything, so reading SPAN_DAYS unguarded turns the all-time board into a 500 while
+ * every other window keeps working.
+ */
+function sinceFor(window: BoardWindow): string | null {
+  if (window === "all") return null;
+  return new Date(Date.now() - (SPAN_DAYS[window] - 1) * 86_400_000).toISOString().slice(0, 10);
+}
+
+function boardQuery(window: BoardWindow): string {
+  return window === "all"
+    ? `SELECT s.user_id, s.total_score AS score, s.played, s.wins, s.current_streak, ${FACE_COLS}
+         FROM daily_game_stats s ${faceJoin("s.user_id")}
+        WHERE s.user_id IN ${MEMBERSHIP_SQL}
+        ORDER BY score DESC, s.wins DESC`
+    : `SELECT r.user_id, SUM(r.score) AS score, COUNT(*) AS played,
+              SUM(r.solved) AS wins, 0 AS current_streak, ${FACE_COLS}
+         FROM daily_game_results r ${faceJoin("r.user_id")}
+        WHERE r.date >= ?2 AND r.user_id IN ${MEMBERSHIP_SQL}
+        GROUP BY r.user_id
+        ORDER BY score DESC, wins DESC`;
+}
+
+type BoardRow = FaceRow & {
+  user_id: string; score: number; played: number; wins: number; current_streak: number;
+};
+
+const boardEntries = (rows: BoardRow[], selfId: string) =>
+  rows.map((r, i) => ({
+    rank: i + 1,
+    userId: r.user_id,
+    ...faceOf(r),
+    score: r.score ?? 0,
+    played: r.played ?? 0,
+    wins: r.wins ?? 0,
+    currentStreak: r.current_streak ?? 0,
+    isSelf: r.user_id === selfId,
+  }));
+
+/** One window. What the pre-existing `/leaderboard` endpoint serves. */
+export async function readBoardWindow(env: DailyGameEnv, userId: string, window: BoardWindow) {
+  const since = sinceFor(window);
+  const stmt =
+    since === null
+      ? env.DB.prepare(boardQuery(window)).bind(userId)
+      : env.DB.prepare(boardQuery(window)).bind(userId, since);
+  const { results } = await stmt.all<BoardRow>();
+  return { window, since, entries: boardEntries(results ?? [], userId) };
+}
+
+/**
+ * All four windows in ONE round trip.
+ *
+ * `D1.batch` runs the statements together, so this costs one hop rather than four. The
+ * membership subquery is identical in all of them and the planner sees it four times
+ * either way — what is saved is the network, the session resolve and three Worker
+ * invocations, which is the expensive part.
+ */
+export async function readBoard(env: DailyGameEnv, userId: string) {
+  const windows: BoardWindow[] = ["today", "week", "month", "all"];
+  const stmts = windows.map((w) => {
+    const since = sinceFor(w);
+    return since === null
+      ? env.DB.prepare(boardQuery(w)).bind(userId)
+      : env.DB.prepare(boardQuery(w)).bind(userId, since);
+  });
+  const batched = await env.DB.batch<BoardRow>(stmts);
+  const out = {} as Record<BoardWindow, ReturnType<typeof boardEntries>>;
+  windows.forEach((w, i) => {
+    out[w] = boardEntries(batched[i]?.results ?? [], userId);
+  });
+  return out;
+}
+
+/** How your friends did on ONE day. Excludes you — the client knows its own result. */
+export async function readFriendsDay(env: DailyGameEnv, userId: string, date: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT r.user_id, r.guess_count, r.solved, r.score, ${FACE_COLS}
+       FROM daily_game_results r ${faceJoin("r.user_id")}
+      WHERE r.date = ?1 AND r.user_id IN ${FRIENDS_ONLY_SQL}
+      ORDER BY r.solved DESC, r.guess_count ASC`,
+  )
+    .bind(date, userId)
+    .all<FaceRow & { user_id: string; guess_count: number; solved: number; score: number }>();
+
+  return (results ?? []).map((r) => ({
+    userId: r.user_id,
+    ...faceOf(r),
+    guessCount: r.guess_count,
+    solved: r.solved === 1,
+    score: r.score,
+  }));
+}
+
+/** How everyone did, signed-in and anonymous halves summed. */
+export async function readDistribution(env: DailyGameEnv, date: string) {
   const [signedIn, anonymous] = await Promise.all([
     env.DB.prepare(
       `SELECT (CASE WHEN solved = 1 THEN guess_count ELSE 0 END) AS bucket, COUNT(*) AS n
@@ -664,19 +740,116 @@ export async function handleGetDistribution(req: Request, env: DailyGameEnv): Pr
   ]);
 
   // Width follows the LEGACY cap while six-guess clients are still submitting: narrowing
-  // it now would silently drop their solves from "how everyone did" rather than showing a
-  // mixed day honestly. Shrink to MAX_GUESSES + 1 once those builds are gone.
+  // it now would silently drop their solves from "how everyone did".
   const buckets: number[] = new Array(LEGACY_MAX_GUESSES + 1).fill(0);
   for (const row of [...(signedIn.results ?? []), ...(anonymous.results ?? [])]) {
     if (row.bucket >= 0 && row.bucket <= LEGACY_MAX_GUESSES) buckets[row.bucket] += row.n;
   }
+  return { date, buckets, total: buckets.reduce((a, b) => a + b, 0) };
+}
 
-  const total = buckets.reduce((a, b) => a + b, 0);
+/** The caller's own days, plus the rollup. */
+export async function readMine(env: DailyGameEnv, userId: string, since: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT date, puzzle_number, guess_count, solved, score, guesses, guess_types
+       FROM daily_game_results
+      WHERE user_id = ?1 AND date >= ?2
+      ORDER BY date DESC`,
+  )
+    .bind(userId, since)
+    .all<{
+      date: string; puzzle_number: number; guess_count: number; solved: number;
+      score: number; guesses: string; guess_types: string;
+    }>();
+
+  return {
+    since,
+    results: (results ?? []).map((r) => ({
+      date: r.date,
+      puzzleNumber: r.puzzle_number,
+      guessCount: r.guess_count,
+      solved: r.solved === 1,
+      score: r.score,
+      guesses: parseGuesses(r.guesses),
+      types: parseGuesses(r.guess_types),
+    })),
+    stats: await readStats(env, userId),
+  };
+}
+
+/**
+ * The caller's own name and face.
+ *
+ * The web client was fetching `/api/me/profile` purely for these two fields — a whole
+ * profile, layout blobs and favourites and featured achievements, to render a 26px circle
+ * and a row label.
+ */
+export async function readSelfProfile(env: DailyGameEnv, userId: string) {
+  // ⚠️ NOT `faceJoin` here. That joins `profiles p`, and this already selects FROM it —
+  // aliasing the same table twice, which SQLite rejects with "ambiguous column name" at
+  // run time and no compiler anywhere will tell you. Only `users` needs joining.
+  const row = await env.DB.prepare(
+    `SELECT ${FACE_COLS}
+       FROM profiles p
+       LEFT JOIN users u ON u.id = p.user_id
+      WHERE p.user_id = ?1`,
+  )
+    .bind(userId)
+    .first<FaceRow>();
+  return row ? faceOf(row) : null;
+}
+
+/** The earliest day a client may still be holding an unsent result for. */
+function backfillFloor(): string {
+  return new Date(Date.parse(todayIso() + "T00:00:00Z") - BACKFILL_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+/** Everything the page needs once a round is over. Shared by `/open` and `/result`. */
+export async function readRoundState(env: DailyGameEnv, userId: string, date: string) {
+  const [distribution, friends, board] = await Promise.all([
+    readDistribution(env, date),
+    readFriendsDay(env, userId, date),
+    readBoard(env, userId),
+  ]);
+  return { distribution, friends, board };
+}
+
+/**
+ * GET /api/daily-game/open?date= — everything the game needs to open, in one request.
+ *
+ * ⚠️ Works SIGNED OUT, and must. The distribution is public — a signed-out player counts
+ * towards it and is shown it — so gating the whole bundle on a session would push the
+ * anonymous client back onto a second endpoint for the one thing it is allowed.
+ */
+export async function handleGetOpen(
+  req: Request,
+  env: DailyGameEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const date = new URL(req.url).searchParams.get("date") ?? todayIso();
+  if (!DATE_RE.test(date)) return json({ error: "invalid_date" }, 400);
+
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) {
+    return json({
+      date, signedIn: false,
+      distribution: await readDistribution(env, date),
+      mine: null, friends: [], board: null, profile: null,
+    });
+  }
+
+  const [state, mine, profile] = await Promise.all([
+    readRoundState(env, session.userId, date),
+    readMine(env, session.userId, backfillFloor()),
+    readSelfProfile(env, session.userId),
+  ]);
+
+  // ⚠️ No shared cache header: four of these five are per-account.
   return json(
-    { date, buckets, total },
+    { date, signedIn: true, ...state, mine, profile },
     200,
-    // Short: it moves all day as people play, and a stale percentile is worse than a
-    // slightly expensive one.
-    { "Cache-Control": "public, max-age=60" },
+    { "Cache-Control": "private, no-store" },
   );
 }
