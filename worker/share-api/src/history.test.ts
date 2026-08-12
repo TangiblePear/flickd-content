@@ -642,6 +642,74 @@ describe("history: paginated read", () => {
   });
 });
 
+describe("history: revalidating a cached list", () => {
+  // The web holds the list on disk and asks only whether it moved. The whole value of
+  // that is what the server DOESN'T do on the common answer, so R2 access is the
+  // assertion — a version check that still reads and sorts the document is the
+  // regression, and it would pass every test written against the response body.
+
+  it("answers an unchanged version without touching R2", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+
+    const first = await (await handleGetHistory(listReq("tok-a", "?limit=4000"), env)).json();
+    expect(first.version).toBeGreaterThan(0);
+
+    const before = env.BUCKET.gets;
+    const res = await handleGetHistory(listReq("tok-a", `?limit=4000&since=${first.version}`), env);
+    const body = await res.json();
+
+    expect(body.upToDate).toBe(true);
+    expect(body.version).toBe(first.version);
+    expect(body.events).toBeUndefined();
+    expect(env.BUCKET.gets).toBe(before);
+  });
+
+  it("sends the whole list again once the version has moved", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const first = await (await handleGetHistory(listReq("tok-a", "?limit=4000"), env)).json();
+
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(680, SEC + 1)] }), env);
+    const body = await (await handleGetHistory(listReq("tok-a", `?limit=4000&since=${first.version}`), env)).json();
+
+    expect(body.upToDate).toBe(false);
+    expect(body.events).toHaveLength(2);
+    expect(body.version).toBeGreaterThan(first.version);
+  });
+
+  it("refuses to confirm a client claiming to be ahead of the server", async () => {
+    // A restored backup or a rolled-back bucket. Confirming it would leave that client
+    // permanently holding a list the account does not have, with nothing to correct it.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC)] }), env);
+    const first = await (await handleGetHistory(listReq("tok-a", "?limit=4000"), env)).json();
+
+    const body = await (await handleGetHistory(listReq("tok-a", `?since=${first.version + 99}`), env)).json();
+    expect(body.upToDate).toBe(false);
+    expect(body.events).toHaveLength(1);
+  });
+
+  it("never validates a filtered cache", async () => {
+    // The version describes the whole document. Confirming it against `type=MOVIE` would
+    // tell a caller its movies-only list was the current whole history.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, events: [movie(550, SEC), ep(1396, 1, 1, SEC)] }), env);
+    const first = await (await handleGetHistory(listReq("tok-a", "?limit=4000"), env)).json();
+
+    const body = await (await handleGetHistory(listReq("tok-a", `?type=MOVIE&since=${first.version}`), env)).json();
+    expect(body.upToDate).toBe(false);
+    expect(body.events).toHaveLength(1);
+  });
+
+  it("ignores since on an account the server has never seen", async () => {
+    const env = await env0();
+    const body = await (await handleGetHistory(listReq("tok-a", "?since=7"), env)).json();
+    expect(body.upToDate).toBe(false);
+    expect(body.events).toHaveLength(0);
+  });
+});
+
 describe("history: the public slice", () => {
   it("publishes a separate small object, never the private document", async () => {
     // Serving the private document publicly would expose the user's entire viewing

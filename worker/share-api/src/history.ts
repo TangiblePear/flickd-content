@@ -669,6 +669,26 @@ export async function handleGetHistory(req: Request, env: HistoryEnv, ctx?: Exec
   const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
   const typeRaw = (params.get("type") ?? "").toUpperCase();
   const type = MEDIA_TYPES.has(typeRaw) ? typeRaw : null;
+  const sinceRaw = Number(params.get("since"));
+  const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? Math.floor(sinceRaw) : 0;
+
+  // ── "Has anything changed since version N?" ──────────────────────────────
+  //
+  // A client holding a cached list asks this instead of re-downloading one it already
+  // has. Answered from the D1 pointer row, so the common case — nothing has changed —
+  // costs ONE indexed read and never touches R2, never flattens and never sorts.
+  //
+  // ⚠️ Only an EXACT match short-circuits. A client claiming to be ahead of the server
+  // (a restored backup, a rolled-back bucket) is sent the full list, the same rule
+  // `docFor` applies for the same reason: nothing sane can be computed from it.
+  //
+  // ⚠️ Ignored when `type` is set. The version describes the whole document, so
+  // validating a FILTERED cache against it would confirm a list that was never the
+  // whole answer — the caller would keep its movies-only list believing it current.
+  if (since > 0 && !type) {
+    const meta = await readMeta(env, session.userId);
+    if (meta && meta.version === since) return json({ upToDate: true, version: since });
+  }
 
   const { doc } = await loadDoc(env, session.userId);
   const all = recentEvents(doc, Number.MAX_SAFE_INTEGER).filter((e) => !type || e.mediaType === type);
@@ -678,6 +698,11 @@ export async function handleGetHistory(req: Request, env: HistoryEnv, ctx?: Exec
     events: page,
     total: all.length,
     nextOffset: offset + page.length < all.length ? offset + page.length : null,
+    // What the caller must send back as `since`. From the DOCUMENT, never `readMeta` —
+    // the R2 CAS serialises writers, so the version carried by the stored document is
+    // the only one that cannot label two different states (see mergeAndStore).
+    version: doc.ver ?? 0,
+    upToDate: false,
   });
 }
 
