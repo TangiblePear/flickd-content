@@ -125,7 +125,15 @@ const MAX_RATINGS_PER_SYNC = 2000;
 /** Events in the public recent slice, and the default page of `GET /api/history`. */
 const RECENT_LIMIT = 200;
 const DEFAULT_PAGE = 50;
-const MAX_PAGE = 500;
+/**
+ * High enough that a full history is ONE request.
+ *
+ * Paging this endpoint costs the server more, not less: every page reloads the whole
+ * document from R2 and sorts every event in it before slicing (see handleGetHistory), so
+ * a cap of 500 turned one client's "load my history" into eight full reads and eight full
+ * sorts of the same data. The web walked exactly that loop on every signed-in page load.
+ */
+const MAX_PAGE = 4000;
 
 /** A watch counts toward totals at this much progress. Below it, it is an abandon. */
 const WATCHED_THRESHOLD_PCT = 80;
