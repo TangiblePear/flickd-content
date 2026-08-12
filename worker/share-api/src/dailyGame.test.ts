@@ -4,6 +4,7 @@ import {
   handleGetDistribution,
   handleGetFriendsDay,
   handleGetLeaderboard,
+  handleGetMine,
   handlePostResult,
 } from "./dailyGame";
 import { eraseAccount } from "./friends";
@@ -88,7 +89,7 @@ function befriend(db: TestD1, a: string, b: string) {
 
 /** Solved on guess 3 — two wrong ids then the answer. */
 const solvedInThree = (date: string) => ({
-  results: [{ date, guesses: [111, 222, ANSWER_TMDB] }],
+  results: [{ date, guesses: [111, 222, ANSWER_TMDB], types: [0, 1, 0] }],
 });
 
 describe("submission is verified, never trusted", () => {
@@ -560,5 +561,133 @@ describe("friends and leaderboard", () => {
       env(db),
     );
     expect(res.status).toBe(401);
+  });
+});
+
+describe("the account remembers what you have played", () => {
+  const mine = (token?: string, since?: string) =>
+    new Request(
+      `https://flickto.app/api/daily-game/mine${since ? `?since=${since}` : ""}`,
+      { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+    );
+
+  it("refuses without a session — there is no 'my results' for nobody", async () => {
+    const db = new TestD1();
+    expect((await handleGetMine(mine(), env(db))).status).toBe(401);
+  });
+
+  it("hands back the day, the score AND the guess list, so another device redraws the board", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
+
+    const body = await (await handleGetMine(mine(me.token), env(db))).json() as {
+      results: Array<{
+        date: string; guessCount: number; solved: boolean; score: number;
+        guesses: number[]; types: number[];
+      }>;
+      stats: { currentStreak: number; totalScore: number; lastPlayedDate: string | null };
+    };
+
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0]).toMatchObject({
+      date: iso(), guessCount: 3, solved: true, score: 60,
+    });
+    // The whole point of migration 0033: the ids come back in the order they were guessed,
+    // WITH their namespaces — an id alone cannot say film or show.
+    expect(body.results[0].guesses).toEqual([111, 222, ANSWER_TMDB]);
+    expect(body.results[0].types).toEqual([0, 1, 0]);
+    expect(body.stats.totalScore).toBe(60);
+    expect(body.stats.lastPlayedDate).toBe(iso());
+  });
+
+  it("is what stops a replay: the day comes back already finished", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
+
+    // A second device asks before offering today's board.
+    const body = await (await handleGetMine(mine(me.token), env(db))).json() as {
+      results: Array<{ date: string }>;
+    };
+    expect(body.results.some((r) => r.date === iso())).toBe(true);
+  });
+
+  it("does not leak anyone else's rows", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    const them = await player(db, 2);
+    await handlePostResult(post(solvedInThree(iso()), them.token), env(db));
+
+    const body = await (await handleGetMine(mine(me.token), env(db))).json() as {
+      results: unknown[];
+    };
+    expect(body.results).toHaveLength(0);
+  });
+
+  it("clamps `since` to the verifiable window rather than trusting it", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(post(solvedInThree(iso(-2)), me.token), env(db));
+
+    const body = await (await handleGetMine(mine(me.token, "1999-01-01"), env(db))).json() as {
+      since: string;
+      results: Array<{ date: string }>;
+    };
+    // Clamped to the backfill window, and the row inside it still comes back.
+    expect(body.since > "1999-01-01").toBe(true);
+    expect(body.results.some((r) => r.date === iso(-2))).toBe(true);
+  });
+
+  it("reads the rollup WITHOUT rewriting it", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
+
+    const before = db.one<{ updated_at: number }>(
+      "SELECT updated_at FROM daily_game_stats WHERE user_id = ?", me.id,
+    );
+    await handleGetMine(mine(me.token), env(db));
+    const after = db.one<{ updated_at: number }>(
+      "SELECT updated_at FROM daily_game_stats WHERE user_id = ?", me.id,
+    );
+    // A read on every launch must not become a write on every launch.
+    expect(after!.updated_at).toBe(before!.updated_at);
+  });
+});
+
+describe("guess types are additive, never trusted blindly", () => {
+  const mine = (token: string) =>
+    new Request("https://flickto.app/api/daily-game/mine", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+  async function typesFor(payloadTypes: unknown): Promise<number[]> {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(
+      post({ results: [{ date: iso(), guesses: [111, 222, ANSWER_TMDB], types: payloadTypes }] }, me.token),
+      env(db),
+    );
+    const body = await (await handleGetMine(mine(me.token), env(db))).json() as {
+      results: Array<{ types: number[] }>;
+    };
+    return body.results[0]?.types ?? [];
+  }
+
+  it("keeps a well-formed parallel array", async () => {
+    expect(await typesFor([0, 1, 0])).toEqual([0, 1, 0]);
+  });
+
+  it("drops a WRONG-LENGTH array rather than pairing ids with the wrong namespace", async () => {
+    expect(await typesFor([0, 1])).toEqual([]);
+  });
+
+  it("drops values that are not 0 or 1", async () => {
+    expect(await typesFor([0, 7, 1])).toEqual([]);
+  });
+
+  it("accepts a submission with no types at all — old clients still count", async () => {
+    expect(await typesFor(undefined)).toEqual([]);
   });
 });

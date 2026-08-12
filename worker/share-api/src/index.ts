@@ -112,6 +112,7 @@ import {
   handleGetDistribution,
   handleGetFriendsDay,
   handleGetLeaderboard,
+  handleGetMine,
   handlePostResult,
 } from "./dailyGame";
 import {
@@ -598,6 +599,7 @@ export default {
     // towards it. `/result` verifies every submission against the archived answer whether
     // or not a session is present; the session only decides how much gets written.
     if (p === "/api/daily-game/result" && req.method === "POST") return handlePostResult(req, env, ctx);
+    if (p === "/api/daily-game/mine" && req.method === "GET") return handleGetMine(req, env, ctx);
     if (p === "/api/daily-game/friends" && req.method === "GET") return handleGetFriendsDay(req, env, ctx);
     if (p === "/api/daily-game/leaderboard" && req.method === "GET") return handleGetLeaderboard(req, env, ctx);
     if (p === "/api/daily-game/distribution" && req.method === "GET") return handleGetDistribution(req, env);

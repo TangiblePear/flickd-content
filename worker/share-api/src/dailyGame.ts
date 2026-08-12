@@ -59,9 +59,23 @@ export interface DailyGameEnv {
  * MUST match docs/game/grading-fixtures.json and both clients. The clients compute this
  * for display; the value stored is always the one derived here.
  */
-const SCORE_LADDER = [100, 80, 60, 45, 30, 15];
-const MAX_GUESSES = 6;
+const SCORE_LADDER = [100, 80, 60, 45, 30];
+const MAX_GUESSES = 5;
 const UNSOLVED_SCORE = 0;
+
+/**
+ * The six-guess game, kept alive for clients that have not updated.
+ *
+ * ⚠️ Do NOT collapse these into MAX_GUESSES. Every install still on the old build plays
+ * six and submits six, and the validator below rejects the WHOLE request when any row
+ * fails its bounds — so tightening the cap on the day of the change would throw away those
+ * players' results entirely, not just the sixth guess. A legacy solve is scored on the
+ * ladder it was actually played on, which is what that player saw on their screen.
+ *
+ * Safe to delete once the old builds are gone (same lever as MIN_SOCIAL_VERSION).
+ */
+const LEGACY_MAX_GUESSES = 6;
+const LEGACY_SCORE_LADDER = [100, 80, 60, 45, 30, 15];
 
 /** How far back a sign-in backfill may reach. Answer files are kept 40 days, so this fits. */
 const BACKFILL_DAYS = 30;
@@ -86,10 +100,14 @@ function daysBetween(fromIso: string, toIso: string): number {
 function scoreFor(guessCount: number, solved: boolean): number {
   if (!solved) return UNSOLVED_SCORE;
   const i = guessCount - 1;
-  return i >= 0 && i < SCORE_LADDER.length ? SCORE_LADDER[i] : UNSOLVED_SCORE;
+  if (i < 0) return UNSOLVED_SCORE;
+  if (i < SCORE_LADDER.length) return SCORE_LADDER[i];
+  // A sixth guess can only come from a client still playing the six-guess game. Score it
+  // on that ladder rather than zeroing a solve the player earned. See LEGACY_MAX_GUESSES.
+  return i < LEGACY_SCORE_LADDER.length ? LEGACY_SCORE_LADDER[i] : UNSOLVED_SCORE;
 }
 
-/** Histogram bucket: 0 is "did not solve", 1..6 is "solved on N". */
+/** Histogram bucket: 0 is "did not solve", 1..N is "solved on N". */
 function bucketFor(guessCount: number, solved: boolean): number {
   return solved ? guessCount : 0;
 }
@@ -107,13 +125,17 @@ async function readAnswer(env: DailyGameEnv, date: string): Promise<ArchivedAnsw
   }
 }
 
-type SubmittedResult = { date: string; puzzleNumber?: number; guesses: number[] };
+type SubmittedResult = { date: string; puzzleNumber?: number; guesses: number[]; types: number[] };
 type VerifiedResult = {
   date: string;
   puzzleNumber: number;
   guessCount: number;
   solved: boolean;
   score: number;
+  /** The ids as guessed, in order. Stored so another device can redraw the board. */
+  guesses: number[];
+  /** 0 = film, 1 = show, parallel to [guesses]. Empty when the client did not send it. */
+  types: number[];
 };
 
 function parseBody(body: unknown): SubmittedResult[] | null {
@@ -125,15 +147,31 @@ function parseBody(body: unknown): SubmittedResult[] | null {
   const out: SubmittedResult[] = [];
   for (const raw of results) {
     if (!raw || typeof raw !== "object") return null;
-    const r = raw as { date?: unknown; puzzleNumber?: unknown; guesses?: unknown };
+    const r = raw as {
+      date?: unknown; puzzleNumber?: unknown; guesses?: unknown; types?: unknown;
+    };
     if (typeof r.date !== "string" || !DATE_RE.test(r.date)) return null;
     if (!Array.isArray(r.guesses)) return null;
-    if (r.guesses.length < 1 || r.guesses.length > MAX_GUESSES) return null;
+    // ⚠️ LEGACY bound, deliberately. A failure here rejects the ENTIRE request, so
+    // tightening this to MAX_GUESSES would discard every result from every install still
+    // on the six-guess build — including the other days in the same backfill.
+    if (r.guesses.length < 1 || r.guesses.length > LEGACY_MAX_GUESSES) return null;
     if (!r.guesses.every((g) => Number.isInteger(g))) return null;
+    // Optional and additive: clients that predate it simply store no types, and their
+    // rows restore without a grid rather than with a wrong one. A malformed or
+    // wrong-length array is dropped for the same reason.
+    const types =
+      Array.isArray(r.types) &&
+      r.types.length === r.guesses.length &&
+      r.types.every((x) => x === 0 || x === 1)
+        ? (r.types as number[])
+        : [];
+
     out.push({
       date: r.date,
       puzzleNumber: typeof r.puzzleNumber === "number" ? r.puzzleNumber : undefined,
       guesses: r.guesses as number[],
+      types,
     });
   }
   return out;
@@ -179,6 +217,8 @@ async function verify(
     guessCount,
     solved,
     score: scoreFor(guessCount, solved),
+    guesses,
+    types: submitted.types,
   };
 }
 
@@ -255,6 +295,59 @@ async function recomputeStats(env: DailyGameEnv, userId: string): Promise<StatsR
 }
 
 /**
+ * The rollup as stored, without recomputing it.
+ *
+ * ⚠️ Deliberately NOT [recomputeStats]: that one WRITES, and a GET that rewrites the
+ * rollup on every open would turn a read the client makes on every launch into a D1 write
+ * per launch. The row is maintained on submit, which is the only thing that can change it.
+ *
+ * `currentStreak` is only current relative to `lastPlayedDate` — the column does not
+ * expire itself, so it is returned alongside and the caller decides whether the run is
+ * still alive.
+ */
+async function readStats(env: DailyGameEnv, userId: string): Promise<StatsRow> {
+  const row = await env.DB.prepare(
+    `SELECT played, wins, current_streak, best_streak, total_score, guess_histogram, last_played_date
+       FROM daily_game_stats WHERE user_id = ?1`,
+  )
+    .bind(userId)
+    .first<{
+      played: number;
+      wins: number;
+      current_streak: number;
+      best_streak: number;
+      total_score: number;
+      guess_histogram: string;
+      last_played_date: string | null;
+    }>();
+
+  if (!row) {
+    return {
+      played: 0, wins: 0, currentStreak: 0, bestStreak: 0,
+      totalScore: 0, histogram: {}, lastPlayedDate: null,
+    };
+  }
+
+  let histogram: Record<string, number> = {};
+  try {
+    const parsed = JSON.parse(row.guess_histogram ?? "{}");
+    if (parsed && typeof parsed === "object") histogram = parsed as Record<string, number>;
+  } catch {
+    histogram = {};
+  }
+
+  return {
+    played: row.played,
+    wins: row.wins,
+    currentStreak: row.current_streak,
+    bestStreak: row.best_streak,
+    totalScore: row.total_score,
+    histogram,
+    lastPlayedDate: row.last_played_date,
+  };
+}
+
+/**
  * POST /api/daily-game/result — **session OPTIONAL**, deliberately.
  *
  * ⚠️ This is one of two handlers in this file that does not gate on a session, and in a
@@ -312,11 +405,14 @@ export async function handlePostResult(
       env.DB
         .prepare(
           `INSERT INTO daily_game_results
-             (user_id, date, puzzle_number, guess_count, solved, score, created_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             (user_id, date, puzzle_number, guess_count, solved, score, created_at, guesses, guess_types)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
            ON CONFLICT(user_id, date) DO NOTHING`,
         )
-        .bind(session.userId, v.date, v.puzzleNumber, v.guessCount, v.solved ? 1 : 0, v.score, now),
+        .bind(
+          session.userId, v.date, v.puzzleNumber, v.guessCount, v.solved ? 1 : 0, v.score, now,
+          JSON.stringify(v.guesses), JSON.stringify(v.types),
+        ),
     ),
   );
 
@@ -334,6 +430,81 @@ async function bumpAnonDistribution(env: DailyGameEnv, v: VerifiedResult): Promi
     )
     .bind(v.date, bucket)
     .run();
+}
+
+/**
+ * GET /api/daily-game/mine?since=YYYY-MM-DD — the caller's own played days.
+ *
+ * The read half of the account-linked game. Everything else here was already writing:
+ * results land server-side and the score is derived here, but no client ever ASKED what it
+ * had already played — so a reinstall, a second phone or the website all showed a fresh
+ * board for a day that was finished and ranked, and let it be played again. The row is the
+ * authority; a client that has one for a date must not offer that date again.
+ *
+ * Returns the guess list too, so the board redraws exactly rather than appearing as a bare
+ * score. Rows written before migration 0033 carry `[]` and restore without a grid.
+ *
+ * `since` is clamped to the same window a backfill may reach, because that is how far back
+ * a client can still be told anything useful.
+ */
+export async function handleGetMine(
+  req: Request,
+  env: DailyGameEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  const today = todayIso();
+  const asked = new URL(req.url).searchParams.get("since");
+  const earliest = new Date(Date.parse(today + "T00:00:00Z") - BACKFILL_DAYS * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const since = asked && DATE_RE.test(asked) && asked > earliest ? asked : earliest;
+
+  const { results } = await env.DB.prepare(
+    `SELECT date, puzzle_number, guess_count, solved, score, guesses, guess_types
+       FROM daily_game_results
+      WHERE user_id = ?1 AND date >= ?2
+      ORDER BY date DESC`,
+  )
+    .bind(session.userId, since)
+    .all<{
+      date: string;
+      puzzle_number: number;
+      guess_count: number;
+      solved: number;
+      score: number;
+      guesses: string;
+      guess_types: string;
+    }>();
+
+  const stats = await readStats(env, session.userId);
+
+  return json({
+    since,
+    results: (results ?? []).map((r) => ({
+      date: r.date,
+      puzzleNumber: r.puzzle_number,
+      guessCount: r.guess_count,
+      solved: r.solved === 1,
+      score: r.score,
+      guesses: parseGuesses(r.guesses),
+      types: parseGuesses(r.guess_types),
+    })),
+    stats,
+  });
+}
+
+/** Stored as JSON text; a malformed row degrades to "no grid", never to a failed read. */
+function parseGuesses(raw: string | null): number[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((g) => Number.isInteger(g)) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 /** GET /api/daily-game/friends?date=YYYY-MM-DD — how your friends did on one day. */
@@ -477,9 +648,12 @@ export async function handleGetDistribution(req: Request, env: DailyGameEnv): Pr
     ).bind(date).all<{ bucket: number; n: number }>(),
   ]);
 
-  const buckets: number[] = new Array(MAX_GUESSES + 1).fill(0);
+  // Width follows the LEGACY cap while six-guess clients are still submitting: narrowing
+  // it now would silently drop their solves from "how everyone did" rather than showing a
+  // mixed day honestly. Shrink to MAX_GUESSES + 1 once those builds are gone.
+  const buckets: number[] = new Array(LEGACY_MAX_GUESSES + 1).fill(0);
   for (const row of [...(signedIn.results ?? []), ...(anonymous.results ?? [])]) {
-    if (row.bucket >= 0 && row.bucket <= MAX_GUESSES) buckets[row.bucket] += row.n;
+    if (row.bucket >= 0 && row.bucket <= LEGACY_MAX_GUESSES) buckets[row.bucket] += row.n;
   }
 
   const total = buckets.reduce((a, b) => a + b, 0);
