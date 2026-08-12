@@ -34,8 +34,19 @@ const RECENT_KEY = "game-state/recent.json";
 const ANSWER_PREFIX = "game-state/answers/";
 const TITLE_INDEX = "titles.v2.json";
 
-/** Puzzle #1. Fixed forever — the number is cosmetic but it must never renumber. */
-const EPOCH_DATE = "2026-08-11";
+/**
+ * Puzzle #1.
+ *
+ * The number is DERIVED from this date, not counted — `daysBetween(EPOCH_DATE, iso) + 1` —
+ * so moving it renumbers every past and future puzzle at once.
+ *
+ * ⚠️ Moved once, on 2026-08-12, to reset the game before anyone was really playing: the
+ * first two days were test data and were wiped along with every result, stat and
+ * distribution row. Do NOT move it again. Renumbering after people have shared "Flickdl
+ * #47" makes every one of those grids point at a different puzzle, and the archive
+ * disagrees with the shares forever.
+ */
+const EPOCH_DATE = "2026-08-12";
 
 /** How many past answers to keep out of the pool. A year means no visible repeats. */
 const RECENT_LIMIT = 365;
