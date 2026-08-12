@@ -691,3 +691,53 @@ describe("guess types are additive, never trusted blindly", () => {
     expect(await typesFor(undefined)).toEqual([]);
   });
 });
+
+describe("leaderboard windows", () => {
+  const board = (token: string, window?: string) =>
+    new Request(
+      `https://flickto.app/api/daily-game/leaderboard${window ? `?window=${window}` : ""}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+
+  async function scores(window: string | undefined, days: number[]): Promise<number> {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    for (const d of days) {
+      await handlePostResult(post(solvedInThree(iso(-d)), me.token), env(db));
+    }
+    const body = await (await handleGetLeaderboard(board(me.token, window), env(db))).json() as {
+      entries: Array<{ score: number; isSelf: boolean }>;
+    };
+    return body.entries.find((e) => e.isSelf)?.score ?? 0;
+  }
+
+  // Solved-in-three is 60 points a day, so the totals below are day counts x 60.
+  it("today counts TODAY only", async () => {
+    expect(await scores("today", [0, 1, 2])).toBe(60);
+  });
+
+  it("week reaches back six days, not seven", async () => {
+    expect(await scores("week", [0, 6])).toBe(120);
+    expect(await scores("week", [7])).toBe(0);
+  });
+
+  it("month reaches back to day 29", async () => {
+    expect(await scores("month", [0, 29])).toBe(120);
+  });
+
+  it("all time does not throw on a missing span, and counts everything", async () => {
+    // `all` reads the lifetime rollup and has no `since`. Reading a span for it
+    // unguarded threw RangeError and 500ed only this window.
+    expect(await scores("all", [0, 29])).toBe(120);
+  });
+
+  it("falls back to week for a window it does not recognise", async () => {
+    const db = new TestD1();
+    const me = await player(db, 1);
+    await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
+    const body = await (await handleGetLeaderboard(board(me.token, "fortnight"), env(db))).json() as {
+      window: string;
+    };
+    expect(body.window).toBe("week");
+  });
+});

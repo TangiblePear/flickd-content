@@ -566,7 +566,13 @@ export async function handleGetLeaderboard(
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
-  const window = new URL(req.url).searchParams.get("window") === "all" ? "all" : "week";
+  // today | week | month | all. Anything unrecognised falls back to week, which is what
+  // every existing client sends and what the finish panel still asks for.
+  const asked = new URL(req.url).searchParams.get("window");
+  const window = asked === "all" || asked === "today" || asked === "month" ? asked : "week";
+
+  /** Days INCLUDED, counting today. `all` reads the lifetime rollup instead. */
+  const spanDays: Record<string, number> = { today: 1, week: 7, month: 30 };
 
   // Friends PLUS the caller: a leaderboard you are absent from is not a leaderboard.
   const membership = `(
@@ -594,9 +600,18 @@ export async function handleGetLeaderboard(
           GROUP BY r.user_id
           ORDER BY score DESC, wins DESC`;
 
-  const since = new Date(Date.now() - 6 * 86_400_000).toISOString().slice(0, 10);
-  const stmt =
+  // -1 because the span INCLUDES today: a 7-day week is today plus the six before it,
+  // and an off-by-one here silently makes every window a day too wide.
+  //
+  // ⚠️ `all` has no span, and `new Date(NaN).toISOString()` THROWS rather than returning
+  // anything — reading spanDays unguarded would have turned the all-time leaderboard into
+  // a 500 while every other window kept working.
+  const since =
     window === "all"
+      ? null
+      : new Date(Date.now() - (spanDays[window] - 1) * 86_400_000).toISOString().slice(0, 10);
+  const stmt =
+    since === null
       ? env.DB.prepare(query).bind(session.userId)
       : env.DB.prepare(query).bind(session.userId, since);
 
@@ -607,7 +622,7 @@ export async function handleGetLeaderboard(
 
   return json({
     window,
-    since: window === "week" ? since : null,
+    since,
     entries: (results ?? []).map((r, i) => ({
       rank: i + 1,
       userId: r.user_id,
