@@ -96,12 +96,29 @@ export async function handlePublishList(
   if ((already?.n ?? 0) >= MAX_PUBLISHED_PER_USER) return json({ error: "too_many_published" }, 409);
 
   const t = now();
+
+  // handleUnpublishList DELETEs the public_lists row, taking `hidden_at` with it — so a
+  // takedown (admin `hide`, or the auto-hide threshold) would otherwise be gone the
+  // moment the author unpublishes and republishes. `hide` never touches `reports.state`
+  // (only `restore`/`dismiss` do — see dismissKind in moderationQueue.ts), so an OPEN
+  // report against this exact target is the only trace of a takedown that survives the
+  // DELETE. Re-applying it here — rather than refusing the republish outright — keeps
+  // the list out of the directory without telling the author anything a takedown notice
+  // would not: ON CONFLICT below never touches `hidden_at`, and `/api/me/follows`
+  // reports this identically to a plain unpublish either way.
+  const takenDown = await env.DB.prepare(
+    `SELECT 1 AS ok FROM reports WHERE target_id = ?1 AND kind = 'public_list' AND state = 'open' LIMIT 1`,
+  )
+    .bind(`${session.userId}:${listId}`)
+    .first<{ ok: number }>();
+  const hiddenAt = takenDown ? t : null;
+
   const statements = [
     env.DB.prepare(
       `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
-       VALUES (?1, ?2, ?3, 0, ?4, NULL)
+       VALUES (?1, ?2, ?3, 0, ?4, ?5)
        ON CONFLICT(owner_id, list_id) DO UPDATE SET tags = ?3`,
-    ).bind(session.userId, listId, JSON.stringify(tags), t),
+    ).bind(session.userId, listId, JSON.stringify(tags), t, hiddenAt),
     // Replaced wholesale rather than merged: the request carries the complete
     // intended set, so a removed tag must actually disappear.
     env.DB.prepare(`DELETE FROM public_list_tags WHERE owner_id = ?1 AND list_id = ?2`).bind(
@@ -157,7 +174,7 @@ export const MAX_FOLLOWS = 100;
  * accounts for — a separate round trip could be lost and leave the cache behind.
  *
  * A whole-table sweep would be the other option and there is nowhere to run one: this
- * worker has no scheduled() handler (index.ts:756). Per-list-on-write is the shape the
+ * worker has no scheduled() handler (index.ts:820). Per-list-on-write is the shape the
  * cron budget allows.
  */
 export function recomputeEngagement(
@@ -576,7 +593,7 @@ export async function handleMyFollows(
  * The ONE writer of `public_lists.hidden_at`.
  *
  * Shared with the admin takedown in moderationQueue.ts — the same rule
- * moderationQueue.ts:386 already records for comments: a manual takedown and the
+ * moderationQueue.ts:431 already records for comments: a manual takedown and the
  * automatic one must write the same thing, or the two drift and the admin panel stops
  * describing what the read paths actually do.
  *

@@ -11,6 +11,7 @@ import {
   handleReportPublicList,
   MAX_FOLLOWS,
 } from "./publicLists";
+import { handleModerationAct } from "./moderationQueue";
 
 const TOKEN = "tok-owner";
 
@@ -256,6 +257,72 @@ describe("unpublishing", () => {
       .bind(uid(1))
       .first<{ n: number }>();
     expect(n!.n).toBe(1);
+  });
+
+  // The evasion: an admin takedown must survive an unpublish/republish cycle, or the
+  // author can clear it themselves with two taps. The `reports` row that justified the
+  // takedown is the only thing that survives the DELETE in handleUnpublishList, so it
+  // is what handlePublishList has to check.
+  it("does not let an author clear an admin takedown by unpublishing and republishing", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "L1", asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"), testEnv(db), ctx);
+
+    // A report is filed, then an admin hides the list from the moderation queue —
+    // the real path, not a raw UPDATE.
+    await handleReportPublicList(
+      uid(1),
+      "L1",
+      new Request(`https://flickto.app/api/public/lists/${uid(1)}/L1/report`, {
+        method: "POST",
+        headers: { Authorization: "Bearer tok-2", "Content-Type": "application/json" },
+        body: JSON.stringify({ context: "spam" }),
+      }),
+      testEnv(db),
+      ctx,
+    );
+    const actRes = await handleModerationAct(
+      new Request("https://flickto.app/api/moderation/act", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Key": "test-admin-key" },
+        body: JSON.stringify({ itemId: `${uid(1)}:L1:public_list`, source: "d1", action: "hide" }),
+      }),
+      testEnv(db) as never,
+    );
+    expect(actRes.status).toBe(200);
+
+    // The author unpublishes and republishes, trying to wash the takedown off.
+    await handleUnpublishList("L1", authed("/api/me/lists/L1/publish", "DELETE"), testEnv(db), ctx);
+    const republish = await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    expect(republish.status).toBe(200);
+
+    // Must not reappear in the directory or on its own detail page.
+    expect(await browseAs(db, "tok-2")).toHaveLength(0);
+    const detail = await handlePublicListDetail(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1`, "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(detail.status).toBe(404);
+
+    // And the follower must still see it as an ordinary "unpublished", never anything
+    // that would tell them a takedown happened.
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("unpublished");
   });
 });
 
