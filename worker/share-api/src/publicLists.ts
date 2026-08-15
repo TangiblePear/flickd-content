@@ -489,7 +489,8 @@ export async function handleMyFollows(
   if (!session) return unauthorized();
 
   const rows = await env.DB.prepare(
-    `SELECT f.owner_id, f.list_id, l.name, l.description, l.updated_at, l.deleted_at,
+    `SELECT f.owner_id, f.list_id, l.user_id AS list_owner, l.name, l.description,
+            l.updated_at, l.deleted_at,
             p.tags, p.hidden_at,
             pr.display_name, pr.picture_url,
             CASE WHEN p.owner_id IS NULL THEN 0 ELSE 1 END AS still_published
@@ -504,14 +505,59 @@ export async function handleMyFollows(
     .bind(session.userId)
     .all<Record<string, unknown>>();
 
-  const follows = [];
-  for (const r of rows.results ?? []) {
-    const gone = !r.name || r.deleted_at != null;
-    const live = !gone && Number(r.still_published) === 1 && r.hidden_at == null;
-    follows.push({
+  const results = rows.results ?? [];
+  // Keyed on the LEFT JOIN actually failing, not on `name` — `lists.name` is NOT NULL
+  // but not constrained non-empty, so an empty name must not be mistaken for "gone".
+  const goneOf = (r: Record<string, unknown>) => r.list_owner == null || r.deleted_at != null;
+  const live = results.filter((r) => !goneOf(r));
+
+  // Batched the same way handleBrowse batches poster lookups (a row-value IN over a
+  // ROW_NUMBER-ranked derived table) rather than one itemsFor() call per followed list.
+  // The loop form was up to MAX_FOLLOWS D1 calls in a single request.
+  const itemsByList = new Map<
+    string,
+    { tmdbId: number; type: string; position: number; note: string }[]
+  >();
+  if (live.length) {
+    const placeholders = live.map((_, i) => `(?${i * 2 + 1}, ?${i * 2 + 2})`).join(",");
+    const binds = live.flatMap((r) => [r.owner_id, r.list_id]);
+    const items = await env.DB.prepare(
+      `SELECT user_id, list_id, tmdb_id, type, position, ai_note FROM (
+         SELECT user_id, list_id, tmdb_id, type, position, ai_note,
+                ROW_NUMBER() OVER (PARTITION BY user_id, list_id ORDER BY position, added_at) AS rn
+           FROM list_items
+          WHERE (user_id, list_id) IN (${placeholders})
+       ) AS ranked
+        WHERE ranked.rn <= ${MAX_PUBLIC_ITEMS}
+        ORDER BY ranked.list_id, ranked.rn`,
+    )
+      .bind(...binds)
+      .all<{
+        user_id: string;
+        list_id: string;
+        tmdb_id: number;
+        type: string;
+        position: number;
+        ai_note: string | null;
+      }>();
+    for (const r of live) itemsByList.set(`${r.owner_id} ${r.list_id}`, []);
+    for (const i of items.results ?? []) {
+      itemsByList.get(`${i.user_id} ${i.list_id}`)?.push({
+        tmdbId: i.tmdb_id,
+        type: i.type,
+        position: i.position,
+        note: i.ai_note ?? "",
+      });
+    }
+  }
+
+  const follows = results.map((r) => {
+    const gone = goneOf(r);
+    const isLive = !gone && Number(r.still_published) === 1 && r.hidden_at == null;
+    return {
       ownerId: r.owner_id,
       listId: r.list_id,
-      status: gone ? "gone" : live ? "live" : "unpublished",
+      status: gone ? "gone" : isLive ? "live" : "unpublished",
       name: r.name ?? "",
       description: r.description ?? "",
       authorName: r.display_name ?? "",
@@ -520,9 +566,9 @@ export async function handleMyFollows(
       updatedAt: r.updated_at ?? 0,
       // A gone list has no items to fetch; everything else materialises live, which
       // is the whole reason a follow stays current without a propagation step.
-      items: gone ? [] : await itemsFor(env, String(r.owner_id), String(r.list_id)),
-    });
-  }
+      items: gone ? [] : (itemsByList.get(`${r.owner_id} ${r.list_id}`) ?? []),
+    };
+  });
   return json({ follows });
 }
 

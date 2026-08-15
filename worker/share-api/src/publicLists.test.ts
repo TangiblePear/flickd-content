@@ -656,6 +656,114 @@ describe("browse", () => {
   });
 });
 
+describe("detail", () => {
+  const detailUrl = (owner: string, listId: string) => `/api/public/lists/${owner}/${listId}`;
+
+  it("404s when the list is hidden by moderation", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db
+      .prepare(`UPDATE public_lists SET hidden_at = 1 WHERE owner_id = ?1 AND list_id = 'A'`)
+      .bind(uid(1))
+      .run();
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when the underlying list is deleted", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE lists SET deleted_at = 1 WHERE user_id = ?1 AND id = 'A'`).bind(uid(1)).run();
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("404s when the author blocked the viewer", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  // The other arm of the block check — a separate row from the one above, since each
+  // side of the NOT EXISTS's OR needs its own proof it is doing something.
+  it("404s when the viewer blocked the author", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(2), uid(1))
+      .run();
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  // So the 404s above are not passing for the trivial reason that detail always 404s.
+  it("returns 200 with items, author name, and the viewer's own saved/liked state", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A"); // tmdb 500, 501, 502
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "A", asUser("tok-2", "/x/like", "POST"), testEnv(db), ctx);
+
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      authorName: string;
+      saved: boolean;
+      liked: boolean;
+      items: { tmdbId: number }[];
+    };
+    expect(body.items.map((i) => i.tmdbId)).toEqual([500, 501, 502]);
+    expect(body.authorName).toBe(`User ${uid(1).slice(0, 4)}`);
+    expect(body.saved).toBe(true);
+    expect(body.liked).toBe(true);
+  });
+});
+
 interface Follow {
   ownerId: string;
   listId: string;
@@ -751,6 +859,110 @@ describe("my follows", () => {
     const [f] = await followsFor(db, "tok-2");
     expect(f.status).toBe("gone");
   });
+
+  // The bug: keying "gone" on `!name` rather than the LEFT JOIN failing. `lists.name`
+  // is NOT NULL but not constrained non-empty, so a real, undeleted list with an empty
+  // name would falsely report gone and drop its items under the old key.
+  it("does not report gone for a list with an empty name", async () => {
+    const db = new TestD1();
+    seedUser(db, { id: uid(1) });
+    seedSession(db, uid(1), await sha256Hex(TOKEN));
+    const t = Date.now();
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+           display_order, home_order, version, created_at, updated_at)
+         VALUES (?1, 'A', '', 'MANUAL', 0, 0, 0, 0, 1, ?2, ?2)`,
+      )
+      .bind(uid(1), t)
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+         VALUES (?1, 'A', 500, 'MOVIE', 0, ?2, ?2)`,
+      )
+      .bind(uid(1), t)
+      .run();
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).not.toBe("gone");
+    expect(f.items).toHaveLength(1);
+  });
+
+  // The join-miss path itself, not just the deleted_at path: a hard-deleted `lists`
+  // row (no row for the LEFT JOIN to match) must still be reported gone.
+  it("reports gone when the list row itself is missing", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    await db.prepare(`DELETE FROM lists WHERE user_id = ?1 AND id = 'A'`).bind(uid(1)).run();
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("gone");
+    expect(f.items).toHaveLength(0);
+  });
+
+  // The N+1 fix's specific failure mode: a batched query that isn't correctly
+  // partitioned per (owner_id, list_id) could return the right COUNT of items while
+  // mixing which items belong to which list.
+  it("batches items for two followed lists without cross-contaminating them", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A"); // tmdb 500, 501
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+           display_order, home_order, version, created_at, updated_at)
+         VALUES (?1, 'B', 'Second List', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+    for (const [i, tmdbId] of [700, 701, 702].entries()) {
+      await db
+        .prepare(
+          `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+           VALUES (?1, 'B', ?2, 'MOVIE', ?3, 1, 1)`,
+        )
+        .bind(uid(1), tmdbId, i)
+        .run();
+    }
+    await handlePublishList(
+      "B",
+      authed("/api/me/lists/B/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    await handleFollow(uid(1), "B", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+
+    const follows = await followsFor(db, "tok-2");
+    const a = follows.find((f) => f.listId === "A")!;
+    const b = follows.find((f) => f.listId === "B")!;
+    expect(a.items.map((i) => i.tmdbId)).toEqual([500, 501]);
+    expect(b.items.map((i) => i.tmdbId)).toEqual([700, 701, 702]);
+  });
 });
 
 describe("reporting", () => {
@@ -845,5 +1057,16 @@ describe("reporting", () => {
       .bind(uid(1))
       .first<{ hidden_at: number | null }>();
     expect(row!.hidden_at).toBeNull();
+
+    // Proves the duplicate suppression itself, not just its side effect: deleting the
+    // handler's `WHERE NOT EXISTS` clause entirely would still leave hidden_at null
+    // (COUNT(DISTINCT reporter_id) is still 1) but would leave 4 rows here, not 1.
+    const reportCount = await db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM reports WHERE reporter_id = ?1 AND target_id = ?2 AND kind = 'public_list'`,
+      )
+      .bind(uid(2), `${uid(1)}:A`)
+      .first<{ n: number }>();
+    expect(reportCount!.n).toBe(1);
   });
 });
