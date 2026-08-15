@@ -37,6 +37,24 @@ routes = [
   # This is the same trap as `/api/friends` above, from the other direction, and it
   # is invisible to both the test suite and `wrangler deploy --dry-run`.
   { pattern = "flickto.app/api/feed*", zone_name = "flickto.app" },
+  # Public list directory (src/publicLists.ts, migration 0039). ONE pattern covers
+  # the whole subtree, and the trailing `*` carries three separate jobs — drop it
+  # and each fails differently:
+  #   • `/api/public/lists`                     — the bare browse call
+  #   • `/api/public/lists?sort=trending&tag=…` — the form the client ACTUALLY sends
+  #   • `/api/public/lists/{owner}/{id}/follow` — detail, tags, follow, like, report
+  # Same trap as /api/feed and /api/sync above, hit from all three directions at once.
+  #
+  # ⚠️ Measured on production 2026-08-15, AFTER a green deploy of all the handlers:
+  # `GET https://flickto.app/api/public/lists` answered 404 with `text/html` — the
+  # static site's SPA page. The Worker was never reached, six of the eight endpoints
+  # were dead, and nothing upstream noticed: the suite calls the handlers directly
+  # rather than through this table, so 1039 tests stayed green, and
+  # `wrangler deploy --dry-run` does not check routing at all.
+  #
+  # The content type is the tell. The Worker's own 404 is `application/json`; an
+  # HTML body means the request never got here.
+  { pattern = "flickto.app/api/public/lists*", zone_name = "flickto.app" },
   # One chargeable request per refresh (src/sync.ts). Same wildcard trap as
   # /api/feed above — routes match the FULL URL including the query string, so the
   # trailing `*` is not optional even though the client POSTs a body.
