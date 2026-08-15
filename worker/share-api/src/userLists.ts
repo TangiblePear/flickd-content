@@ -377,6 +377,12 @@ export async function handleDeleteList(
     // Items go for good; the tombstone only needs to carry the fact of deletion.
     env.DB.prepare(`DELETE FROM list_items WHERE user_id = ?1 AND list_id = ?2`).bind(session.userId, id),
     env.DB.prepare(`DELETE FROM list_filters WHERE user_id = ?1 AND list_id = ?2`).bind(session.userId, id),
+    // A published list's directory row and tags. Left behind, the orphan is not a
+    // content leak — browse/detail both gate on `lists.deleted_at IS NULL` — but it
+    // permanently occupies a slot in the publish cap, and `liveList` would still let
+    // anyone follow or like it.
+    env.DB.prepare(`DELETE FROM public_lists WHERE owner_id = ?1 AND list_id = ?2`).bind(session.userId, id),
+    env.DB.prepare(`DELETE FROM public_list_tags WHERE owner_id = ?1 AND list_id = ?2`).bind(session.userId, id),
     bumpMeta(env, session.userId),
   ]);
   return json({ ok: true });
