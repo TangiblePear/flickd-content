@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { TestD1, seedUser, seedSession, testEnv, uid } from "./testD1";
-import { handlePublishList, handleUnpublishList, handleFollow, handleLike } from "./publicLists";
+import { handlePublishList, handleUnpublishList, handleFollow, handleLike, MAX_FOLLOWS } from "./publicLists";
 
 const TOKEN = "tok-owner";
 
@@ -366,5 +366,79 @@ describe("follow and like", () => {
       ctx,
     );
     expect(res.status).toBe(404);
+  });
+
+  // Seeded with SQL, not 100 handler calls — the point is the cap arithmetic, not the
+  // write path, and 100 round trips through handleFollow would only slow this down.
+  async function withViewerAtCap(db: TestD1, viewer: string, targetOwner: string, targetList: string) {
+    await withViewer(db, viewer, "tok-2");
+    // One of the MAX_FOLLOWS rows IS the target — the viewer already follows it.
+    db.exec(
+      `INSERT INTO list_follows (user_id, owner_id, list_id, created_at)
+       VALUES ('${viewer}', '${targetOwner}', '${targetList}', 1)`,
+    );
+    for (let i = 1; i < MAX_FOLLOWS; i++) {
+      db.exec(
+        `INSERT INTO list_follows (user_id, owner_id, list_id, created_at)
+         VALUES ('${viewer}', 'filler-owner-${i}', 'filler-list-${i}', 1)`,
+      );
+    }
+  }
+
+  // The defect: counting ALL of the viewer's follows — including the row this very
+  // request would (no-op) write — made a re-follow at the cap indistinguishable from a
+  // genuinely new 101st follow. Re-following something already followed must never fail.
+  it("re-following at the cap is a no-op, not a 409", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewerAtCap(db, uid(2), uid(1), "L1");
+    expect(db.count("list_follows", "user_id = ?", uid(2))).toBe(MAX_FOLLOWS);
+
+    const res = await handleFollow(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).not.toBe(409);
+    expect(res.status).toBe(200);
+  });
+
+  // The cap itself still has to bite: a genuinely new list is a genuinely new row, and
+  // the exclusion in the fix above must not let it slip through.
+  it("still refuses a genuinely new follow at the cap", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "L2");
+    await handlePublishList(
+      "L2",
+      authed("/api/me/lists/L2/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    // At the cap on lists that do NOT include L2.
+    await withViewer(db, uid(2), "tok-2");
+    for (let i = 0; i < MAX_FOLLOWS; i++) {
+      db.exec(
+        `INSERT INTO list_follows (user_id, owner_id, list_id, created_at)
+         VALUES ('${uid(2)}', 'filler-owner-${i}', 'filler-list-${i}', 1)`,
+      );
+    }
+
+    const res = await handleFollow(
+      uid(1),
+      "L2",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L2/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(409);
+    expect((await res.json()) as { error: string }).toEqual({ error: "too_many_follows" });
   });
 });

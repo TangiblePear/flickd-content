@@ -207,8 +207,13 @@ async function toggleEngagement(
   const removing = req.method === "DELETE";
 
   if (!removing && table === "list_follows") {
-    const n = await env.DB.prepare(`SELECT COUNT(*) AS n FROM list_follows WHERE user_id = ?1`)
-      .bind(session.userId)
+    // Excludes the row this write would touch: the insert below is ON CONFLICT DO
+    // NOTHING, so re-following something already followed adds no row and must never
+    // trip the cap — only a genuinely new follow should be able to.
+    const n = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM list_follows WHERE user_id = ?1 AND NOT (owner_id = ?2 AND list_id = ?3)`,
+    )
+      .bind(session.userId, ownerId, listId)
       .first<{ n: number }>();
     if ((n?.n ?? 0) >= MAX_FOLLOWS) return json({ error: "too_many_follows" }, 409);
   }
