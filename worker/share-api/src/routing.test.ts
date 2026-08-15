@@ -66,6 +66,8 @@ const ctx = { waitUntil: () => {} } as any;
 
 const USER_ID = "AAAAH73X7P55T48R4CFHDED9CW";
 const FRIEND_ID = "FRIENDIDAAAA";
+/** 32 lowercase hex, matching `STICKER_ID` in stickers.ts. */
+const STICKER_ID = "0123456789abcdef0123456789abcdef";
 
 /**
  * Every route the worker declares. Bodies are well-formed where one is read, so a
@@ -101,6 +103,11 @@ const ROUTES: Array<[string, string, unknown?]> = [
   // the GET is public, which is why it is absent from the 401 list below.
   ["DELETE", "/api/me/picture"],
   ["GET", `/api/profile/${USER_ID}/picture`],
+  // Sticker cut-outs. Same split as the picture above: the two writes are session-authed
+  // under /api/me/, the read is public and so absent from the 401 list below.
+  ["POST", "/api/me/stickers"],
+  ["DELETE", `/api/me/stickers/${STICKER_ID}`],
+  ["GET", `/api/stickers/${STICKER_ID}`],
   ["GET", "/api/feed"],
   ["POST", "/api/sync", {}],
   // Shared lists and match — the other `wake` consumers
@@ -200,6 +207,11 @@ describe("route wiring", () => {
       // 401 on a missing session, which is the whole point of the move.
       ["PUT", "/api/me/picture"],
       ["DELETE", "/api/me/picture"],
+      // Sticker writes. The public GET /api/stickers/{userId}/{id} is deliberately
+      // absent — it answers unauthenticated by design, and asserting 401 on it would
+      // pin the opposite of the intended behaviour.
+      ["POST", "/api/me/stickers"],
+      ["DELETE", `/api/me/stickers/${STICKER_ID}`],
       // Watch history. `GET /api/stats/global` is deliberately absent — it is public,
       // and asserting 401 on it would pin the opposite of the intended behaviour.
       ["POST", "/api/history/sync"],

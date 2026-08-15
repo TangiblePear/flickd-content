@@ -1,0 +1,33 @@
+-- The lists a profile owner chose to show on their profile, as a JSON array of list ids.
+--
+-- ── Why ids and not the lists themselves ──
+--
+-- The obvious shape is to publish each list's name and titles into the profile payload,
+-- next to `favourite_movies`. It is wrong here, and the reason is a property of how
+-- profiles are written rather than anything about lists: a profile is pushed only when
+-- the client's dirty flag is armed, and a dirty flag is armed by editing the PROFILE.
+-- Adding a title to a list is not a profile edit, so a copy of the list living in the
+-- profile row would be correct at publish and drift from that moment on — silently, and
+-- worse the more someone uses the feature it exists to show off.
+--
+-- The lists are already here (migration 0026) and already synced. So the profile stores
+-- only the SELECTION, and the read materialises the contents from `lists`/`list_items`
+-- at the moment someone looks. Nothing can go stale because nothing is copied.
+--
+-- ── What a SMART list does here ──
+--
+-- Nothing, and that is not an oversight. A smart list has no rows in `list_items` by
+-- design — its filter IS its content and every client evaluates it locally. It would
+-- therefore materialise as a list with a name and no titles. The client's picker only
+-- offers lists that have items, so one should never arrive; if one does, it renders as
+-- an empty list rather than as an error.
+--
+-- ── Caps ──
+--
+-- Applied on READ (see MAX_SHARED_LISTS / MAX_SHARED_LIST_ITEMS in profiles.ts), not
+-- stored here. A cap in the column would have to be re-litigated by every writer; a cap
+-- on the read is the one place every audience passes through.
+--
+-- Nullable with no default: NULL means "this client predates the field", which is the
+-- honest reading for every row that exists today. The Worker maps NULL to [] on read.
+ALTER TABLE profiles ADD COLUMN shared_list_ids TEXT;

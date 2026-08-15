@@ -691,6 +691,14 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     // look complete and be a total failure. The public slice goes too — it is a copy.
     await env.BUCKET.delete(`history/${id}.json`);
     await env.BUCKET.delete(`profile/${id}/recent.json`);
+    // ⚠️ Sticker cut-outs are deliberately NOT erased here, and that is not an omission.
+    //
+    // A sticker is cut from a public promotional image and published for everyone to
+    // use, so it is community content rather than personal data — the same standing as a
+    // contribution that outlives the contributor. They are stored under a flat
+    // `stickers/{id}` namespace with no user id in the key or the URL precisely so that
+    // surviving an erasure does not leave a deleted account's identifier resolvable.
+    // See src/stickers.ts.
     // The public friend card. Leaving it behind keeps a deleted person's name, avatar
     // and picture URL resolvable by anyone still holding their code.
     const own = await env.DB.prepare("SELECT friend_code FROM users WHERE id = ?")

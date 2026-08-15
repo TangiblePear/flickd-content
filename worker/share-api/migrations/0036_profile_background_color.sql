@@ -1,0 +1,30 @@
+-- The colour a profile's PAGE is painted, behind the block cards.
+--
+-- ── Why this is not `header_color` ──
+--
+-- `header_color` paints the banner at the top; this paints the canvas the banner
+-- dissolves into and every block card sits on. They are different surfaces and a user may
+-- set either alone, so folding them into one column would make "a red header on the
+-- default page" unexpressible.
+--
+-- ── What it holds ──
+--
+-- One `#RRGGBB` (or `#AARRGGBB`) string, or NULL/empty for "use the app's own theme
+-- background". Never a comma-separated pair: unlike `header_color`, there is no duotone
+-- form here — a gradient behind a scrolling column of cards reads as a rendering fault
+-- rather than a choice.
+--
+-- ── Why there is no `visibleBackgroundColor` in premiere.ts ──
+--
+-- A dozen curated colours are free and the custom picker is Premiere, but unlike a duotone
+-- header — which the Worker can spot by its comma and degrade without knowing the palette
+-- — "is this one of the twelve" cannot be answered here without copying the palette out of
+-- the Kotlin source, which would then be a second definition to keep in step. So the
+-- AUTHOR's client applies the entitlement once at publish (`effectiveProfileBackground`),
+-- and this column stores whatever it sent. The trade is stated plainly: a modified client
+-- could keep a custom colour past a lapse. It is a cosmetic, and the alternative is a
+-- palette that has to be edited in two languages every time a swatch changes.
+--
+-- Nullable with no default: NULL means "this client predates the field", which is the
+-- honest reading for every row that exists today. The Worker maps NULL to "" on read.
+ALTER TABLE profiles ADD COLUMN background_color TEXT;

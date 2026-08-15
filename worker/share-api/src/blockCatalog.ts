@@ -49,6 +49,10 @@ const META: Record<string, BlockMeta> = {
   bio: F(true),
   taste_tags: F(true),
   streak: F(),
+  // Curation, not behaviour: lists the owner built and then picked, one by one, to put on
+  // display. Same reasoning as fav_movies, and it must match ProfileBlockCatalog.kt —
+  // this is the entry that decides whether `sharedLists` is materialised for a reader.
+  lists: F(true),
 };
 
 const OWNER_ONLY: BlockMeta = {

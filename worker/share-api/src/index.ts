@@ -81,6 +81,15 @@ interface Env {
 import { sendFcmMessage, pickFcmTarget } from "./fcm";
 import { fcmConfig, notifyAccount } from "./notify";
 import { moderateImage } from "./moderation";
+import {
+  STICKER_ID,
+  handleBrowseStickers,
+  handleCommunityStickers,
+  handleDeleteSticker,
+  handleGetSticker,
+  handleUploadSticker,
+  handleUseSticker,
+} from "./stickers";
 import { reapOrphanProfiles, reapOldReports, dueForReap } from "./reaper";
 import { handleAccountLink, handleAccountResolve, handleAccountUnlink, deleteAccountForFriend } from "./account";
 import { handleAuthSession, handleAuthLogout, handleAuthProbe, resolveSession } from "./auth";
@@ -138,6 +147,7 @@ import { handleAdminFeedbackAct, handleAdminFeedbackList, handlePostFeedback } f
 import { handleKlipy } from "./klipy";
 import { handleVerifyPremiere, isPremiere } from "./premiere";
 import { handlePutInstall } from "./install";
+import { loadFriendProgress } from "./progress";
 import { handleSync, type RelayRequest, type RelayResponse, type SyncEnv } from "./sync";
 import { handleWebTelemetry } from "./telemetry";
 import {
@@ -352,6 +362,40 @@ export default {
     const accountPicture = p.match(new RegExp(`^/api/profile/(${USER_ID})/picture$`));
     if (accountPicture && req.method === "GET") return handleGetAccountPicture(accountPicture[1], env);
 
+    // ── Sticker cut-outs (src/stickers.ts) ──
+    // Same split as the pictures above and for the same reasons: writes are
+    // session-authed under `/api/me/`, the read is public at its own prefix because Coil
+    // fetches it with no headers.
+    //
+    // ⚠️ `/api/me/stickers` and `/api/me/stickers/{id}` are matched SEPARATELY. A bare
+    // path is not matched by a `/{id}` pattern, and this file has been bitten by exactly
+    // that six times over — with both vitest and `wrangler deploy --dry-run` green.
+    if (p === "/api/me/stickers" && req.method === "POST") {
+      return handleUploadSticker(req, env, ctx);
+    }
+    const mySticker = p.match(new RegExp(`^/api/me/stickers/(${STICKER_ID})$`));
+    if (mySticker && req.method === "DELETE") return handleDeleteSticker(req, mySticker[1], env, ctx);
+
+    // Community market for a title. Matched BEFORE the `{id}` pattern below — "community"
+    // is not 32 hex so it could not collide, but relying on that is relying on the id
+    // alphabet never widening.
+    if (p === "/api/stickers/community" && req.method === "GET") {
+      return handleCommunityStickers(url, env);
+    }
+    if (p === "/api/stickers/browse" && req.method === "GET") {
+      return handleBrowseStickers(url, env);
+    }
+    // Matched BEFORE the bare `{id}` read below — `/api/stickers/{id}/use` would
+    // otherwise fall through to a pattern that does not expect a trailing segment.
+    const stickerUse = p.match(new RegExp(`^/api/stickers/(${STICKER_ID})/use$`));
+    if (stickerUse && req.method === "POST") return handleUseSticker(req, stickerUse[1], env, ctx);
+
+    // No user id in this path, deliberately — a sticker outlives the account that made
+    // it, and a URL carrying `users.id` would keep a deleted account's identifier
+    // resolvable forever. See the header of src/stickers.ts.
+    const publicSticker = p.match(new RegExp(`^/api/stickers/(${STICKER_ID})$`));
+    if (publicSticker && req.method === "GET") return handleGetSticker(publicSticker[1], env);
+
     // Report ingestion moved to `POST /api/report` (D1, session-authenticated). The
     // relay endpoint that lived here keyed on the device friendId and authenticated
     // on a bound read token; its picture auto-hide now runs in friends.ts, against
@@ -532,7 +576,15 @@ export default {
     // The relay half is injected here because the R2 object layout and its crypto
     // helpers live in this file; `sync.ts` stays D1-only and therefore testable.
     if (p === "/api/sync" && req.method === "POST") {
-      return handleSync(req, env as unknown as SyncEnv, ctx, (_e, _uid, relayReq) => loadRelay(env, relayReq));
+      return handleSync(
+        req,
+        env as unknown as SyncEnv,
+        ctx,
+        (_e, _uid, relayReq) => loadRelay(env, relayReq),
+        // R2-backed, so it is injected here rather than imported by sync.ts — that module
+        // stays D1-only and therefore testable without a bucket binding.
+        (_e, uid, queries) => loadFriendProgress(env, uid, queries),
+      );
     }
 
     // The web's equivalent of the telemetry that rides `/api/sync` on Android. The

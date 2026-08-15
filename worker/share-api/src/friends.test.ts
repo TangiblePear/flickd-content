@@ -921,6 +921,10 @@ describe("account deletion", () => {
     await env.BUCKET.put(`history/${A}.json`, "A-history");
     await env.BUCKET.put(`profile/${A}/recent.json`, "A-public");
     await env.BUCKET.put(`history/${B}.json`, "B-history");
+    // Community content, and deliberately untouched by erasure — see the note in
+    // `eraseAccount`. Asserted below so a future "completeness" pass that sweeps it in
+    // has to change this expectation on purpose rather than by accident.
+    await env.BUCKET.put("stickers/s1.png", "a-sticker");
 
     await handleDeleteAccount(new Request("https://flickto.app/api/me/account", {
       method: "DELETE",
@@ -932,6 +936,9 @@ describe("account deletion", () => {
     expect(objects.has(`profile/${A}/recent.json`)).toBe(false);
     // Nobody else's history is touched.
     expect(objects.has(`history/${B}.json`)).toBe(true);
+    // A sticker this account uploaded SURVIVES. It was cut from a public promotional
+    // image and published for everyone, so it is community content, not personal data.
+    expect(objects.has("stickers/s1.png")).toBe(true);
   });
 
   /**

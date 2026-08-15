@@ -1,0 +1,11 @@
+-- Friend-visible watch progress.
+--
+-- The digest itself is an R2 object (`progress/{userId}.json`) derived from the user's
+-- history document; only the consent flag lives here, beside the version readers already
+-- gate on. Putting the digest in D1 was never an option — it is one entry per title per
+-- user, i.e. exactly the bulk per-entity shape that pushed watch history out to R2 in 0020.
+--
+-- `share_progress` defaults to 0 so no existing account starts publishing on deploy. The
+-- flag arrives on the next `POST /api/history/sync` from a client that knows about it, and
+-- until then the account simply has no digest.
+ALTER TABLE history_meta ADD COLUMN share_progress INTEGER NOT NULL DEFAULT 0;

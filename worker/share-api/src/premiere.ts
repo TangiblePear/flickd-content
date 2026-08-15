@@ -307,3 +307,41 @@ export async function handleVerifyPremiere(
 
   return json({ isPremiere: expiryMillis > now, premiereUntil: expiryMillis });
 }
+
+/**
+ * The placed stickers a reader should receive.
+ *
+ * Same rule as [visibleBorderId]: a Premiere look is rented, not earned, so it stops
+ * being published when the subscription ends. A lapsed profile shows **one** sticker with
+ * a **plain white** border — the free entitlement — rather than nothing, because the free
+ * tier includes a sticker and blanking it would punish a lapse harder than never having
+ * subscribed.
+ *
+ * ⚠️ **The stored value is left alone.** Only what is published is degraded, so every
+ * placement and every border choice returns intact on resubscribe. Truncating the column
+ * would destroy work the moment a card expired.
+ *
+ * ⚠️ This function knows the encoding `ProfileStickerCodec` writes — records joined by
+ * `|`, fields by `;`, border in field 7. That is a **contract**, exactly like the
+ * `bd_pre_` prefix above: the Worker otherwise treats this column as opaque, and this is
+ * the one place it must not. See `ProfileStickerCodec` on the Android side.
+ */
+export function visibleStickers(
+  stickers: string | null | undefined,
+  row: PremiereRow | null | undefined,
+  now = Date.now(),
+): string {
+  const raw = stickers ?? "";
+  if (!raw || isPremiere(row, now)) return raw;
+
+  const first = raw.split("|")[0];
+  if (!first) return "";
+  const fields = first.split(";");
+  // Too few fields to be a placement at all — drop it rather than publish a half record.
+  if (fields.length < 6) return "";
+  fields[6] = FREE_BORDER;
+  return fields.join(";");
+}
+
+/** What a free account's border is. Mirrors `StickerEntitlements.FREE_BORDER` on Android. */
+const FREE_BORDER = "#FFFFFF";

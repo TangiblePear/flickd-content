@@ -19,7 +19,9 @@ import { loadFeed } from "./feed";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
-import { isPremiere, readPremiereWire, visibleBorderId, visibleHeaderColor, visiblePictureUrl } from "./premiere";
+import { isPremiere, readPremiereWire, visibleBorderId, visibleHeaderColor, visiblePictureUrl,
+  visibleStickers,
+} from "./premiere";
 import { isBetaTester } from "./install";
 
 export interface ProfileEnv {
@@ -79,6 +81,12 @@ const notFound = () => json({ error: "not_found" }, 404);
 
 // ── Size caps. Every one of these is a write the client controls. ──
 const MAX_BIO = 500;
+/**
+ * 12 stickers x ~90 chars a record (32-char id + a 66-char URL + six numbers), with room
+ * to spare. A cap rather than none: this string is echoed to every visitor who opens the
+ * profile, so an unbounded one is unbounded egress on somebody else's connection.
+ */
+const MAX_STICKERS = 2000;
 const MAX_NAME = 60;
 const MAX_SHORT = 120; // ids, hex colours
 const MAX_URL = 500;
@@ -95,6 +103,18 @@ interface ProfileRow {
   picture_url: string | null;
   header_color: string | null;
   header_backdrop_url: string | null;
+  /**
+   * The profile PAGE background, behind the block cards — a separate surface from
+   * `header_color`, which paints the banner. One `#RRGGBB`, never a duotone pair.
+   * Premiere entitlement is applied by the author's client, not here; see migration 0036.
+   */
+  background_color: string | null;
+  /**
+   * JSON array of list ids the owner chose to show on their profile. The SELECTION only —
+   * names and titles are materialised from `lists`/`list_items` on read, so they cannot
+   * go stale. See migration 0037.
+   */
+  shared_list_ids: string | null;
   layout: string | null;
   /** The owner's layout with owner-only and unconsented blocks already stripped. */
   friend_layout: string | null;
@@ -103,6 +123,15 @@ interface ProfileRow {
    * unless the owner has turned on public activity. NULL = the client predates the field.
    */
   public_layout: string | null;
+  /**
+   * Stickers the owner placed on their profile, as the opaque `ProfileStickerCodec`
+   * string the client writes. Never parsed here — the format belongs to the client, and
+   * a second definition of it in this file would be one more thing to keep in step.
+   *
+   * NOT audience-filtered, unlike the three layouts above: a sticker is a picture the
+   * owner chose to publish and carries nothing about what they watched.
+   */
+  stickers: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -137,10 +166,89 @@ interface ProfileRow {
 // both tables.
 const PROFILE_COLUMNS =
   "p.user_id, p.display_name, p.avatar_id, p.border_id, p.picture_url, p.header_color, p.header_backdrop_url, " +
-  "p.layout, p.friend_layout, p.public_layout, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
+  "p.background_color, p.shared_list_ids, " +
+  "p.layout, p.friend_layout, p.public_layout, p.stickers, p.bio, p.favourite_movies, p.favourite_shows, p.favourite_people, " +
   "p.featured_achievements, p.personality_id, p.visibility, p.version, p.updated_at, " +
   "p.friend_sensitive_consent_at, p.public_sensitive_consent_at, u.premiere_until, u.premiere_comp_until, " +
   "u.picture_animated, u.beta_tester";
+
+/**
+ * Caps for the shared-lists block, applied on READ so every audience passes through one
+ * place. Sized to keep a profile read cheap: a horizontal shelf nobody scrolls to the end
+ * of is not worth a wider query.
+ */
+const MAX_SHARED_LISTS = 6;
+const MAX_SHARED_LIST_ITEMS = 20;
+
+/** One list as a profile visitor receives it: identity, a capped preview, and the true size. */
+export interface SharedListWire {
+  id: string;
+  name: string;
+  /** The FULL number of titles in the list, which may exceed `items.length`. */
+  itemCount: number;
+  items: { tmdbId: number; mediaType: string }[];
+}
+
+/**
+ * Materialise the owner's chosen lists from live `lists`/`list_items` rows.
+ *
+ * Deliberately NOT read from a copy stored on the profile — see migration 0037. The cost
+ * is two indexed queries on a page that already does several, and the benefit is that a
+ * title added to a list appears on the profile immediately rather than at the next
+ * unrelated profile edit.
+ *
+ * Order follows the owner's [ids] (their arrangement), not the database's. Ids that no
+ * longer resolve — deleted, or never synced from the device that made them — are dropped
+ * silently: a list that is gone is not an error, it is one fewer card.
+ */
+export async function sharedListsFor(
+  env: ProfileEnv,
+  userId: string,
+  ids: string[],
+): Promise<SharedListWire[]> {
+  const wanted = ids.slice(0, MAX_SHARED_LISTS).filter((id) => typeof id === "string" && id.length > 0);
+  if (wanted.length === 0) return [];
+  const placeholders = wanted.map(() => "?").join(",");
+
+  const headers = await env.DB.prepare(
+    `SELECT id, name FROM lists
+      WHERE user_id = ? AND deleted_at IS NULL AND id IN (${placeholders})`,
+  )
+    .bind(userId, ...wanted)
+    .all<{ id: string; name: string }>();
+  const nameById = new Map((headers.results ?? []).map((r) => [r.id, r.name]));
+  if (nameById.size === 0) return [];
+
+  // One query for every list's items rather than one per list: at six lists that is five
+  // fewer round trips, and D1 charges per statement.
+  const live = wanted.filter((id) => nameById.has(id));
+  const itemPlaceholders = live.map(() => "?").join(",");
+  const items = await env.DB.prepare(
+    `SELECT list_id, tmdb_id, type FROM list_items
+      WHERE user_id = ? AND list_id IN (${itemPlaceholders})
+      ORDER BY list_id, position, added_at`,
+  )
+    .bind(userId, ...live)
+    .all<{ list_id: string; tmdb_id: number; type: string }>();
+
+  const byList = new Map<string, { tmdbId: number; mediaType: string }[]>();
+  for (const row of items.results ?? []) {
+    const bucket = byList.get(row.list_id) ?? [];
+    bucket.push({ tmdbId: row.tmdb_id, mediaType: row.type });
+    byList.set(row.list_id, bucket);
+  }
+
+  return live.map((id) => {
+    const all = byList.get(id) ?? [];
+    return {
+      id,
+      name: nameById.get(id) ?? "",
+      // The true total, so the card can say "+12 more" rather than lying about its size.
+      itemCount: all.length,
+      items: all.slice(0, MAX_SHARED_LIST_ITEMS),
+    };
+  });
+}
 
 /** Parse a JSON column, falling back to [fallback] rather than throwing on a bad row. */
 function jsonColumn<T>(raw: string | null, fallback: T): T {
@@ -165,7 +273,14 @@ export function toWire(row: ProfileRow) {
     // Degraded to its first stop once Premiere lapses — see visibleHeaderColor.
     headerColor: visibleHeaderColor(row.header_color, row),
     headerBackdropUrl: row.header_backdrop_url ?? "",
+    // NOT passed through a `visible…` helper, unlike the three above. The free/Premiere
+    // split for this one is a palette membership test, which cannot be made here without
+    // copying the palette out of the Kotlin source — so the author's client applies it at
+    // publish instead. See migration 0036 for the full reasoning.
+    backgroundColor: row.background_color ?? "",
     layout: jsonColumn<unknown[]>(row.layout, []),
+    // Degraded to the free entitlement once Premiere lapses — see visibleStickers.
+    stickers: visibleStickers(row.stickers, row),
     bio: row.bio ?? "",
     favouriteMovies: jsonColumn<number[]>(row.favourite_movies, []),
     favouriteShows: jsonColumn<number[]>(row.favourite_shows, []),
@@ -202,6 +317,12 @@ export function toOwnerWire(row: ProfileRow) {
     ...toWire(row),
     friendLayout: row.friend_layout == null ? null : jsonColumn<unknown[]>(row.friend_layout, []),
     publicLayout: row.public_layout == null ? null : jsonColumn<unknown[]>(row.public_layout, []),
+    // The shared-lists SELECTION, and owner-only for the same reason the layouts are: it
+    // is the restore source, and it is not what anyone else renders. A visitor receives
+    // `sharedLists` — the materialised contents — and never this. Putting it in `toWire`
+    // would hand every stranger a count of how many lists someone shares, plus the ids,
+    // for no reader that needs them.
+    sharedListIds: jsonColumn<string[]>(row.shared_list_ids, []),
   };
 }
 
@@ -339,9 +460,12 @@ interface ValidatedProfile {
   picture_url: string | null;
   header_color: string | null;
   header_backdrop_url: string | null;
+  background_color: string | null;
+  shared_list_ids: string | null;
   layout: string | null;
   friend_layout: string | null;
   public_layout: string | null;
+  stickers: string | null;
   bio: string | null;
   favourite_movies: string | null;
   favourite_shows: string | null;
@@ -395,9 +519,12 @@ function mergeValidated(body: Record<string, unknown>, existing: ProfileRow | nu
     picture_url: text("pictureUrl", "picture_url", MAX_URL),
     header_color: text("headerColor", "header_color", MAX_SHORT),
     header_backdrop_url: text("headerBackdropUrl", "header_backdrop_url", MAX_URL),
+    background_color: text("backgroundColor", "background_color", MAX_SHORT),
+    shared_list_ids: list("sharedListIds", "shared_list_ids"),
     layout,
     friend_layout: friendLayout,
     public_layout: publicLayout,
+    stickers: text("stickers", "stickers", MAX_STICKERS),
     bio: text("bio", "bio", MAX_BIO),
     favourite_movies: list("favouriteMovies", "favourite_movies"),
     favourite_shows: list("favouriteShows", "favourite_shows"),
@@ -477,16 +604,21 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
   const version = currentVersion + 1;
   await env.DB.prepare(
     `INSERT INTO profiles (user_id, display_name, avatar_id, border_id, picture_url, header_color,
-       header_backdrop_url, layout, friend_layout, public_layout, bio, favourite_movies, favourite_shows,
-       favourite_people, featured_achievements, personality_id, visibility, version, updated_at,
-       friend_sensitive_consent_at, public_sensitive_consent_at)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       header_backdrop_url, background_color, shared_list_ids, layout, friend_layout,
+       public_layout, stickers, bio,
+       favourite_movies,
+       favourite_shows, favourite_people, featured_achievements, personality_id, visibility, version,
+       updated_at, friend_sensitive_consent_at, public_sensitive_consent_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
      ON CONFLICT(user_id) DO UPDATE SET
        display_name = excluded.display_name, avatar_id = excluded.avatar_id,
        border_id = excluded.border_id, picture_url = excluded.picture_url,
        header_color = excluded.header_color, header_backdrop_url = excluded.header_backdrop_url,
+       background_color = excluded.background_color,
+       shared_list_ids = excluded.shared_list_ids,
        layout = excluded.layout, friend_layout = excluded.friend_layout,
-       public_layout = excluded.public_layout, bio = excluded.bio,
+       public_layout = excluded.public_layout, stickers = excluded.stickers,
+       bio = excluded.bio,
        favourite_movies = excluded.favourite_movies, favourite_shows = excluded.favourite_shows,
        favourite_people = excluded.favourite_people,
        featured_achievements = excluded.featured_achievements,
@@ -503,9 +635,12 @@ export async function handlePutMyProfile(req: Request, env: ProfileEnv, ctx?: Ex
       next.picture_url,
       next.header_color,
       next.header_backdrop_url,
+      next.background_color,
+      next.shared_list_ids,
       next.layout,
       next.friend_layout,
       next.public_layout,
+      next.stickers,
       next.bio,
       next.favourite_movies,
       next.favourite_shows,
@@ -628,15 +763,27 @@ export async function handleGetProfile(
   // and consent — so asking after filtering means a profile that does not
   // publish a heatmap never pays for one, and a reader who may not see it
   // cannot be sent it.
-  const showsHeatmap = Array.isArray(profile.layout)
-    && (profile.layout as { type?: string }[]).some((b) => b?.type === "wrapped");
+  const blocks = Array.isArray(profile.layout) ? (profile.layout as { type?: string }[]) : [];
+  const showsHeatmap = blocks.some((b) => b?.type === "wrapped");
+
+  // Same rule as the heatmap directly below: ask only AFTER the layout has been filtered
+  // by audience and consent. A profile that does not publish a lists block never pays for
+  // the two queries, and a reader who may not see it cannot be sent it — which is what
+  // makes "the server decides what you see" true rather than merely intended.
+  const withLists = blocks.some((b) => b?.type === "lists")
+    ? {
+      ...profile,
+      sharedLists: await sharedListsFor(env, userId, jsonColumn<string[]>(row.shared_list_ids, [])),
+    }
+    : profile;
+
   if (showsHeatmap && env.BUCKET) {
     const dailyCounts = await dailyActivityFor(env as never, userId);
     if (Object.keys(dailyCounts).length) {
-      return json({ profile, stats: { ...(stats ?? {}), dailyCounts } });
+      return json({ profile: withLists, stats: { ...(stats ?? {}), dailyCounts } });
     }
   }
-  return json({ profile, stats });
+  return json({ profile: withLists, stats });
 }
 
 /**

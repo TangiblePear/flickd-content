@@ -17,6 +17,7 @@ import { loadFeed, publishEvents, type FeedEnv } from "./feed";
 import { loadFriendships, loadFriendTopics } from "./friends";
 import { loadSharedLists, type ListsEnv } from "./lists";
 import { loadMatches, sweepOnceMatchPayloads, sweepTerminalMatches, type MatchEnv } from "./match";
+import type { PackedProgress, ProgressQuery } from "./progress";
 import { readProfileRow, toWire, type ProfileEnv } from "./profiles";
 import { readSettingsRow, toSettingsWire } from "./settings";
 import { readAchievementsRow, toAchievementsWire } from "./achievements";
@@ -78,6 +79,14 @@ export interface SyncRequest {
   lists?: boolean;
   match?: boolean;
   /**
+   * Per-friend watch-progress digests wanted, each with the version the client holds.
+   *
+   * A list rather than a bare flag, unlike `lists` / `match`, because the answer is per
+   * friend and almost always empty: in the steady state every version matches and this
+   * costs one indexed D1 query and zero R2 reads.
+   */
+  progress?: ProgressQuery[];
+  /**
    * Product telemetry. Absent from every client that predates it — and that costs
    * nothing, because the version and country halves come from the request itself, so
    * the fleet already in the field still lands a row. See `telemetry.ts`.
@@ -114,6 +123,19 @@ export interface RelayResponse {
 export type RelayLoader = (env: SyncEnv, requesterId: string, req: RelayRequest) => Promise<RelayResponse>;
 
 /**
+ * Reads friends' progress digests.
+ *
+ * Injected for the same reason [RelayLoader] is: the digests are R2 objects, and `SyncEnv`
+ * is deliberately D1-only so this module stays testable without a bucket binding. Wired to
+ * the real `loadFriendProgress` in `index.ts`, where BUCKET is in scope.
+ */
+export type ProgressLoader = (
+  env: SyncEnv,
+  userId: string,
+  queries: ProgressQuery[],
+) => Promise<Array<{ userId: string; version: number; titles: Record<string, PackedProgress> }>>;
+
+/**
  * `POST /api/sync` — one session-authenticated request per refresh.
  *
  * The client sends its cursors and any pending writes; the Worker applies the
@@ -132,6 +154,7 @@ export async function handleSync(
   env: SyncEnv,
   ctx?: ExecutionContext,
   loadRelay?: RelayLoader,
+  loadProgress?: ProgressLoader,
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
@@ -199,6 +222,13 @@ export async function handleSync(
   const lists = body.lists ? await loadSharedLists(env, session.userId) : null;
   const match = body.match ? await loadMatches(env, session.userId) : null;
 
+  //    Friends' watch-progress digests. Only those whose version moved past what the
+  //    client holds come back, so an idle pass is one indexed D1 query and no R2 reads.
+  //    Null when not asked for, matching the two above.
+  const progress = loadProgress && Array.isArray(body.progress) && body.progress.length > 0
+    ? await loadProgress(env, session.userId, body.progress)
+    : null;
+
   // 4. R2, if the caller asked for it. This half now carries ONLY the live friends+block
   //    record. The E2EE inbox went with the last message type it carried (Part C), and the
   //    freshness scan went at step 7 with the profile.json it reported on — so `friends`
@@ -245,6 +275,7 @@ export async function handleSync(
     achievements,
     lists,
     match,
+    progress,
     relay,
     ...premiere,
     // Server-controlled so the date can move without an app release — a date baked

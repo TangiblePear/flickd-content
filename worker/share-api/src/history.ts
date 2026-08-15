@@ -46,6 +46,7 @@ import {
   dailyActivity,
 } from "./historyDoc";
 import { notifyHistoryWrite, type NotifyEnv } from "./notify";
+import { progressKey as progressObjectKey, publishProgressDigest } from "./progress";
 import { maybeRollup, recordTelemetry } from "./telemetry";
 
 // Re-exported: it lives with the document model now (the merge needs it to recover a
@@ -109,6 +110,12 @@ export const historyKey = (userId: string) => `history/${userId}.json`;
  * exists because one blob cannot honestly serve two audiences.
  */
 export const publicRecentKey = (userId: string) => `profile/${userId}/recent.json`;
+
+/**
+ * There is a THIRD object beside these two: `progress/{userId}.json`, friends-only, defined
+ * in `progress.ts`. Not the private document (that is the whole history) and not the public
+ * slice (recent events, which cannot answer "did they finish this show?").
+ */
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -282,11 +289,13 @@ interface MetaRow {
   event_count: number;
   title_count: number;
   last_watched_at: number | null;
+  /** 1 when the user shares per-title progress with friends. See `progress.ts`. */
+  share_progress?: number;
 }
 
 async function readMeta(env: HistoryEnv, userId: string): Promise<MetaRow | null> {
   return env.DB.prepare(
-    "SELECT version, event_count, title_count, last_watched_at FROM history_meta WHERE user_id = ?",
+    "SELECT version, event_count, title_count, last_watched_at, share_progress FROM history_meta WHERE user_id = ?",
   )
     .bind(userId)
     .first<MetaRow>();
@@ -525,15 +534,22 @@ export async function handleHistorySync(
     version = doc.ver ?? serverVersion + 1;
 
     const s = statsFor(doc);
+    // ⚠️ Absent means UNCHANGED, never "off". Every client shipped before this field
+    // existed omits it, and reading omission as `false` would revoke sharing for every
+    // user on an older build the moment they synced — then delete their digest.
+    const shareProgress =
+      typeof body.shareProgress === "boolean"
+        ? body.shareProgress
+        : (meta?.share_progress ?? 0) === 1;
     await env.DB.prepare(
-      `INSERT INTO history_meta (user_id, version, event_count, title_count, last_watched_at, updated_at)
-       VALUES (?,?,?,?,?,?)
+      `INSERT INTO history_meta (user_id, version, event_count, title_count, last_watched_at, updated_at, share_progress)
+       VALUES (?,?,?,?,?,?,?)
        ON CONFLICT(user_id) DO UPDATE SET
          version = excluded.version, event_count = excluded.event_count,
          title_count = excluded.title_count, last_watched_at = excluded.last_watched_at,
-         updated_at = excluded.updated_at`,
+         updated_at = excluded.updated_at, share_progress = excluded.share_progress`,
     )
-      .bind(session.userId, version, s.eventCount, s.titleCount, s.lastWatchedAt, Date.now())
+      .bind(session.userId, version, s.eventCount, s.titleCount, s.lastWatchedAt, Date.now(), shareProgress ? 1 : 0)
       .run();
 
     // Phase 3: queue outward pushes for whatever this account has connected. Costs
@@ -560,6 +576,9 @@ export async function handleHistorySync(
     const finish = async () => {
       writeAnalytics(env, session.userId, before, after);
       await writePublicRecent(env, session.userId, after);
+      // The friend-visible digest. Rides the SAME waitUntil as the public slice, so it
+      // costs no extra request and cannot delay the response.
+      await publishProgressDigest(env, session.userId, after, shareProgress);
       await invalidateStats(env, session.userId);
       // Hung off the WRITE, never the request: the idle path is the overwhelmingly
       // common one and must stay free of an OAuth round trip and an FCM publish.
@@ -786,6 +805,9 @@ export async function handleDeleteHistory(
 
   const finish = async () => {
     await writePublicRecent(env, session.userId, merged);
+    // A deletion changes progress too — without this the digest keeps showing a friend
+    // as further along than they now are, until their next ordinary sync.
+    await publishProgressDigest(env, session.userId, merged, (meta?.share_progress ?? 0) === 1);
     await invalidateStats(env, session.userId);
     // A removal has to reach the other devices as promptly as an addition; otherwise a
     // watch deleted on one device lingers on the rest for up to a full periodic cycle.
@@ -894,7 +916,14 @@ async function queryTopTitles(env: HistoryEnv): Promise<GlobalStats["topTitles"]
 }
 
 /** Exported for the account-deletion path, which must remove BOTH objects. */
-export const historyObjectKeys = (userId: string) => [historyKey(userId), publicRecentKey(userId)];
+// ⚠️ Every R2 object keyed by the account must be listed here — this is what account
+// deletion sweeps. The progress digest is friend-readable, so leaving it behind would keep
+// serving a deleted user's viewing history to their former friends.
+export const historyObjectKeys = (userId: string) => [
+  historyKey(userId),
+  publicRecentKey(userId),
+  progressObjectKey(userId),
+];
 
 export { WATCHED_THRESHOLD_PCT, MAX_EVENTS_PER_SYNC, MAX_RATINGS_PER_SYNC };
 

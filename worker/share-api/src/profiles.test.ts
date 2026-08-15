@@ -35,6 +35,10 @@ class FakeD1 {
   users: Row[] = [];
   /** token → user, stood in for the sessions table; expiry/revocation aren't under test here. */
   sessions = new Map<string, string>();
+  /** The owner's own lists, for the shared-lists block. `{ user_id, id, name, deleted_at }`. */
+  lists: Row[] = [];
+  /** `{ user_id, list_id, tmdb_id, type, position }`. */
+  list_items: Row[] = [];
 
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -122,9 +126,12 @@ class FakeStmt {
         picture_url,
         header_color,
         header_backdrop_url,
+        background_color,
+        shared_list_ids,
         layout,
         friend_layout,
         public_layout,
+        stickers,
         bio,
         favourite_movies,
         favourite_shows,
@@ -145,9 +152,12 @@ class FakeStmt {
         picture_url,
         header_color,
         header_backdrop_url,
+        background_color,
+        shared_list_ids,
         layout,
         friend_layout,
         public_layout,
+        stickers,
         bio,
         favourite_movies,
         favourite_shows,
@@ -186,6 +196,33 @@ class FakeStmt {
     throw new Error(`FakeD1: unhandled run() for ${s}`);
   }
   async all() {
+    const s = this.sql;
+    // The shared-lists materialisation. Both queries bind (user_id, ...listIds), and the
+    // id set is spliced into the SQL as placeholders — so the fake reads the ids off the
+    // bind array rather than trying to parse them back out of the statement.
+    if (s.startsWith("SELECT id, name FROM lists")) {
+      const [userId, ...ids] = this.args as string[];
+      return {
+        results: this.db.lists.filter(
+          (l) => l.user_id === userId && l.deleted_at == null && ids.includes(l.id),
+        ),
+        success: true,
+      };
+    }
+    if (s.startsWith("SELECT list_id, tmdb_id, type FROM list_items")) {
+      const [userId, ...ids] = this.args as string[];
+      const rows = this.db.list_items.filter(
+        (i) => i.user_id === userId && ids.includes(i.list_id),
+      );
+      // ORDER BY list_id, position, added_at — the real query's order matters, because the
+      // preview is the FRONT of each list and a fake that returned them shuffled would
+      // make a broken cap look correct.
+      rows.sort((a, b) =>
+        String(a.list_id).localeCompare(String(b.list_id)) ||
+        Number(a.position) - Number(b.position),
+      );
+      return { results: rows, success: true };
+    }
     return { results: [], success: true };
   }
 }
@@ -347,6 +384,31 @@ describe("owner profile", () => {
     expect(got.profile.favouriteMovies).toEqual([]); // absent → empty, never null
   });
 
+  /**
+   * The page background is a SEPARATE surface from the header banner. These two assert the
+   * pair stays independent — folding them into one column would break "a red header on the
+   * default page", and a positional slip in the INSERT bind list would silently swap them.
+   */
+  it("round-trips the page background colour alongside, not instead of, the header colour", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", { headerColor: "#E53935", backgroundColor: "#F5F1E8" }),
+      env,
+    );
+
+    const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(got.profile.headerColor).toBe("#E53935");
+    expect(got.profile.backgroundColor).toBe("#F5F1E8");
+  });
+
+  it("reports no background colour as empty, never null, for a pre-feature row", async () => {
+    const env = await env0();
+    await handlePutMyProfile(put("tok-owner", { displayName: "Pear" }), env);
+
+    const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(got.profile.backgroundColor).toBe("");
+  });
+
   it("increments the version on each accepted write", async () => {
     const env = await env0();
     await handlePutMyProfile(put("tok-owner", { displayName: "a" }), env);
@@ -421,6 +483,39 @@ describe("owner profile", () => {
       expect(got.profile.bio).toBe("kept");
       expect(got.profile.personalityId).toBe("p1");
       expect(got.profile.layout).toEqual([{ type: "BIO" }]);
+    });
+
+    /**
+     * The same carry-forward, for the two newest fields — asserted separately because the
+     * client half of this rule is where it can still go wrong: `ServerProfile` declares
+     * both nullable so an OLDER SERVER's response (one without migration 0036/0037) reads
+     * as "no opinion" rather than as an instruction to clear. This is the server end of
+     * that contract: an older CLIENT must not clear them either.
+     */
+    it("keeps the background colour and list selection when an older client omits them", async () => {
+      const env = await env0();
+      await handlePutMyProfile(
+        put("tok-owner", {
+          displayName: "Pear",
+          backgroundColor: "#12202B",
+          sharedListIds: ["l1", "l2"],
+        }),
+        env,
+      );
+      await handlePutMyProfile(put("tok-owner", { displayName: "Pear II" }, "1"), env);
+
+      const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+      expect(got.profile.backgroundColor).toBe("#12202B");
+      expect(got.profile.sharedListIds).toEqual(["l1", "l2"]);
+    });
+
+    it("still lets a present-but-empty value clear the background colour", async () => {
+      const env = await env0();
+      await handlePutMyProfile(put("tok-owner", { backgroundColor: "#12202B" }), env);
+      await handlePutMyProfile(put("tok-owner", { backgroundColor: "" }, "1"), env);
+
+      const got = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+      expect(got.profile.backgroundColor).toBe("");
     });
 
     it("still lets a present-but-empty value clear a field", async () => {
@@ -521,6 +616,116 @@ describe("foreign profile", () => {
   const seedOwner = async (env: any, visibility: string) => {
     await handlePutMyProfile(put("tok-owner", { displayName: "Pear", visibility }), env);
   };
+
+  // ── Shared lists ───────────────────────────────────────────────────────────
+  // The block publishes only an id SELECTION; contents are read live. These cover the
+  // three things that can go wrong with that: the wrong reader gets them, they go stale,
+  // or the cap silently misreports how big a list is.
+
+  const seedLists = (env: any) => {
+    env.DB.lists.push(
+      { user_id: OWNER, id: "l1", name: "Comfort rewatches", deleted_at: null },
+      { user_id: OWNER, id: "l2", name: "Gone", deleted_at: 1 },
+    );
+    for (let i = 0; i < 25; i++) {
+      env.DB.list_items.push({
+        user_id: OWNER, list_id: "l1", tmdb_id: 100 + i, type: "MOVIE", position: i,
+      });
+    }
+  };
+
+  it("materialises the owner's lists for a reader whose layout has the block", async () => {
+    const env = await env0();
+    seedLists(env);
+    await handlePutMyProfile(
+      put("tok-owner", {
+        visibility: "public",
+        layout: [{ type: "lists" }],
+        sharedListIds: ["l1"],
+      }),
+      env,
+    );
+
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.sharedLists).toHaveLength(1);
+    expect(body.profile.sharedLists[0].name).toBe("Comfort rewatches");
+    // The TRUE size, against a preview the cap trimmed. Reporting items.length here is the
+    // bug this asserts against: every long list would quietly claim to hold 20.
+    expect(body.profile.sharedLists[0].itemCount).toBe(25);
+    expect(body.profile.sharedLists[0].items).toHaveLength(20);
+    // The FRONT of the list, in the owner's order.
+    expect(body.profile.sharedLists[0].items[0].tmdbId).toBe(100);
+  });
+
+  it("reflects a list edited AFTER the profile was published, with no republish", async () => {
+    const env = await env0();
+    seedLists(env);
+    await handlePutMyProfile(
+      put("tok-owner", { visibility: "public", layout: [{ type: "lists" }], sharedListIds: ["l1"] }),
+      env,
+    );
+    // The whole reason the profile stores ids rather than a copy: adding a title is not a
+    // profile edit, so nothing here pushes a new profile.
+    env.DB.lists.push({ user_id: OWNER, id: "l3", name: "New list", deleted_at: null });
+    env.DB.list_items.push({ user_id: OWNER, list_id: "l1", tmdb_id: 999, type: "SHOW", position: 99 });
+
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.sharedLists[0].itemCount).toBe(26);
+  });
+
+  it("sends no lists to a reader whose layout does not carry the block", async () => {
+    const env = await env0();
+    seedLists(env);
+    await handlePutMyProfile(
+      put("tok-owner", { visibility: "public", layout: [{ type: "bio" }], sharedListIds: ["l1"] }),
+      env,
+    );
+
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.sharedLists).toBeUndefined();
+  });
+
+  it("never sends the raw list-id selection to a foreign reader", async () => {
+    const env = await env0();
+    seedLists(env);
+    await handlePutMyProfile(
+      put("tok-owner", { visibility: "public", layout: [{ type: "lists" }], sharedListIds: ["l1"] }),
+      env,
+    );
+
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.sharedListIds).toBeUndefined();
+    // ...while the owner still gets it back, because it is their restore source.
+    const mine = (await (await handleGetMyProfile(authed("tok-owner", "/api/me/profile"), env)).json()) as any;
+    expect(mine.profile.sharedListIds).toEqual(["l1"]);
+  });
+
+  it("drops a deleted list rather than rendering an empty card for it", async () => {
+    const env = await env0();
+    seedLists(env);
+    await handlePutMyProfile(
+      put("tok-owner", {
+        visibility: "public",
+        layout: [{ type: "lists" }],
+        sharedListIds: ["l2", "l1"],
+      }),
+      env,
+    );
+
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.sharedLists.map((l: any) => l.id)).toEqual(["l1"]);
+  });
+
+  // The whole point of the feature: someone else sees the colour you chose.
+  it("serves the owner's chosen page background to a foreign reader", async () => {
+    const env = await env0();
+    await handlePutMyProfile(
+      put("tok-owner", { displayName: "Pear", visibility: "public", backgroundColor: "#12202B" }),
+      env,
+    );
+    const body = await foreignBody(env, "tok-other");
+    expect(body.profile.backgroundColor).toBe("#12202B");
+  });
 
   it("serves a public profile to a stranger", async () => {
     const env = await env0();

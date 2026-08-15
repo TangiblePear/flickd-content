@@ -61,7 +61,11 @@ class FakeStmt {
       const u = this.db.sessions.get(a[0]);
       return u ? ({ user_id: u, expires_at: Date.now() + 8.64e7, revoked_at: null } as T) : null;
     }
-    if (s.startsWith("SELECT version, event_count, title_count, last_watched_at FROM history_meta")) {
+    // Matched on the prefix through `last_watched_at` only: the column list grows (it
+    // gained `share_progress`), and pinning the whole SELECT here makes every history test
+    // fail on an unrelated column addition rather than on a real regression.
+    if (s.startsWith("SELECT version, event_count, title_count, last_watched_at")
+      && s.includes("FROM history_meta")) {
       return (this.db.history_meta.find((r) => r.user_id === a[0]) as T) ?? null;
     }
     if (s.startsWith("SELECT target FROM user_integrations")) {

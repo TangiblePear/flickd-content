@@ -153,7 +153,24 @@ routes = [
   # all -- and it must, because `/api/daily-game/*` does NOT match a bare
   # `/api/daily-game`. `*` also spans the query string, which `?date=` and `?window=`
   # rely on.
-  { pattern = "flickto.app/api/daily-game/*", zone_name = "flickto.app" }
+  { pattern = "flickto.app/api/daily-game/*", zone_name = "flickto.app" },
+  # Sticker cut-outs (src/stickers.ts).
+  #
+  # `/api/me/*` on line 24 ALREADY covers both write endpoints — `/api/me/stickers` and
+  # `/api/me/stickers/{id}` — because a route `*` matches any string including `/`. No
+  # pattern is added for them, and adding one would be redundant rather than harmful.
+  #
+  # The public READ needs its own pattern: `/api/stickers/...` is under no existing
+  # prefix. `…/api/stickers/*` and not `…/api/stickers` — every read URL carries an
+  # `{id}` after the prefix, so there is no bare path to miss here, which is the opposite
+  # of the `/api/friends` trap and worth stating so nobody "fixes" it later.
+  #
+  # Verify with a live request after deploying; the dry-run proves nothing about routing:
+  #   405 -> the Worker was NEVER REACHED (static site answered) — pattern is wrong.
+  #   404 -> Worker reached, no such sticker. THIS is the target for a bogus id.
+  #   curl.exe -s -o NUL -w "%{http_code}" \
+  #     https://flickto.app/api/stickers/0123456789abcdef0123456789abcdef
+  { pattern = "flickto.app/api/stickers/*", zone_name = "flickto.app" }
 ]
 
 

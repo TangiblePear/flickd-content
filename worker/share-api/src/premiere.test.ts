@@ -6,6 +6,7 @@ import {
   visibleBorderId,
   visibleHeaderColor,
   visiblePictureUrl,
+  visibleStickers,
 } from "./premiere";
 import { TestD1, seedUser, uid } from "./testD1";
 
@@ -403,5 +404,46 @@ describe("readPremiereWire", () => {
   it("reads a missing account as no entitlement rather than throwing", async () => {
     const db = new TestD1();
     expect(await readPremiereWire(db as never, uid(72))).toEqual({ premiereUntil: 0, premiereCompUntil: 0 });
+  });
+});
+
+describe("visibleStickers", () => {
+  const active = { premiere_until: Date.now() + 60_000, premiere_comp_until: 0 };
+  const lapsed = { premiere_until: Date.now() - 60_000, premiere_comp_until: 0 };
+  const four =
+    "a;https://x/a;0.10;0.10;0.30;0.00;holo|" +
+    "b;https://x/b;0.20;0.20;0.30;0.00;silver|" +
+    "c;https://x/c;0.30;0.30;0.30;0.00;#FF375F|" +
+    "d;https://x/d;0.40;0.40;0.30;0.00;foil";
+
+  it("publishes everything untouched while Premiere is active", () => {
+    expect(visibleStickers(four, active)).toBe(four);
+  });
+
+  /**
+   * One sticker, plain border — the free entitlement. Not zero: the free tier includes a
+   * sticker, and blanking it would punish a lapse harder than never subscribing.
+   */
+  it("degrades to one sticker with a white border once lapsed", () => {
+    const out = visibleStickers(four, lapsed);
+    expect(out.split("|")).toHaveLength(1);
+    expect(out.split(";")[6]).toBe("#FFFFFF");
+    // Position and scale are untouched; only the count and the border are entitlements.
+    expect(out.split(";").slice(2, 6)).toEqual(["0.10", "0.10", "0.30", "0.00"]);
+  });
+
+  /**
+   * ⚠️ The guarantee that makes this safe to apply on every read: the STORED column is
+   * never rewritten, so resubscribing restores all four with their original borders.
+   */
+  it("is non-destructive — the same input degrades and restores", () => {
+    expect(visibleStickers(four, lapsed)).not.toBe(four);
+    expect(visibleStickers(four, active)).toBe(four);
+  });
+
+  it("handles an empty column and a malformed record", () => {
+    expect(visibleStickers("", lapsed)).toBe("");
+    expect(visibleStickers(null, lapsed)).toBe("");
+    expect(visibleStickers("nonsense", lapsed)).toBe("");
   });
 });

@@ -1,0 +1,34 @@
+-- Stickers placed on a profile.
+--
+-- ── What this column holds ──
+--
+-- The opaque string `ProfileStickerCodec` (Android: domain/profile/ProfileStickerCodec.kt)
+-- writes: `id;url;x;y;scale;rotation` per sticker, records joined by `|`. The Worker never
+-- parses it. That is deliberate — the format belongs to the client, and a second
+-- definition of it server-side would be one more thing to keep in step for no gain, since
+-- nothing here authorises or filters on the contents.
+--
+-- ── Why it is NOT audience-filtered ──
+--
+-- `layout` has three columns (`layout`, `friend_layout`, `public_layout`) because blocks
+-- expose stats — how much someone watched, what they rated — and different viewers are
+-- entitled to different amounts of that. A sticker exposes a picture the owner cut out
+-- and chose to publish. There is nothing in it to filter by audience, so one column
+-- serves every viewer and there is no filtered copy that could drift from the original.
+--
+-- ── Why the geometry is normalized, and why that matters here ──
+--
+-- The x/y/scale values inside this string are fractions of a canvas whose ASPECT RATIO is
+-- fixed for every device. They are not pixels and not fractions of the page. A profile
+-- page's height depends on the viewer's screen and on which blocks their privacy grant
+-- left in, so anything normalized against the page would render in the wrong place for a
+-- visitor while looking correct to the owner — a bug no single device can reveal.
+--
+-- Nothing in SQL enforces that; it is stated here because this column is where the values
+-- come to rest, and a future reader deciding to "fix up" coordinates server-side needs to
+-- know they are not in the space they might assume.
+--
+-- Nullable with no default: NULL means "this client predates the field", which is the
+-- honest reading for every row that exists today. The Worker maps NULL to "" on read, and
+-- the client reads "" as "no stickers placed".
+ALTER TABLE profiles ADD COLUMN stickers TEXT;
