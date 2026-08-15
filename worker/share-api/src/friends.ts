@@ -16,6 +16,7 @@
 import { areFriends, friendshipKey, isBlockedEitherWay } from "./authz";
 import { resolveSession } from "./auth";
 import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
+import { recomputeEngagement } from "./publicLists";
 
 export interface FriendsEnv {
   DB: D1Database;
@@ -707,6 +708,20 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     if (own?.friend_code) await env.BUCKET.delete(`fc/${own.friend_code}.json`);
   }
 
+  // The lists this account followed or liked, collected BEFORE the batch below
+  // deletes those rows. The batch clears `list_follows`/`public_list_likes` in the
+  // `user_id` direction too — this account's own follows/likes of OTHER people's
+  // lists, not just its own list's followers — and those lists' `engagement` is a
+  // cache nothing else in this worker recomputes on a schedule. Left alone, an
+  // owner's ranking would stay permanently inflated by a follower who no longer exists.
+  const engaged = await env.DB.prepare(
+    `SELECT owner_id, list_id FROM list_follows WHERE user_id = ?
+     UNION
+     SELECT owner_id, list_id FROM public_list_likes WHERE user_id = ?`,
+  )
+    .bind(id, id)
+    .all<{ owner_id: string; list_id: string }>();
+
   await env.DB.batch([
     // Sealed match payloads first: they are children of match_requests, and a blob
     // outliving the handshake that addressed it is unreachable data nobody can delete.
@@ -831,6 +846,15 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);
+
+  // Recompute the lists this now-erased account had followed or liked, from the
+  // `engaged` snapshot taken before the batch above deleted the rows that fed those
+  // caches. A list this account owned itself needs no recompute — its `public_lists`
+  // row was just deleted above — and an UPDATE against a missing row is a no-op.
+  const pairs = engaged.results ?? [];
+  if (pairs.length) {
+    await env.DB.batch(pairs.map((p) => recomputeEngagement(env, p.owner_id, p.list_id)));
+  }
 
   // The derived-stats cache. Reproducible from `watch_history` and therefore not a
   // source of truth — but it is a copy of this account's totals, and it must not

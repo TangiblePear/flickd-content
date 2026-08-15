@@ -137,6 +137,13 @@ class FakeStmt {
     if (s.startsWith("SELECT id, requester_id, target_id, state, origin, retention, requester_keyset")) {
       return { results: this.db.match_requests.filter((x) => x.requester_id === a[0] || x.target_id === a[1]) as T[] };
     }
+    // Public lists this account followed or liked (0039's engagement-recompute-on-
+    // erasure fix). This fake has no list_follows/public_list_likes tables to model,
+    // and no test here exercises public lists — real SQL against 0039 lives in
+    // publicLists.test.ts's "account erasure" block instead.
+    if (s.startsWith("SELECT owner_id, list_id FROM list_follows")) {
+      return { results: [] as T[] };
+    }
     throw new Error(`FakeD1: unhandled all() ${s}`);
   }
 
