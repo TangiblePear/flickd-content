@@ -45,20 +45,19 @@ export interface CommentsEnv extends AppCheckEnv {
   /** Per-author hourly cap. Config, not a constant, so it tunes without a deploy. */
   COMMENTS_PER_HOUR?: string;
   /**
-   * Short-window burst limiters for the comment write path.
+   * Short-window burst caps on the comment write path, per minute.
    *
    * These exist because the hourly cap above has two blind spots: it is spent only
    * by a NEW comment (so an edit loop is free), and it is per-author (so N accounts
-   * driven by one script cost nothing extra). The user limiter closes the first, the
-   * IP limiter the second.
+   * driven by one script cost nothing extra). The user cap closes the first, the IP
+   * cap the second. "0" disables either.
    *
-   * Declared optional and always optional-chained, the same shape as
-   * `ANON_RATE_LIMITER` in dailyGame.ts: absent ⇒ no limit, never a broken endpoint.
-   * Cloudflare's `simple` ratelimit accepts a period of 10 or 60 seconds only, so
-   * this is a burst control that complements the hourly cap rather than replacing it.
+   * ⚠️ Counted in D1 rather than through Cloudflare's `unsafe.bindings` ratelimit.
+   * That binding was tried first and **silently did nothing in production** — see
+   * migration 0041 for the evidence. Do not reintroduce it without proving a 429.
    */
-  COMMENT_USER_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
-  COMMENT_IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  COMMENT_WRITES_PER_MINUTE?: string;
+  COMMENT_WRITES_PER_MINUTE_IP?: string;
   /** Rate-limit strikes in the window that trigger an automatic posting suspension. */
   STRIKES_TO_SUSPEND?: string;
   /** How long an automatic suspension lasts. */
@@ -791,6 +790,18 @@ async function rateLimited(env: CommentsEnv, userId: string): Promise<boolean> {
   return (row?.n ?? 0) >= limit;
 }
 
+const BURST_WINDOW_MS = 60_000;
+const DEFAULT_WRITES_PER_MINUTE = 5;
+const DEFAULT_WRITES_PER_MINUTE_IP = 20;
+
+/** Hex SHA-256. Used to key the IP counter without storing the address itself. */
+async function sha256Hex(input: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+  let out = "";
+  for (const b of new Uint8Array(digest)) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
 /**
  * Burst limit on a comment write, per author AND per connecting IP.
  *
@@ -802,12 +813,50 @@ async function rateLimited(env: CommentsEnv, userId: string): Promise<boolean> {
  * an IP strike is the broader signal and shouldn't be spent on one user's typo.
  */
 async function burstLimited(env: CommentsEnv, req: Request, userId: string): Promise<boolean> {
-  const byUser = await env.COMMENT_USER_LIMITER?.limit({ key: `cw:${userId}` });
-  if (byUser && !byUser.success) return true;
+  const userLimit = Number(env.COMMENT_WRITES_PER_MINUTE ?? DEFAULT_WRITES_PER_MINUTE);
+  const ipLimit = Number(env.COMMENT_WRITES_PER_MINUTE_IP ?? DEFAULT_WRITES_PER_MINUTE_IP);
+  if (userLimit <= 0 && ipLimit <= 0) return false;
 
-  const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
-  const byIp = await env.COMMENT_IP_LIMITER?.limit({ key: `ci:${ip}` });
-  return !!byIp && !byIp.success;
+  const now = Date.now();
+  const since = now - BURST_WINDOW_MS;
+  const rawIp = req.headers.get("CF-Connecting-IP") ?? "";
+  const ipHash = rawIp ? await sha256Hex(rawIp) : null;
+
+  if (userLimit > 0) {
+    const row = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM comment_write_events WHERE user_id = ? AND created_at > ?",
+    )
+      .bind(userId, since)
+      .first<{ n: number }>();
+    if ((row?.n ?? 0) >= userLimit) return true;
+  }
+
+  if (ipLimit > 0 && ipHash) {
+    const row = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM comment_write_events WHERE ip_hash = ? AND created_at > ?",
+    )
+      .bind(ipHash, since)
+      .first<{ n: number }>();
+    if ((row?.n ?? 0) >= ipLimit) return true;
+  }
+
+  // Only an ACCEPTED write is recorded, matching the R2 limiter's increment-when-under
+  // rule. A refused attempt that extended its own window would turn a fixed cap into a
+  // penalty box, and the client retries blind — one burst would lock someone out for
+  // far longer than the window.
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO comment_write_events (id, user_id, ip_hash, created_at) VALUES (?, ?, ?, ?)").bind(
+      newId(),
+      userId,
+      ipHash,
+      now,
+    ),
+    // Pruned here rather than on a schedule: this account has no cron budget left, and
+    // the table is only ever read over the last window anyway.
+    env.DB.prepare("DELETE FROM comment_write_events WHERE created_at <= ?").bind(since),
+  ]);
+
+  return false;
 }
 
 /**

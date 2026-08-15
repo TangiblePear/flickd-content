@@ -233,29 +233,17 @@ bucket_name = "flickto-content"
 # rule on the route is the equivalent alternative and needs no binding at all.
 
 
-# ── Comment write burst limits ──
+# ⚠️ MEASURED 2026-08-15: the `unsafe.bindings` ratelimit approach above does NOT work
+# on this account. Comment burst limiting was built on it first (COMMENT_USER_LIMITER /
+# COMMENT_IP_LIMITER, limit 5/60s), `wrangler deploy` listed both bindings without
+# error, and eight comment writes in 27 seconds were all accepted. Because the call is
+# optional-chained, an absent binding is indistinguishable from a passing one -- it
+# fails OPEN and silently. Every code path for this binding type in the pinned
+# wrangler 3.114 is local-dev/miniflare only.
 #
-# The hourly cap in comments.ts (COMMENTS_PER_HOUR) has two blind spots these close:
-# it is spent only by a NEW comment, so an edit loop on one subject is free; and it
-# is per-author, so twenty accounts driven by one script cost nothing extra.
-#
-# `simple.period` accepts 10 or 60 seconds ONLY -- these are burst controls that sit
-# alongside the hourly cap, not a replacement for it.
-#
-# Both handlers optional-chain the binding, so removing these lines degrades to no
-# limit rather than to a broken endpoint. Namespace ids must be unique per worker;
-# 1001 is claimed above by ANON_RATE_LIMITER even while that block is commented out.
-[[unsafe.bindings]]
-name = "COMMENT_USER_LIMITER"
-type = "ratelimit"
-namespace_id = "1002"
-simple = { limit = 5, period = 60 }
-
-[[unsafe.bindings]]
-name = "COMMENT_IP_LIMITER"
-type = "ratelimit"
-namespace_id = "1003"
-simple = { limit = 20, period = 60 }
+# Comment burst limits are now counted in D1 (see COMMENT_WRITES_PER_MINUTE below and
+# migration 0041). Do not reintroduce a ratelimit binding here without first proving it
+# returns a real 429 in production.
 
 
 # Accounts, profiles, friendships, blocks (server-authoritative — NOT zero-knowledge).
@@ -350,6 +338,12 @@ COMMENTS_PER_HOUR = "30"
 # these it is never actually stopped. "0" disables the auto-suspend entirely.
 STRIKES_TO_SUSPEND = "10"
 AUTO_SUSPEND_MS = "86400000"
+# Per-minute burst caps on comment writes (POST and DELETE), counted in D1 over a
+# 60s window. The hourly cap above is spent only by a NEW comment, so without these an
+# edit loop on one subject is free; the IP cap is what makes N accounts driven by one
+# script cost N times as much. "0" disables either.
+COMMENT_WRITES_PER_MINUTE = "5"
+COMMENT_WRITES_PER_MINUTE_IP = "20"
 # ── App Check (Play Integrity) on comment writes ──
 # "off" | "log" | "enforce".
 #   log     — verify and record the outcome, NEVER reject. This is how adoption gets

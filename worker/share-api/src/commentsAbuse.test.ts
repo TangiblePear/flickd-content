@@ -1,10 +1,16 @@
-// Comment abuse controls: burst limiters, strike escalation, suspension reach,
+// Comment abuse controls: burst limits, strike escalation, suspension reach,
 // and the staged App Check rollout.
 //
 // Deliberately on the REAL-SQLite harness rather than comments.test.ts's hand-rolled
-// double. Everything asserted here IS the SQL — a windowed COUNT, a MAX() that must
-// not shorten an admin's suspension, an opportunistic prune — and a string-matching
-// double would happily pass all of it while the statements were wrong.
+// double. Everything asserted here IS the SQL — windowed COUNTs, a MAX() that must not
+// shorten an admin's suspension, an opportunistic prune — and a string-matching double
+// would happily pass all of it while the statements were wrong.
+//
+// ⚠️ The first version of this file stubbed a Cloudflare `unsafe.bindings` ratelimit
+// binding and passed, while that binding silently did nothing in production (eight
+// writes in 27s all accepted against a limit of 5/60s). A double that cannot fail the
+// way production failed is not a test. The limiter is now D1 rows, and these tests
+// count the same rows the handler does.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { handleDeleteComment, handlePostComment, handleReactToComment, handleReportComment } from "./comments";
@@ -27,6 +33,19 @@ async function seedAuthed(db: TestD1, id: string, postingSuspendedUntil: number 
   const token = `tok-${id}`;
   seedSession(db, id, await sha256Hex(token));
   return token;
+}
+
+/**
+ * Puts [n] prior writes on the clock for [userId], so the very next write is over the
+ * cap. Seeding the ledger beats driving real writes: the assertion is about the window
+ * arithmetic, and a test that has to post four comments first hides which one refused.
+ */
+function seedWrites(db: TestD1, userId: string, n: number, at = Date.now()): void {
+  for (let i = 0; i < n; i++) {
+    db.prepare("INSERT INTO comment_write_events (id, user_id, ip_hash, created_at) VALUES (?, ?, ?, ?)")
+      .bind(`seed-${userId}-${at}-${i}`, userId, null, at)
+      .run();
+  }
 }
 
 const authed = (token: string, extra: Record<string, string> = {}) => ({
@@ -61,72 +80,74 @@ const commentBody = (author: string, body = "hello") => ({
   visibility: "public",
 });
 
-/** A limiter binding that refuses after [allow] calls, and counts the keys it saw. */
-function limiter(allow: number) {
-  const keys: string[] = [];
-  return {
-    keys,
-    binding: {
-      async limit({ key }: { key: string }) {
-        keys.push(key);
-        return { success: keys.length <= allow };
-      },
-    },
-  };
-}
+const caps = (perUser: number, perIp = 0) => ({
+  COMMENT_WRITES_PER_MINUTE: String(perUser),
+  COMMENT_WRITES_PER_MINUTE_IP: String(perIp),
+});
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("comment write burst limiter", () => {
+describe("comment write burst limit", () => {
   it("refuses an EDIT, which the hourly cap never charges for", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    // First write lands, second is refused — the point being that the second is an
-    // edit of the same subject, which `rateLimited` deliberately lets through.
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(1).binding });
+    const env = testEnv(db, caps(1));
 
     const first = await handlePostComment(postReq(token, commentBody(A, "v1")), env);
     expect(first.status).toBe(200);
 
+    // The second write is an EDIT of the same subject — exactly what `rateLimited`
+    // lets through for free, and the hole this limit exists to close.
     const second = await handlePostComment(postReq(token, commentBody(A, "v2")), env);
     expect(second.status).toBe(429);
     expect(await second.json()).toEqual({ error: "rate_limited" });
+    expect(second.headers.get("Retry-After")).toBe("60");
 
-    // The edit must NOT have landed.
     expect(db.one<{ body: string }>("SELECT body FROM comments WHERE author_id = ?", A)?.body).toBe("v1");
   });
 
-  it("sends Retry-After so a blind outbox can park instead of spinning", async () => {
+  it("only counts writes inside the window", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding });
+    const env = testEnv(db, caps(1));
 
-    const res = await handlePostComment(postReq(token, commentBody(A)), env);
-    expect(res.status).toBe(429);
-    expect(res.headers.get("Retry-After")).toBe("60");
+    // At the cap, but 61s ago — outside the 60s window, so it must not refuse.
+    seedWrites(db, A, 5, Date.now() - 61_000);
+
+    expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(200);
   });
 
-  it("trips on the IP key even when two different accounts are used", async () => {
+  it("trips on the IP counter even across two different accounts", async () => {
     const db = new TestD1();
     const tokenA = await seedAuthed(db, A);
     const tokenB = await seedAuthed(db, B);
-    const ip = limiter(1);
-    // Per-user limiter left generous, so only the shared IP key can refuse this.
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(99).binding, COMMENT_IP_LIMITER: ip.binding });
+    // Per-user cap left generous, so only the shared IP can refuse this.
+    const env = testEnv(db, caps(99, 1));
     const headers = { "CF-Connecting-IP": "203.0.113.9" };
 
-    const one = await handlePostComment(postReq(tokenA, commentBody(A), headers), env);
-    expect(one.status).toBe(200);
+    expect((await handlePostComment(postReq(tokenA, commentBody(A), headers), env)).status).toBe(200);
 
     const two = await handlePostComment(postReq(tokenB, commentBody(B), headers), env);
     expect(two.status).toBe(429);
-    expect(ip.keys).toEqual(["ci:203.0.113.9", "ci:203.0.113.9"]);
+    expect(db.count("comments")).toBe(1);
   });
 
-  it("degrades to no limit when the bindings are absent", async () => {
+  it("stores the IP hashed, never the address", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db);
+    const env = testEnv(db, caps(5, 5));
+
+    await handlePostComment(postReq(token, commentBody(A), { "CF-Connecting-IP": "203.0.113.9" }), env);
+
+    const row = db.one<{ ip_hash: string }>("SELECT ip_hash FROM comment_write_events LIMIT 1");
+    expect(row?.ip_hash).toBe(await sha256Hex("203.0.113.9"));
+    expect(row?.ip_hash).not.toContain("203.0.113.9");
+  });
+
+  it("lets a normal edit burst through on the shipped defaults", async () => {
+    const db = new TestD1();
+    const token = await seedAuthed(db, A);
+    const env = testEnv(db); // no caps configured → defaults (5/min user)
 
     for (const v of ["v1", "v2", "v3"]) {
       expect((await handlePostComment(postReq(token, commentBody(A, v)), env)).status).toBe(200);
@@ -134,10 +155,20 @@ describe("comment write burst limiter", () => {
     expect(db.one<{ body: string }>("SELECT body FROM comments WHERE author_id = ?", A)?.body).toBe("v3");
   });
 
+  it('"0" disables the limit entirely', async () => {
+    const db = new TestD1();
+    const token = await seedAuthed(db, A);
+    const env = testEnv(db, caps(0, 0));
+
+    seedWrites(db, A, 50);
+
+    expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(200);
+  });
+
   it("also covers DELETE, so delete-then-repost is not a free write loop", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(1).binding });
+    const env = testEnv(db, caps(1));
 
     expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(200);
 
@@ -151,35 +182,40 @@ describe("comment write burst limiter", () => {
 });
 
 describe("strike escalation", () => {
-  /** Drives [n] refused writes, each one debounce-period apart so they all count. */
-  async function refusedWrites(db: TestD1, token: string, env: unknown, n: number): Promise<void> {
-    const base = Date.now();
-    for (let i = 0; i < n; i++) {
-      vi.spyOn(Date, "now").mockReturnValue(base + i * 61_000);
-      expect((await handlePostComment(postReq(token, commentBody(A)), env as never)).status).toBe(429);
-    }
+  /**
+   * One refused write at [at], with the ledger pre-loaded so it is over the cap.
+   * Steps are >1 debounce apart so each refusal actually counts as a strike.
+   */
+  async function refusedAt(db: TestD1, token: string, env: unknown, at: number): Promise<void> {
+    vi.spyOn(Date, "now").mockReturnValue(at);
+    seedWrites(db, A, 2, at);
+    const res = await handlePostComment(postReq(token, commentBody(A)), env as never);
+    expect(res.status).toBe(429);
   }
 
   it("suspends posting once strikes cross the threshold", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "3" });
+    const env = testEnv(db, { ...caps(1), STRIKES_TO_SUSPEND: "3" });
+    const t0 = Date.now();
 
-    await refusedWrites(db, token, env, 2);
-    // Two strikes is not yet a suspension.
+    await refusedAt(db, token, env, t0);
+    await refusedAt(db, token, env, t0 + 61_000);
     expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
 
-    await refusedWrites(db, token, env, 3);
+    await refusedAt(db, token, env, t0 + 122_000);
 
-    const until = db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u;
-    expect(until).toBeGreaterThan(0);
-    expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBeGreaterThanOrEqual(3);
+    expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBe(3);
+    expect(
+      db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u,
+    ).toBeGreaterThan(t0);
   });
 
   it("counts a blind retry loop ONCE, so a fast thumb cannot earn a suspension", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "3" });
+    const env = testEnv(db, { ...caps(1), STRIKES_TO_SUSPEND: "3" });
+    seedWrites(db, A, 2);
 
     // The shape syncOutbox actually produces: the row stays dirty and every user
     // action kicks another sweep, all within the same second.
@@ -194,30 +230,30 @@ describe("strike escalation", () => {
   it("records the automatic suspension in the admin audit trail", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "1" });
+    const env = testEnv(db, { ...caps(1), STRIKES_TO_SUSPEND: "1" });
+    seedWrites(db, A, 2);
 
     await handlePostComment(postReq(token, commentBody(A)), env);
 
-    const row = db.one<{ actor: string; action: string; target_id: string }>(
-      "SELECT actor, action, target_id FROM admin_actions WHERE target_id = ?",
-      A,
-    );
-    expect(row).toMatchObject({ actor: "system", action: "auto_posting_suspend", target_id: A });
+    expect(
+      db.one<{ actor: string; action: string; target_id: string }>(
+        "SELECT actor, action, target_id FROM admin_actions WHERE target_id = ?",
+        A,
+      ),
+    ).toMatchObject({ actor: "system", action: "auto_posting_suspend", target_id: A });
   });
 
   it("never shortens a longer suspension an admin already set", async () => {
     const db = new TestD1();
     const far = Date.now() + 30 * 86_400_000;
     const token = await seedAuthed(db, A, far);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "1" });
+    const env = testEnv(db, { ...caps(1), STRIKES_TO_SUSPEND: "1" });
+    seedWrites(db, A, 2);
 
-    // Suspended users are refused before the limiter, so drive the strike through
-    // the limiter directly on DELETE, which has no suspension gate.
-    await handleDeleteComment(
-      commentId(A),
-      new Request("https://flickto.app/api/comments/x", { method: "DELETE", headers: authed(token) }),
-      env,
-    );
+    // The burst limit is checked before the suspension gate, so a suspended user can
+    // still trip it — which is the only way to drive a strike onto an already-suspended
+    // account.
+    expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(429);
 
     expect(db.one<{ u: number }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBe(far);
   });
@@ -225,16 +261,13 @@ describe("strike escalation", () => {
   it("STRIKES_TO_SUSPEND=0 records strikes but never suspends", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
-    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "0" });
+    const env = testEnv(db, { ...caps(1), STRIKES_TO_SUSPEND: "0" });
+    const t0 = Date.now();
 
-    const base = Date.now();
-    for (let i = 0; i < 5; i++) {
-      vi.spyOn(Date, "now").mockReturnValue(base + i * 61_000);
-      await handlePostComment(postReq(token, commentBody(A)), env);
-    }
+    for (let i = 0; i < 5; i++) await refusedAt(db, token, env, t0 + i * 61_000);
 
-    expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
     expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBe(5);
+    expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
   });
 });
 
@@ -248,7 +281,11 @@ describe("suspension reach", () => {
     const reactor = await seedAuthed(db, A, Date.now() + 86_400_000);
     const res = await handleReactToComment(
       commentId(B),
-      new Request("https://flickto.app/r", { method: "POST", headers: authed(reactor), body: JSON.stringify({ emoji: "👍" }) }),
+      new Request("https://flickto.app/r", {
+        method: "POST",
+        headers: authed(reactor),
+        body: JSON.stringify({ emoji: "👍" }),
+      }),
       env,
     );
 
@@ -267,7 +304,11 @@ describe("suspension reach", () => {
     const target = commentId(B);
     await handleReactToComment(
       target,
-      new Request("https://flickto.app/r", { method: "POST", headers: authed(reactor), body: JSON.stringify({ emoji: "👍" }) }),
+      new Request("https://flickto.app/r", {
+        method: "POST",
+        headers: authed(reactor),
+        body: JSON.stringify({ emoji: "👍" }),
+      }),
       env,
     );
     expect(db.count("comment_reactions")).toBe(1);

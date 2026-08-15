@@ -39,6 +39,7 @@ class FakeD1 {
   profiles: any[] = [];
   reports: any[] = [];
   comment_translations: any[] = [];
+  comment_write_events: any[] = [];
   sessions = new Map<string, string>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
@@ -100,6 +101,13 @@ class FakeStmt {
     if (s.startsWith("SELECT state FROM friendships")) {
       const r = this.db.friendships.find((f) => f.user_a === a[0] && f.user_b === a[1] && f.state === "accepted");
       return r ? ({ state: r.state } as T) : null;
+    }
+    // Burst-limit ledger. Counted per user and per IP hash over a 60s window.
+    if (s.startsWith("SELECT COUNT(*) AS n FROM comment_write_events WHERE user_id")) {
+      return { n: this.db.comment_write_events.filter((e) => e.user_id === a[0] && e.created_at > a[1]).length } as T;
+    }
+    if (s.startsWith("SELECT COUNT(*) AS n FROM comment_write_events WHERE ip_hash")) {
+      return { n: this.db.comment_write_events.filter((e) => e.ip_hash === a[0] && e.created_at > a[1]).length } as T;
     }
     if (s.startsWith("SELECT COUNT(*) AS n FROM comments WHERE author_id")) {
       return { n: this.db.comments.filter((c) => c.author_id === a[0] && c.created_at > a[1]).length } as T;
@@ -241,6 +249,14 @@ class FakeStmt {
       if (row) Object.assign(row, { text: a[2], src_updated_at: a[3] });
       else this.db.comment_translations.push({ comment_id: a[0], lang: a[1], text: a[2], src_updated_at: a[3] });
       return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("INSERT INTO comment_write_events")) {
+      this.db.comment_write_events.push({ id: a[0], user_id: a[1], ip_hash: a[2], created_at: a[3] });
+      return { success: true } as any;
+    }
+    if (s.startsWith("DELETE FROM comment_write_events")) {
+      this.db.comment_write_events = this.db.comment_write_events.filter((e) => e.created_at > a[0]);
+      return { success: true } as any;
     }
     if (s.startsWith("INSERT INTO reports")) {
       this.db.reports.push({
