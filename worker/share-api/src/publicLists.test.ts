@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { TestD1, seedUser, seedSession, testEnv, uid } from "./testD1";
-import { handlePublishList, handleUnpublishList } from "./publicLists";
+import { handlePublishList, handleUnpublishList, handleFollow, handleLike } from "./publicLists";
 
 const TOKEN = "tok-owner";
 
@@ -246,5 +246,125 @@ describe("unpublishing", () => {
       .bind(uid(1))
       .first<{ n: number }>();
     expect(n!.n).toBe(1);
+  });
+});
+
+/** A second user with their own bearer token. */
+async function withViewer(db: TestD1, id: string, token: string) {
+  seedUser(db, { id });
+  seedSession(db, id, await sha256Hex(token));
+}
+
+const asUser = (token: string, url: string, method: string) =>
+  new Request(`https://flickto.app${url}`, {
+    method,
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+describe("follow and like", () => {
+  it("engagement weights a follow at 3 and a like at 1", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const url = `/api/public/lists/${uid(1)}/L1`;
+
+    await handleFollow(uid(1), "L1", asUser("tok-2", `${url}/follow`, "POST"), testEnv(db), ctx);
+    let row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(3);
+
+    await handleLike(uid(1), "L1", asUser("tok-2", `${url}/like`, "POST"), testEnv(db), ctx);
+    row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(4);
+  });
+
+  it("unfollowing takes the weight back off", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const url = `/api/public/lists/${uid(1)}/L1/follow`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", url, "POST"), testEnv(db), ctx);
+    await handleFollow(uid(1), "L1", asUser("tok-2", url, "DELETE"), testEnv(db), ctx);
+    const row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(0);
+  });
+
+  // The natural key does the work; a double tap must not count twice.
+  it("following twice is idempotent", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const url = `/api/public/lists/${uid(1)}/L1/follow`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", url, "POST"), testEnv(db), ctx);
+    await handleFollow(uid(1), "L1", asUser("tok-2", url, "POST"), testEnv(db), ctx);
+    const row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(3);
+  });
+
+  it("cannot follow a list that is not published", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");   // never published
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handleFollow(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("cannot follow a hidden list", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await db
+      .prepare(`UPDATE public_lists SET hidden_at = 1 WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .run();
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handleFollow(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
   });
 });

@@ -194,6 +194,8 @@ import {
   handlePublishList,
   handleUnpublishList,
   handlePublicListsOptions,
+  handleFollow,
+  handleLike,
 } from "./publicLists";
 
 interface ShareItem {
@@ -504,6 +506,21 @@ export default {
 
     const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
+
+    // The directory's engagement verbs. `{owner}` is a users.id (26-char ULID
+    // alphabet, matching the foreignProfile route above); `{id}` is a client-minted
+    // list id, same character class as the /api/me/lists routes.
+    const listEngage = p.match(
+      /^\/api\/public\/lists\/([0-9A-HJKMNP-TV-Z]{26})\/([A-Za-z0-9._:-]{1,64})\/(follow|like)$/,
+    );
+    if (listEngage) {
+      if (req.method === "OPTIONS") return handlePublicListsOptions();
+      if (req.method === "POST" || req.method === "DELETE") {
+        return listEngage[3] === "follow"
+          ? handleFollow(listEngage[1], listEngage[2], req, env, ctx)
+          : handleLike(listEngage[1], listEngage[2], req, env, ctx);
+      }
+    }
 
     // `wake` is fire-and-forget: ctx.waitUntil keeps the push alive past the response
     // without ever delaying or failing it.
