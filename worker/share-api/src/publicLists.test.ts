@@ -13,7 +13,7 @@ import {
   MAX_PUBLISHED_PER_USER,
 } from "./publicLists";
 import { handleModerationAct } from "./moderationQueue";
-import { eraseAccount } from "./friends";
+import { eraseAccount, MAX_ERASURE_RECOMPUTE } from "./friends";
 import { handleDeleteList } from "./userLists";
 
 const TOKEN = "tok-owner";
@@ -420,6 +420,43 @@ describe("follow and like", () => {
     const url = `/api/public/lists/${uid(1)}/L1/follow`;
     await handleFollow(uid(1), "L1", asUser("tok-2", url, "POST"), testEnv(db), ctx);
     await handleFollow(uid(1), "L1", asUser("tok-2", url, "DELETE"), testEnv(db), ctx);
+    const row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(0);
+  });
+
+  // A removal can only ever reduce what someone has, so it must stay possible even
+  // once a block exists — unlike the add path, which liveList correctly still gates.
+  // Before the fix, toggleEngagement's liveList check ran unconditionally on BOTH the
+  // insert and delete paths, so a block created after a follow left that follow row
+  // stuck forever: the follower could never unfollow, and the engagement weight it
+  // added was permanently uncollectable.
+  it("a blocked user can still unfollow a list they already followed", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const url = `/api/public/lists/${uid(1)}/L1/follow`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", url, "POST"), testEnv(db), ctx);
+
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+
+    const res = await handleFollow(uid(1), "L1", asUser("tok-2", url, "DELETE"), testEnv(db), ctx);
+    expect(res.status).toBe(200);
+    expect((await res.json()) as { active: boolean }).toEqual({ ok: true, active: false });
+    expect(db.count("list_follows", "user_id = ? AND owner_id = ? AND list_id = 'L1'", uid(2), uid(1))).toBe(0);
+
+    // recomputeEngagement must still have run on the removal.
     const row = await db
       .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
       .bind(uid(1))
@@ -965,6 +1002,10 @@ interface Follow {
   listId: string;
   status: string;
   name: string;
+  description: string;
+  authorName: string;
+  authorPictureUrl: string;
+  tags: string[];
   items: { tmdbId: number; type: string }[];
 }
 
@@ -1114,12 +1155,27 @@ describe("my follows", () => {
   });
 
   // The other half of the privacy leak: an existing follow, when a block is later
-  // created between the two, must stop materialising items and report "unpublished"
-  // — the same badged, non-updating shape a withdrawal produces — rather than
-  // continuing to hand the blocker's (or blocked party's) content to the other side.
-  it("reports a follow as unpublished, with no items, once the author blocks the follower", async () => {
+  // created between the two, must stop materialising items AND report "gone" — the
+  // same shape a genuinely deleted list produces, name/description/authorName/
+  // authorPictureUrl/tags all blank — rather than "unpublished" with the list's
+  // CURRENT (re-read-on-every-poll) name, description and author details still
+  // attached. "unpublished" is deliberately NOT used here even blanked: a real
+  // unpublish or takedown never leaves those fields empty (see the "unpublished"
+  // test above), so an unpublished-but-blank row would itself be a shape that only a
+  // block could produce — which is exactly the kind of tell this must not create.
+  // "gone" already legitimately happens for reasons that have nothing to do with a
+  // block, so reusing it keeps a block indistinguishable from a deletion.
+  it("reports a follow as gone, with no name, description, author details, tags or items, once the author blocks the follower", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 2, "A");
+    await db
+      .prepare(`UPDATE lists SET description = 'A tight little collection' WHERE user_id = ?1 AND id = 'A'`)
+      .bind(uid(1))
+      .run();
+    await db
+      .prepare(`UPDATE profiles SET picture_url = 'https://flickto.app/api/profile/x/picture' WHERE user_id = ?1`)
+      .bind(uid(1))
+      .run();
     await handlePublishList(
       "A",
       authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
@@ -1128,7 +1184,11 @@ describe("my follows", () => {
     );
     await withViewer(db, uid(2), "tok-2");
     await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
-    expect((await followsFor(db, "tok-2"))[0].items).toHaveLength(2);
+    const before = (await followsFor(db, "tok-2"))[0];
+    expect(before.items).toHaveLength(2);
+    expect(before.name).toBe("Neo-Noir Essentials");
+    expect(before.description).toBe("A tight little collection");
+    expect(before.authorPictureUrl).toBe("https://flickto.app/api/profile/x/picture");
 
     await db
       .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
@@ -1136,14 +1196,27 @@ describe("my follows", () => {
       .run();
 
     const [f] = await followsFor(db, "tok-2");
-    expect(f.status).toBe("unpublished");
+    expect(f.status).toBe("gone");
+    expect(f.name).toBe("");
+    expect(f.description).toBe("");
+    expect(f.authorName).toBe("");
+    expect(f.authorPictureUrl).toBe("");
+    expect(f.tags).toEqual([]);
     expect(f.items).toHaveLength(0);
   });
 
   // The other direction: the follower is the one who did the blocking.
-  it("reports a follow as unpublished, with no items, once the follower blocks the author", async () => {
+  it("reports a follow as gone, with no name, description, author details, tags or items, once the follower blocks the author", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 2, "A");
+    await db
+      .prepare(`UPDATE lists SET description = 'A tight little collection' WHERE user_id = ?1 AND id = 'A'`)
+      .bind(uid(1))
+      .run();
+    await db
+      .prepare(`UPDATE profiles SET picture_url = 'https://flickto.app/api/profile/x/picture' WHERE user_id = ?1`)
+      .bind(uid(1))
+      .run();
     await handlePublishList(
       "A",
       authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
@@ -1152,7 +1225,9 @@ describe("my follows", () => {
     );
     await withViewer(db, uid(2), "tok-2");
     await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
-    expect((await followsFor(db, "tok-2"))[0].items).toHaveLength(2);
+    const before = (await followsFor(db, "tok-2"))[0];
+    expect(before.items).toHaveLength(2);
+    expect(before.authorName).not.toBe("");
 
     await db
       .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
@@ -1160,7 +1235,12 @@ describe("my follows", () => {
       .run();
 
     const [f] = await followsFor(db, "tok-2");
-    expect(f.status).toBe("unpublished");
+    expect(f.status).toBe("gone");
+    expect(f.name).toBe("");
+    expect(f.description).toBe("");
+    expect(f.authorName).toBe("");
+    expect(f.authorPictureUrl).toBe("");
+    expect(f.tags).toEqual([]);
     expect(f.items).toHaveLength(0);
   });
 
@@ -1496,5 +1576,84 @@ describe("account erasure", () => {
       .bind(uid(3))
       .first<{ engagement: number }>();
     expect(row!.engagement).toBe(0);
+  });
+
+  // `public_list_likes` has no follow-style cap, so without a LIMIT the snapshot the
+  // recompute above reads from could grow unbounded and turn one erasure into a
+  // batch of thousands of UPDATEs. Seeds five more owners than the cap allows and
+  // checks the boundary directly: everything within MAX_ERASURE_RECOMPUTE gets its
+  // stale engagement corrected, the ones beyond it are left exactly as they were —
+  // proving the LIMIT is actually applied, not just present in the SQL.
+  it("caps the erasure engagement recompute so it cannot become an unbounded batch", async () => {
+    const db = new TestD1();
+    seedUser(db, { id: uid(1) });
+    const total = MAX_ERASURE_RECOMPUTE + 5;
+    for (let i = 0; i < total; i++) {
+      const owner = uid(100 + i);
+      seedUser(db, { id: owner });
+      db.exec(
+        `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+         VALUES ('${owner}', 'L', '[]', 3, 1, NULL)`,
+      );
+      db.exec(
+        `INSERT INTO list_follows (user_id, owner_id, list_id, created_at)
+         VALUES ('${uid(1)}', '${owner}', 'L', 1)`,
+      );
+    }
+
+    await eraseAccount(testEnv(db), uid(1));
+
+    // Recomputed pairs land at 0 (the erased user's follow was the only one); pairs
+    // past the cap were never snapshotted, so their stale pre-erasure value survives.
+    expect(db.count("public_lists", "engagement = 0")).toBe(MAX_ERASURE_RECOMPUTE);
+    expect(db.count("public_lists", "engagement = 3")).toBe(5);
+    // The compliance promise — the erased user's own follows are gone — does not
+    // depend on the cache and holds regardless of the cap.
+    expect(db.count("list_follows", "user_id = ?", uid(1))).toBe(0);
+  });
+
+  // If the recompute below fails, the delete batch above has already committed —
+  // erasure has already succeeded. A rejection here must not propagate and turn a
+  // completed erasure into a thrown error (a 500 the client retries, whose own
+  // retry finds nothing left to snapshot and recompute) — the same shape as the
+  // HISTORY_STATS_KV `.catch(() => {})` a few lines below it in eraseAccount.
+  //
+  // Real SQLite has no way to fail a well-formed statement on demand, so this
+  // simulates a D1 failure with a call-count proxy: the erasure batch is always
+  // `env.DB.batch`'s FIRST call, and the recompute is every call after it.
+  it("does not fail the erasure when the engagement recompute batch fails", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    seedUser(db, { id: uid(3) });
+    db.exec(
+      `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+       VALUES ('${uid(3)}', 'L3', '[]', 0, 1, NULL)`,
+    );
+    const l3Url = `/api/public/lists/${uid(3)}/L3`;
+    await handleFollow(uid(3), "L3", asUser("tok-owner", `${l3Url}/follow`, "POST"), testEnv(db), ctx);
+
+    let calls = 0;
+    const failingEnv = {
+      DB: {
+        prepare: (sql: string) => db.prepare(sql),
+        batch: async (stmts: unknown[]) => {
+          calls++;
+          if (calls > 1) throw new Error("simulated D1 failure");
+          return db.batch(stmts as never);
+        },
+      },
+    } as never;
+
+    await expect(eraseAccount(failingEnv, uid(1))).resolves.toBeUndefined();
+    // The delete batch (the first `batch()` call) still ran to completion despite
+    // the second (recompute) call throwing.
+    expect(db.count("users", "id = ?", uid(1))).toBe(0);
+    expect(db.count("list_follows", "user_id = ?", uid(1))).toBe(0);
   });
 });

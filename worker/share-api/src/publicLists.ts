@@ -236,9 +236,14 @@ async function toggleEngagement(
 ): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return unauthorized();
-  if (!(await liveList(env, ownerId, listId, session.userId))) return notFound();
 
   const removing = req.method === "DELETE";
+
+  // Only the add path needs liveList: a removal can only ever reduce what someone
+  // already has, so it stays safe even once a block exists. Gating DELETE on it too
+  // — the bug this replaced — left a follow or like stuck forever the moment a block
+  // was created between the two people, with no way for the follower to undo it.
+  if (!removing && !(await liveList(env, ownerId, listId, session.userId))) return notFound();
 
   if (!removing && table === "list_follows") {
     // Excludes the row this write would touch: the insert below is ON CONFLICT DO
@@ -517,7 +522,11 @@ export async function handlePublicListDetail(
 //   unpublished  — author withdrew it, OR it was hidden by moderation. Deliberately
 //                  the same value: a follower must not be able to tell a takedown from
 //                  a withdrawal.
-//   gone         — the author deleted the list.
+//   gone         — the author deleted the list, OR a block exists between the two
+//                  people (either direction). Also deliberately the same value, and
+//                  for the same reason: name/description/authorName/authorPictureUrl/
+//                  tags are blanked for BOTH causes, so a block reads exactly like a
+//                  deletion and reveals nothing.
 // The client keeps its rows for the latter two and badges them.
 export async function handleMyFollows(
   req: Request,
@@ -551,9 +560,10 @@ export async function handleMyFollows(
   // Keyed on the LEFT JOIN actually failing, not on `name` — `lists.name` is NOT NULL
   // but not constrained non-empty, so an empty name must not be mistaken for "gone".
   const goneOf = (r: Record<string, unknown>) => r.list_owner == null || r.deleted_at != null;
-  // A block in either direction must read exactly like an unpublish — never anything
-  // that would tell either side a block exists — and materialises no items, the same
-  // leak `liveList` closes on the write side.
+  // A block in either direction must materialise no items and no content — the same
+  // leak `liveList` closes on the write side — which the map below achieves by
+  // folding a blocked row into "gone" alongside a genuinely deleted one. See the
+  // `follows` map for why "gone" and not a blanked "unpublished".
   const blockedOf = (r: Record<string, unknown>) => Number(r.blocked) > 0;
   const live = results.filter((r) => !goneOf(r) && !blockedOf(r));
 
@@ -598,17 +608,29 @@ export async function handleMyFollows(
   }
 
   const follows = results.map((r) => {
-    const gone = goneOf(r);
-    const isLive = !gone && Number(r.still_published) === 1 && r.hidden_at == null && !blockedOf(r);
+    // A block folds into `gone`, not `unpublished`: `l.name`/`l.description`/
+    // `pr.display_name`/`pr.picture_url` come from LEFT JOINs keyed on `f.owner_id`
+    // alone, with no `blocks` predicate anywhere in the query above, so for a
+    // blocked-but-still-published row every one of those columns holds the
+    // author's CURRENT, live values — re-read on every poll. Blanking them below is
+    // what closes that leak. Reusing "gone" rather than leaving "unpublished" with
+    // blanked fields matters: a real unpublish or takedown never produces a blank
+    // name (see the "unpublished" tests), so a blanked "unpublished" row would
+    // itself be a tell that only a block could produce. "gone" already legitimately
+    // happens for reasons that have nothing to do with a block, so reusing it keeps
+    // the two indistinguishable — exactly the same reasoning that already made
+    // "unpublished" cover both a withdrawal and a takedown.
+    const gone = goneOf(r) || blockedOf(r);
+    const isLive = !gone && Number(r.still_published) === 1 && r.hidden_at == null;
     return {
       ownerId: r.owner_id,
       listId: r.list_id,
       status: gone ? "gone" : isLive ? "live" : "unpublished",
-      name: r.name ?? "",
-      description: r.description ?? "",
-      authorName: r.display_name ?? "",
-      authorPictureUrl: r.picture_url ?? "",
-      tags: safeTags(r.tags as string | null),
+      name: gone ? "" : (r.name ?? ""),
+      description: gone ? "" : (r.description ?? ""),
+      authorName: gone ? "" : (r.display_name ?? ""),
+      authorPictureUrl: gone ? "" : (r.picture_url ?? ""),
+      tags: gone ? [] : safeTags(r.tags as string | null),
       updatedAt: r.updated_at ?? 0,
       // A gone list has no items to fetch; everything else materialises live, which
       // is the whole reason a follow stays current without a propagation step.

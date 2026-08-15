@@ -51,6 +51,20 @@ const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 const FRIEND_ID_RE = /^[A-Z0-9]{12,40}$/;
 const MAX_REPORT_CONTEXT = 1000;
 const MAX_LEGACY_FRIEND_IDS = 200;
+/**
+ * Bounds [eraseAccount]'s post-delete engagement-recompute snapshot. `list_follows`
+ * is capped at MAX_FOLLOWS (100) per follower by publicLists.ts's toggleEngagement,
+ * but `public_list_likes` has no such cap, so the UNION that snapshot reads from
+ * could otherwise return an unbounded number of (owner, list) pairs and turn one
+ * erasure into a batch of thousands of UPDATEs. Exported for the test that proves
+ * the LIMIT is really applied. A user past this leaves a handful of lists they
+ * engaged with reading slightly high on `engagement` after erasure — a stale
+ * ranking cache, not a compliance gap, since the follow/like rows themselves are
+ * deleted regardless of this limit.
+ */
+export const MAX_ERASURE_RECOMPUTE = 200;
+/** Keeps each recompute batch call to a manageable size regardless of the total. */
+const ERASURE_RECOMPUTE_CHUNK = 50;
 // `feed_comment` is a friend's comment as it appears on the Friend Feed, and is
 // distinct from `comment` (a D1 title/episode comment) — they are moderated through
 // different admin queues, so folding them together would hide one behind the other.
@@ -713,13 +727,15 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
   // `user_id` direction too — this account's own follows/likes of OTHER people's
   // lists, not just its own list's followers — and those lists' `engagement` is a
   // cache nothing else in this worker recomputes on a schedule. Left alone, an
-  // owner's ranking would stay permanently inflated by a follower who no longer exists.
+  // owner's ranking would stay permanently inflated by a follower who no longer
+  // exists. Bounded by MAX_ERASURE_RECOMPUTE — see its comment for why.
   const engaged = await env.DB.prepare(
     `SELECT owner_id, list_id FROM list_follows WHERE user_id = ?
      UNION
-     SELECT owner_id, list_id FROM public_list_likes WHERE user_id = ?`,
+     SELECT owner_id, list_id FROM public_list_likes WHERE user_id = ?
+     LIMIT ?`,
   )
-    .bind(id, id)
+    .bind(id, id, MAX_ERASURE_RECOMPUTE)
     .all<{ owner_id: string; list_id: string }>();
 
   await env.DB.batch([
@@ -851,9 +867,18 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
   // `engaged` snapshot taken before the batch above deleted the rows that fed those
   // caches. A list this account owned itself needs no recompute — its `public_lists`
   // row was just deleted above — and an UPDATE against a missing row is a no-op.
+  //
+  // Chunked, and best-effort like the HISTORY_STATS_KV delete below: by this point
+  // the delete batch has already committed, so erasure has already succeeded. A
+  // failure here must not turn that success into a thrown error the caller turns
+  // into a 500 the client retries — a retry's SELECT above would find the
+  // list_follows/public_list_likes rows already gone and snapshot nothing, leaving
+  // these caches inflated permanently instead of eventually catching up. Erasure
+  // completing matters more than a ranking cache being exact.
   const pairs = engaged.results ?? [];
-  if (pairs.length) {
-    await env.DB.batch(pairs.map((p) => recomputeEngagement(env, p.owner_id, p.list_id)));
+  for (let i = 0; i < pairs.length; i += ERASURE_RECOMPUTE_CHUNK) {
+    const chunk = pairs.slice(i, i + ERASURE_RECOMPUTE_CHUNK);
+    await env.DB.batch(chunk.map((p) => recomputeEngagement(env, p.owner_id, p.list_id))).catch(() => {});
   }
 
   // The derived-stats cache. Reproducible from `watch_history` and therefore not a
