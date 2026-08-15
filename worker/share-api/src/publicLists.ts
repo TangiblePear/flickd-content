@@ -119,6 +119,11 @@ export async function handlePublishList(
        VALUES (?1, ?2, ?3, 0, ?4, ?5)
        ON CONFLICT(owner_id, list_id) DO UPDATE SET tags = ?3`,
     ).bind(session.userId, listId, JSON.stringify(tags), t, hiddenAt),
+    // The INSERT above always writes engagement = 0, but handleUnpublishList
+    // deliberately keeps `list_follows`/`public_list_likes` — so a republish of a
+    // list with 30 saves would otherwise come back ranked at zero and stay there:
+    // nothing else in this worker recomputes it until someone follows or likes again.
+    recomputeEngagement(env, session.userId, listId),
     // Replaced wholesale rather than merged: the request carries the complete
     // intended set, so a removed tag must actually disappear.
     env.DB.prepare(`DELETE FROM public_list_tags WHERE owner_id = ?1 AND list_id = ?2`).bind(
@@ -190,17 +195,29 @@ export function recomputeEngagement(
   ).bind(ownerId, listId);
 }
 
-/** A published, visible list — the precondition for following or liking one. */
+/**
+ * A published, visible list — the precondition for following or liking one.
+ *
+ * `blocks` is checked in BOTH directions, the same predicate `handleBrowse` and
+ * `handlePublicListDetail` use: without it, a user the author blocked could still
+ * follow or like the list and then read it back through `/api/me/follows`, which
+ * is exactly the content the detail route 404s them out of.
+ */
 async function liveList(
   env: PublicListsEnv,
   ownerId: string,
   listId: string,
+  viewerId: string,
 ): Promise<boolean> {
   const row = await env.DB.prepare(
     `SELECT 1 AS ok FROM public_lists
-      WHERE owner_id = ?1 AND list_id = ?2 AND hidden_at IS NULL`,
+      WHERE owner_id = ?1 AND list_id = ?2 AND hidden_at IS NULL
+        AND NOT EXISTS (
+              SELECT 1 FROM blocks b
+               WHERE (b.blocker_id = ?1 AND b.blocked_id = ?3)
+                  OR (b.blocker_id = ?3 AND b.blocked_id = ?1))`,
   )
-    .bind(ownerId, listId)
+    .bind(ownerId, listId, viewerId)
     .first<{ ok: number }>();
   return !!row;
 }
@@ -219,7 +236,7 @@ async function toggleEngagement(
 ): Promise<Response> {
   const session = await resolveSession(req, env as never, ctx);
   if (!session) return unauthorized();
-  if (!(await liveList(env, ownerId, listId))) return notFound();
+  if (!(await liveList(env, ownerId, listId, session.userId))) return notFound();
 
   const removing = req.method === "DELETE";
 
@@ -302,6 +319,10 @@ export async function handleBrowse(
   const sort = url.searchParams.get("sort") ?? "trending";
   const tag = url.searchParams.get("tag");
   const q = (url.searchParams.get("q") ?? "").trim().slice(0, MAX_QUERY);
+  // Escaped for LIKE, not just interpolated into the pattern: `%` and `_` are LIKE
+  // wildcards themselves, so an unescaped `?q=%` would match every list and `_` any
+  // single character, rather than only lists containing that literal character.
+  const likeSafeQ = q.replace(/[\\%_]/g, "\\$&");
   const offset = Math.max(0, Number(url.searchParams.get("cursor") ?? 0) || 0);
   const t = now();
 
@@ -338,7 +359,8 @@ export async function handleBrowse(
         AND (?3 IS NULL OR EXISTS (
               SELECT 1 FROM public_list_tags pt
                WHERE pt.tag = ?3 AND pt.owner_id = p.owner_id AND pt.list_id = p.list_id))
-        AND (?4 = '' OR l.name LIKE ?5 OR l.description LIKE ?5 OR pr.display_name LIKE ?5)
+        AND (?4 = '' OR l.name LIKE ?5 ESCAPE '\\' OR l.description LIKE ?5 ESCAPE '\\'
+                      OR pr.display_name LIKE ?5 ESCAPE '\\')
         AND NOT EXISTS (
               SELECT 1 FROM blocks b
                WHERE (b.blocker_id = p.owner_id AND b.blocked_id = ?2)
@@ -346,7 +368,7 @@ export async function handleBrowse(
       ORDER BY ${order}
       LIMIT ?6 OFFSET ?7`,
   )
-    .bind(t, session.userId, tag, q, `%${q}%`, BROWSE_PAGE + 1, offset)
+    .bind(t, session.userId, tag, q, `%${likeSafeQ}%`, BROWSE_PAGE + 1, offset)
     .all<Record<string, unknown>>();
 
   const page = (rows.results ?? []).slice(0, BROWSE_PAGE);
@@ -510,7 +532,10 @@ export async function handleMyFollows(
             l.updated_at, l.deleted_at,
             p.tags, p.hidden_at,
             pr.display_name, pr.picture_url,
-            CASE WHEN p.owner_id IS NULL THEN 0 ELSE 1 END AS still_published
+            CASE WHEN p.owner_id IS NULL THEN 0 ELSE 1 END AS still_published,
+            (SELECT COUNT(*) FROM blocks b
+               WHERE (b.blocker_id = f.owner_id AND b.blocked_id = ?1)
+                  OR (b.blocker_id = ?1 AND b.blocked_id = f.owner_id)) AS blocked
        FROM list_follows f
        LEFT JOIN lists l    ON l.user_id = f.owner_id AND l.id = f.list_id
        LEFT JOIN public_lists p ON p.owner_id = f.owner_id AND p.list_id = f.list_id
@@ -526,7 +551,11 @@ export async function handleMyFollows(
   // Keyed on the LEFT JOIN actually failing, not on `name` — `lists.name` is NOT NULL
   // but not constrained non-empty, so an empty name must not be mistaken for "gone".
   const goneOf = (r: Record<string, unknown>) => r.list_owner == null || r.deleted_at != null;
-  const live = results.filter((r) => !goneOf(r));
+  // A block in either direction must read exactly like an unpublish — never anything
+  // that would tell either side a block exists — and materialises no items, the same
+  // leak `liveList` closes on the write side.
+  const blockedOf = (r: Record<string, unknown>) => Number(r.blocked) > 0;
+  const live = results.filter((r) => !goneOf(r) && !blockedOf(r));
 
   // Batched the same way handleBrowse batches poster lookups (a row-value IN over a
   // ROW_NUMBER-ranked derived table) rather than one itemsFor() call per followed list.
@@ -570,7 +599,7 @@ export async function handleMyFollows(
 
   const follows = results.map((r) => {
     const gone = goneOf(r);
-    const isLive = !gone && Number(r.still_published) === 1 && r.hidden_at == null;
+    const isLive = !gone && Number(r.still_published) === 1 && r.hidden_at == null && !blockedOf(r);
     return {
       ownerId: r.owner_id,
       listId: r.list_id,

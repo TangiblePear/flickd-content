@@ -10,9 +10,11 @@ import {
   handlePublicListDetail,
   handleReportPublicList,
   MAX_FOLLOWS,
+  MAX_PUBLISHED_PER_USER,
 } from "./publicLists";
 import { handleModerationAct } from "./moderationQueue";
 import { eraseAccount } from "./friends";
+import { handleDeleteList } from "./userLists";
 
 const TOKEN = "tok-owner";
 
@@ -195,6 +197,44 @@ describe("publishing", () => {
       .bind(uid(1))
       .all<{ tag: string }>();
     expect((rows.results ?? []).map((r) => r.tag)).toEqual(["horror"]);
+  });
+
+  // handleUnpublishList deliberately keeps `list_follows`/`public_list_likes` so a
+  // follower can be told "unpublished" — but that means those rows are still there
+  // when the author republishes, and the fresh INSERT sets engagement = 0. Without a
+  // recompute here, a 30-save list comes back ranked at zero and stays there forever:
+  // nothing in this worker recomputes it until someone follows or likes again.
+  it("republishing recomputes engagement from the surviving follows and likes, not zero", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await withViewer(db, uid(3), "tok-3");
+    const url = `/api/public/lists/${uid(1)}/L1`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", `${url}/follow`, "POST"), testEnv(db), ctx);
+    await handleFollow(uid(1), "L1", asUser("tok-3", `${url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "L1", asUser("tok-2", `${url}/like`, "POST"), testEnv(db), ctx);
+
+    await handleUnpublishList("L1", authed("/api/me/lists/L1/publish", "DELETE"), testEnv(db), ctx);
+    const republish = await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    expect(republish.status).toBe(200);
+
+    const row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .first<{ engagement: number }>();
+    // 2 follows * 3 + 1 like * 1 = 7.
+    expect(row!.engagement).toBe(7);
   });
 });
 
@@ -416,6 +456,83 @@ describe("follow and like", () => {
       uid(1),
       "L1",
       asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  // The privacy leak: `liveList` (the follow/like precondition) did not check
+  // `blocks` at all, so a user the author blocked could still follow — and then
+  // read the list's name, description and every item back through
+  // `/api/me/follows`, all content `handlePublicListDetail` correctly 404s for.
+  it("cannot follow a list whose author blocked the viewer", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+    const res = await handleFollow(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  // The other direction: the viewer did the blocking.
+  it("cannot follow a list whose author the viewer blocked", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(2), uid(1))
+      .run();
+    const res = await handleFollow(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/follow`, "POST"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("cannot like a list whose author blocked the viewer", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+    const res = await handleLike(
+      uid(1),
+      "L1",
+      asUser("tok-2", `/api/public/lists/${uid(1)}/L1/like`, "POST"),
       testEnv(db),
       ctx,
     );
@@ -722,6 +839,17 @@ describe("browse", () => {
     expect(await browseAs(db, "tok-2", "?q=noir")).toHaveLength(1);
     expect(await browseAs(db, "tok-2", "?q=zzzz")).toHaveLength(0);
   });
+
+  // `q` is interpolated into a LIKE pattern as `%${q}%`. Unescaped, `%` and `_` are
+  // themselves LIKE wildcards — `?q=%` becomes the pattern `%%%`, which matches
+  // every list regardless of its actual name, not just ones containing a literal `%`.
+  it("does not let a bare % in the search term match every list", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A"); // named "Neo-Noir Essentials" — no literal %
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    expect(await browseAs(db, "tok-2", "?q=%25")).toHaveLength(0);
+  });
 });
 
 describe("detail", () => {
@@ -985,6 +1113,57 @@ describe("my follows", () => {
     expect(f.items).toHaveLength(0);
   });
 
+  // The other half of the privacy leak: an existing follow, when a block is later
+  // created between the two, must stop materialising items and report "unpublished"
+  // — the same badged, non-updating shape a withdrawal produces — rather than
+  // continuing to hand the blocker's (or blocked party's) content to the other side.
+  it("reports a follow as unpublished, with no items, once the author blocks the follower", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    expect((await followsFor(db, "tok-2"))[0].items).toHaveLength(2);
+
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("unpublished");
+    expect(f.items).toHaveLength(0);
+  });
+
+  // The other direction: the follower is the one who did the blocking.
+  it("reports a follow as unpublished, with no items, once the follower blocks the author", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    expect((await followsFor(db, "tok-2"))[0].items).toHaveLength(2);
+
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(2), uid(1))
+      .run();
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("unpublished");
+    expect(f.items).toHaveLength(0);
+  });
+
   // The N+1 fix's specific failure mode: a batched query that isn't correctly
   // partitioned per (owner_id, list_id) could return the right COUNT of items while
   // mixing which items belong to which list.
@@ -1030,6 +1209,83 @@ describe("my follows", () => {
     const b = follows.find((f) => f.listId === "B")!;
     expect(a.items.map((i) => i.tmdbId)).toEqual([500, 501]);
     expect(b.items.map((i) => i.tmdbId)).toEqual([700, 701, 702]);
+  });
+});
+
+describe("deleting the underlying list", () => {
+  // handleDeleteList (userLists.ts) soft-deletes `lists` and cleans `list_items` /
+  // `list_filters`, but left `public_lists` / `public_list_tags` behind. Browse and
+  // detail both hide the orphan via `l.deleted_at IS NULL`, so it is not a content
+  // leak — but the publish cap (`handlePublishList`) counts every row in
+  // `public_lists` regardless of `lists.deleted_at`, so the orphan permanently ate
+  // one slot of the user's MAX_PUBLISHED_PER_USER quota.
+  it("removes the directory row and tags, freeing the publish cap", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    expect(db.count("public_lists", "owner_id = ?", uid(1))).toBe(1);
+    expect(db.count("public_list_tags", "owner_id = ?", uid(1))).toBe(1);
+
+    const res = await handleDeleteList(
+      "L1",
+      authed("/api/me/lists/L1", "DELETE"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+
+    expect(db.count("public_lists", "owner_id = ?", uid(1))).toBe(0);
+    expect(db.count("public_list_tags", "owner_id = ?", uid(1))).toBe(0);
+
+    // A second list, without re-seeding the user (already seeded above) — just the
+    // `lists` row and one item, the minimum `handlePublishList` requires.
+    const addList = async (id: string) => {
+      const t = Date.now();
+      await db
+        .prepare(
+          `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+             display_order, home_order, version, created_at, updated_at)
+           VALUES (?1, ?2, 'Filler', 'MANUAL', 0, 0, 0, 0, 1, ?3, ?3)`,
+        )
+        .bind(uid(1), id, t)
+        .run();
+      await db
+        .prepare(
+          `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+           VALUES (?1, ?2, 900, 'MOVIE', 0, ?3, ?3)`,
+        )
+        .bind(uid(1), id, t)
+        .run();
+    };
+
+    // The cap is freed: publishing MAX_PUBLISHED_PER_USER - 1 more lists (49 more,
+    // since none were published before L1) plus a new one must not 409.
+    for (let i = 0; i < MAX_PUBLISHED_PER_USER - 1; i++) {
+      const id = `filler-${i}`;
+      await addList(id);
+      const pub = await handlePublishList(
+        id,
+        authed(`/api/me/lists/${id}/publish`, "POST", { tags: ["crime"] }),
+        testEnv(db),
+        ctx,
+      );
+      expect(pub.status).toBe(200);
+    }
+    // The orphan from the deleted L1 must not still be occupying a slot: this is the
+    // MAX_PUBLISHED_PER_USER'th list published on this account.
+    await addList("final");
+    const final = await handlePublishList(
+      "final",
+      authed("/api/me/lists/final/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    expect(final.status).toBe(200);
   });
 });
 
@@ -1199,5 +1455,46 @@ describe("account erasure", () => {
     // Untouched: uid(3)'s own list and uid(1)'s follow/like of it were on uid(1)'s side
     // (already asserted above), but uid(3)'s list itself must survive uid(1)'s erasure.
     expect(db.count("public_lists", "owner_id = ?", uid(3))).toBe(1);
+  });
+
+  // The erasure batch above correctly deletes uid(1)'s follow/like rows in BOTH
+  // directions — including uid(1)'s OWN follow/like of someone else's list. But
+  // deleting those rows makes `public_lists.engagement` wrong for the OTHER owner's
+  // list: nothing in this worker recomputes it on a schedule, so uid(3)'s cached
+  // ranking would stay inflated by uid(1)'s vanished follow forever.
+  it("recomputes a followed list's engagement after the follower is erased", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    seedUser(db, { id: uid(3) });
+    db.exec(
+      `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+       VALUES ('${uid(3)}', 'L3', '[]', 0, 1, NULL)`,
+    );
+    const l3Url = `/api/public/lists/${uid(3)}/L3`;
+    // uid(1) follows AND likes uid(3)'s list: engagement should read 3 + 1 = 4.
+    await handleFollow(uid(3), "L3", asUser("tok-owner", `${l3Url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(3), "L3", asUser("tok-owner", `${l3Url}/like`, "POST"), testEnv(db), ctx);
+    expect(
+      (
+        await db
+          .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ? AND list_id = 'L3'`)
+          .bind(uid(3))
+          .first<{ engagement: number }>()
+      )?.engagement,
+    ).toBe(4);
+
+    await eraseAccount(testEnv(db), uid(1));
+
+    const row = await db
+      .prepare(`SELECT engagement FROM public_lists WHERE owner_id = ? AND list_id = 'L3'`)
+      .bind(uid(3))
+      .first<{ engagement: number }>();
+    expect(row!.engagement).toBe(0);
   });
 });
