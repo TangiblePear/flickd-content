@@ -198,6 +198,9 @@ import {
   handleLike,
   handleBrowse,
   handleTagCatalogue,
+  handleMyFollows,
+  handlePublicListDetail,
+  handleReportPublicList,
 } from "./publicLists";
 
 interface ShareItem {
@@ -532,6 +535,24 @@ export default {
           ? handleFollow(listEngage[1], listEngage[2], req, env, ctx)
           : handleLike(listEngage[1], listEngage[2], req, env, ctx);
       }
+    }
+
+    if (p === "/api/me/follows" && req.method === "GET") return handleMyFollows(req, env, ctx);
+
+    const listReport = p.match(
+      /^\/api\/public\/lists\/([0-9A-HJKMNP-TV-Z]{26})\/([A-Za-z0-9._:-]{1,64})\/report$/,
+    );
+    if (listReport && req.method === "POST") {
+      return handleReportPublicList(listReport[1], listReport[2], req, env, ctx);
+    }
+
+    // ⚠️ LAST of the /api/public/lists/* routes — its second segment would otherwise
+    // swallow `/follow`, `/like` and `/report`.
+    const listDetail = p.match(
+      /^\/api\/public\/lists\/([0-9A-HJKMNP-TV-Z]{26})\/([A-Za-z0-9._:-]{1,64})$/,
+    );
+    if (listDetail && req.method === "GET") {
+      return handlePublicListDetail(listDetail[1], listDetail[2], req, env, ctx);
     }
 
     // `wake` is fire-and-forget: ctx.waitUntil keeps the push alive past the response

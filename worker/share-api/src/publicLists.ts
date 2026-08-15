@@ -389,6 +389,196 @@ export async function handleBrowse(
   });
 }
 
+export const MAX_PUBLIC_ITEMS = 500;
+const MAX_REPORT_CONTEXT = 500;
+const DEFAULT_REPORT_AUTOHIDE = 3;
+
+/** Every title in a list, capped, in the author's order. */
+async function itemsFor(env: PublicListsEnv, ownerId: string, listId: string) {
+  const rows = await env.DB.prepare(
+    `SELECT tmdb_id, type, position, ai_note FROM list_items
+      WHERE user_id = ?1 AND list_id = ?2
+      ORDER BY position, added_at
+      LIMIT ${MAX_PUBLIC_ITEMS}`,
+  )
+    .bind(ownerId, listId)
+    .all<{ tmdb_id: number; type: string; position: number; ai_note: string | null }>();
+  return (rows.results ?? []).map((i) => ({
+    tmdbId: i.tmdb_id,
+    type: i.type,
+    position: i.position,
+    note: i.ai_note ?? "",
+  }));
+}
+
+// ── GET /api/public/lists/{owner}/{id} ───────────────────────────────────────
+export async function handlePublicListDetail(
+  ownerId: string,
+  listId: string,
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  const row = await env.DB.prepare(
+    `SELECT p.tags, p.published_at, l.name, l.description, l.updated_at,
+            pr.display_name, pr.picture_url,
+            (SELECT COUNT(*) FROM list_follows f
+               WHERE f.owner_id = p.owner_id AND f.list_id = p.list_id) AS saves,
+            (SELECT COUNT(*) FROM public_list_likes k
+               WHERE k.owner_id = p.owner_id AND k.list_id = p.list_id) AS likes,
+            (SELECT COUNT(*) FROM list_follows f2
+               WHERE f2.owner_id = p.owner_id AND f2.list_id = p.list_id AND f2.user_id = ?3) AS is_saved,
+            (SELECT COUNT(*) FROM public_list_likes k2
+               WHERE k2.owner_id = p.owner_id AND k2.list_id = p.list_id AND k2.user_id = ?3) AS is_liked
+       FROM public_lists p
+       JOIN lists l ON l.user_id = p.owner_id AND l.id = p.list_id
+       LEFT JOIN profiles pr ON pr.user_id = p.owner_id
+      WHERE p.owner_id = ?1 AND p.list_id = ?2
+        AND p.hidden_at IS NULL AND l.deleted_at IS NULL
+        AND NOT EXISTS (
+              SELECT 1 FROM blocks b
+               WHERE (b.blocker_id = p.owner_id AND b.blocked_id = ?3)
+                  OR (b.blocker_id = ?3 AND b.blocked_id = p.owner_id))`,
+  )
+    .bind(ownerId, listId, session.userId)
+    .first<Record<string, unknown>>();
+  if (!row) return notFound();
+
+  return json({
+    ownerId,
+    listId,
+    name: row.name,
+    description: row.description ?? "",
+    authorName: row.display_name ?? "",
+    authorPictureUrl: row.picture_url ?? "",
+    tags: safeTags(row.tags as string),
+    saves: row.saves,
+    likes: row.likes,
+    saved: Number(row.is_saved) > 0,
+    liked: Number(row.is_liked) > 0,
+    publishedAt: row.published_at,
+    updatedAt: row.updated_at,
+    items: await itemsFor(env, ownerId, listId),
+  });
+}
+
+// ── GET /api/me/follows ──────────────────────────────────────────────────────
+//
+// ⚠️ Its own endpoint, NOT folded into `/api/me/lists`.
+//
+// That snapshot is gated on `lists_meta.version`. Reusing it would mean an author
+// editing one list has to bump the meta row of every follower — 200 followers, 200
+// writes, on every edit. This is a bounded read against MAX_FOLLOWS rows instead.
+//
+// `status` collapses three author-side outcomes into what the follower needs to know:
+//   live         — still published; keep updating.
+//   unpublished  — author withdrew it, OR it was hidden by moderation. Deliberately
+//                  the same value: a follower must not be able to tell a takedown from
+//                  a withdrawal.
+//   gone         — the author deleted the list.
+// The client keeps its rows for the latter two and badges them.
+export async function handleMyFollows(
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  const rows = await env.DB.prepare(
+    `SELECT f.owner_id, f.list_id, l.name, l.description, l.updated_at, l.deleted_at,
+            p.tags, p.hidden_at,
+            pr.display_name, pr.picture_url,
+            CASE WHEN p.owner_id IS NULL THEN 0 ELSE 1 END AS still_published
+       FROM list_follows f
+       LEFT JOIN lists l    ON l.user_id = f.owner_id AND l.id = f.list_id
+       LEFT JOIN public_lists p ON p.owner_id = f.owner_id AND p.list_id = f.list_id
+       LEFT JOIN profiles pr    ON pr.user_id = f.owner_id
+      WHERE f.user_id = ?1
+      ORDER BY f.created_at DESC
+      LIMIT ${MAX_FOLLOWS}`,
+  )
+    .bind(session.userId)
+    .all<Record<string, unknown>>();
+
+  const follows = [];
+  for (const r of rows.results ?? []) {
+    const gone = !r.name || r.deleted_at != null;
+    const live = !gone && Number(r.still_published) === 1 && r.hidden_at == null;
+    follows.push({
+      ownerId: r.owner_id,
+      listId: r.list_id,
+      status: gone ? "gone" : live ? "live" : "unpublished",
+      name: r.name ?? "",
+      description: r.description ?? "",
+      authorName: r.display_name ?? "",
+      authorPictureUrl: r.picture_url ?? "",
+      tags: safeTags(r.tags as string | null),
+      updatedAt: r.updated_at ?? 0,
+      // A gone list has no items to fetch; everything else materialises live, which
+      // is the whole reason a follow stays current without a propagation step.
+      items: gone ? [] : await itemsFor(env, String(r.owner_id), String(r.list_id)),
+    });
+  }
+  return json({ follows });
+}
+
+// ── POST /api/public/lists/{owner}/{id}/report ───────────────────────────────
+//
+// Files into the SAME `reports` table as comments, profiles and pictures, so the
+// unified queue in moderationQueue.ts picks it up with no second store to reconcile.
+export async function handleReportPublicList(
+  ownerId: string,
+  listId: string,
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  const body = (await req.json().catch(() => null)) as { context?: unknown } | null;
+  const context =
+    typeof body?.context === "string" ? body.context.slice(0, MAX_REPORT_CONTEXT) : null;
+
+  const targetId = `${ownerId}:${listId}`;
+  const t = now();
+
+  // One OPEN report per reporter per target. Without it a single person could trip
+  // the auto-hide threshold on their own, which makes it a brigading tool.
+  await env.DB.prepare(
+    `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at)
+     SELECT ?1, ?2, ?3, 'public_list', ?4, 'open', ?5
+      WHERE NOT EXISTS (
+        SELECT 1 FROM reports
+         WHERE reporter_id = ?2 AND target_id = ?3 AND kind = 'public_list' AND state = 'open')`,
+  )
+    .bind(crypto.randomUUID(), session.userId, targetId, context, t)
+    .run();
+
+  const threshold = Number(env.REPORT_AUTOHIDE ?? DEFAULT_REPORT_AUTOHIDE);
+  const distinct = await env.DB.prepare(
+    `SELECT COUNT(DISTINCT reporter_id) AS n FROM reports
+      WHERE target_id = ?1 AND kind = 'public_list' AND state = 'open'`,
+  )
+    .bind(targetId)
+    .first<{ n: number }>();
+
+  if ((distinct?.n ?? 0) >= threshold) {
+    await env.DB.prepare(
+      `UPDATE public_lists SET hidden_at = ?3
+        WHERE owner_id = ?1 AND list_id = ?2 AND hidden_at IS NULL`,
+    )
+      .bind(ownerId, listId, t)
+      .run();
+  }
+
+  return json({ ok: true });
+}
+
 /** A malformed tags column degrades one card's chips; it does not break the page. */
 function safeTags(raw: string | null): string[] {
   if (!raw) return [];

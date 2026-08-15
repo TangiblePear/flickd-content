@@ -6,6 +6,9 @@ import {
   handleFollow,
   handleLike,
   handleBrowse,
+  handleMyFollows,
+  handlePublicListDetail,
+  handleReportPublicList,
   MAX_FOLLOWS,
 } from "./publicLists";
 
@@ -650,5 +653,197 @@ describe("browse", () => {
     await withViewer(db, uid(2), "tok-2");
     expect(await browseAs(db, "tok-2", "?q=noir")).toHaveLength(1);
     expect(await browseAs(db, "tok-2", "?q=zzzz")).toHaveLength(0);
+  });
+});
+
+interface Follow {
+  ownerId: string;
+  listId: string;
+  status: string;
+  name: string;
+  items: { tmdbId: number; type: string }[];
+}
+
+const followsFor = async (db: TestD1, token: string): Promise<Follow[]> => {
+  const res = await handleMyFollows(asUser(token, "/api/me/follows", "GET"), testEnv(db), ctx);
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { follows: Follow[] }).follows;
+};
+
+describe("my follows", () => {
+  it("returns the author's CURRENT items, not a copy taken at follow time", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x", "POST"), testEnv(db), ctx);
+
+    expect((await followsFor(db, "tok-2"))[0].items).toHaveLength(2);
+
+    // The author adds a title AFTER the follow.
+    await db
+      .prepare(
+        `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+         VALUES (?1, 'A', 777, 'MOVIE', 9, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+
+    const items = (await followsFor(db, "tok-2"))[0].items;
+    expect(items).toHaveLength(3);
+    expect(items.some((i) => i.tmdbId === 777)).toBe(true);
+  });
+
+  it("reports an unpublished list as unpublished, keeping the follow", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x", "POST"), testEnv(db), ctx);
+    await handleUnpublishList("A", authed("/api/me/lists/A/publish", "DELETE"), testEnv(db), ctx);
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("unpublished");
+    expect(f.name).toBe("Neo-Noir Essentials");
+  });
+
+  // A follower must not be able to tell a takedown from an unpublish.
+  it("reports a HIDDEN list as unpublished, not as hidden", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x", "POST"), testEnv(db), ctx);
+    await db.prepare(`UPDATE public_lists SET hidden_at = 1 WHERE list_id = 'A'`).run();
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("unpublished");
+  });
+
+  it("reports a deleted list as gone", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x", "POST"), testEnv(db), ctx);
+    await db.prepare(`UPDATE lists SET deleted_at = 1 WHERE user_id = ?1 AND id = 'A'`).bind(uid(1)).run();
+
+    const [f] = await followsFor(db, "tok-2");
+    expect(f.status).toBe("gone");
+  });
+});
+
+describe("reporting", () => {
+  it("files into the shared reports table under kind public_list", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handleReportPublicList(
+      uid(1),
+      "A",
+      new Request(`https://flickto.app/api/public/lists/${uid(1)}/A/report`, {
+        method: "POST",
+        headers: { Authorization: "Bearer tok-2", "Content-Type": "application/json" },
+        body: JSON.stringify({ context: "spam" }),
+      }),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    const row = await db
+      .prepare(`SELECT kind, target_id, state FROM reports WHERE reporter_id = ?1`)
+      .bind(uid(2))
+      .first<{ kind: string; target_id: string; state: string }>();
+    expect(row!.kind).toBe("public_list");
+    expect(row!.target_id).toBe(`${uid(1)}:A`);
+    expect(row!.state).toBe("open");
+  });
+
+  it("hides the list once the distinct-reporter threshold is reached", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    const env = testEnv(db, { REPORT_AUTOHIDE: "2" });
+    for (const n of [2, 3]) {
+      await withViewer(db, uid(n), `tok-${n}`);
+      await handleReportPublicList(
+        uid(1),
+        "A",
+        new Request(`https://flickto.app/x`, {
+          method: "POST",
+          headers: { Authorization: `Bearer tok-${n}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ context: "spam" }),
+        }),
+        env,
+        ctx,
+      );
+    }
+    const row = await db
+      .prepare(`SELECT hidden_at FROM public_lists WHERE owner_id = ?1 AND list_id = 'A'`)
+      .bind(uid(1))
+      .first<{ hidden_at: number | null }>();
+    expect(row!.hidden_at).not.toBeNull();
+  });
+
+  it("one reporter cannot trip the threshold alone", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 2, "A");
+    await handlePublishList(
+      "A",
+      authed("/api/me/lists/A/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    const env = testEnv(db, { REPORT_AUTOHIDE: "2" });
+    await withViewer(db, uid(2), "tok-2");
+    for (let i = 0; i < 4; i++) {
+      await handleReportPublicList(
+        uid(1),
+        "A",
+        new Request(`https://flickto.app/x`, {
+          method: "POST",
+          headers: { Authorization: "Bearer tok-2", "Content-Type": "application/json" },
+          body: JSON.stringify({ context: "spam" }),
+        }),
+        env,
+        ctx,
+      );
+    }
+    const row = await db
+      .prepare(`SELECT hidden_at FROM public_lists WHERE owner_id = ?1 AND list_id = 'A'`)
+      .bind(uid(1))
+      .first<{ hidden_at: number | null }>();
+    expect(row!.hidden_at).toBeNull();
   });
 });
