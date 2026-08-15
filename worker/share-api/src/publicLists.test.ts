@@ -459,6 +459,7 @@ interface Card {
   likes: number;
   saved: boolean;
   liked: boolean;
+  posters: { tmdbId: number; type: string }[];
 }
 
 /** Publish `listId` owned by `owner`, `ageDays` old, with the given tags. */
@@ -495,7 +496,11 @@ async function browseAs(db: TestD1, token: string, query = ""): Promise<Card[]> 
 }
 
 describe("browse", () => {
-  it("decays: a fresh list with less engagement can outrank an old one with more", async () => {
+  // Decay order and recency order are made to DISAGREE here on purpose. If
+  // `sort=trending` silently fell through to plain `published_at DESC`, this would
+  // pick NEW first (it is more recent) instead of OLD — so this test only passes if
+  // the decay expression is actually driving the order.
+  it("decays: the correct trending winner is the OLDER list, against plain recency", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 3, "OLD");
     await db
@@ -514,26 +519,33 @@ describe("browse", () => {
       .bind(uid(1))
       .run();
 
-    await publishAged(db, uid(1), "OLD", ["crime"], 100);
+    await publishAged(db, uid(1), "OLD", ["crime"], 8);
     await publishAged(db, uid(1), "NEW", ["crime"], 0);
-    // OLD has far more raw engagement, but it is 100 days old.
-    await db.prepare(`UPDATE public_lists SET engagement = 60 WHERE list_id = 'OLD'`).run();
-    await db.prepare(`UPDATE public_lists SET engagement = 10 WHERE list_id = 'NEW'`).run();
+    // engagement / (age_days + 2):
+    //   OLD: 50 / (8 + 2) = 5.0
+    //   NEW:  6 / (0 + 2) = 3.0
+    // OLD wins on decay even though NEW is more recent — plain `published_at DESC`
+    // would put NEW first, so the two orderings disagree.
+    await db.prepare(`UPDATE public_lists SET engagement = 50 WHERE list_id = 'OLD'`).run();
+    await db.prepare(`UPDATE public_lists SET engagement = 6 WHERE list_id = 'NEW'`).run();
 
     await withViewer(db, uid(2), "tok-2");
     const cards = await browseAs(db, "tok-2", "?sort=trending");
-    // 60/(100+2) = 0.59 versus 10/(0+2) = 5.0
-    expect(cards[0].listId).toBe("NEW");
+    expect(cards.map((c) => c.listId)).toEqual(["OLD", "NEW"]);
   });
 
-  it("filters by tag exactly — 'horror' must not match 'horror' via a substring on another tag", async () => {
+  // 'crime' is a SUBSTRING of 'true-crime' — the exact pair migration 0039's header
+  // cites as why `WHERE tags LIKE '%crime%'` is wrong (it "matches `horror-comedy`").
+  // A wrong substring implementation would return both lists here; only an exact
+  // match on the join table returns just A.
+  it("filters by tag exactly — 'crime' must not match 'true-crime' via a substring", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 3, "A");
     await db
       .prepare(
         `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
            display_order, home_order, version, created_at, updated_at)
-         VALUES (?1, 'B', 'Comfort', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
+         VALUES (?1, 'B', 'True Crime Docs', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
       )
       .bind(uid(1))
       .run();
@@ -544,15 +556,15 @@ describe("browse", () => {
       )
       .bind(uid(1))
       .run();
-    await publishAged(db, uid(1), "A", ["horror"], 1);
-    await publishAged(db, uid(1), "B", ["comfort-watch"], 1);
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await publishAged(db, uid(1), "B", ["true-crime"], 1);
 
     await withViewer(db, uid(2), "tok-2");
-    const cards = await browseAs(db, "tok-2", "?tag=horror");
+    const cards = await browseAs(db, "tok-2", "?tag=crime");
     expect(cards.map((c) => c.listId)).toEqual(["A"]);
   });
 
-  it("hides a list from someone the author blocked, and vice versa", async () => {
+  it("hides a list from someone the author blocked", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 3, "A");
     await publishAged(db, uid(1), "A", ["crime"], 1);
@@ -563,6 +575,24 @@ describe("browse", () => {
     await db
       .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
       .bind(uid(1), uid(2))
+      .run();
+    expect(await browseAs(db, "tok-2")).toHaveLength(0);
+  });
+
+  // The other direction: the VIEWER did the blocking. Both directions are checked in
+  // the query's NOT EXISTS clause, and each needs its own row — one proves the
+  // other's OR arm did nothing by accident.
+  it("hides a list from an author the viewer blocked", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    expect(await browseAs(db, "tok-2")).toHaveLength(1);
+
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(2), uid(1))
       .run();
     expect(await browseAs(db, "tok-2")).toHaveLength(0);
   });
@@ -591,6 +621,26 @@ describe("browse", () => {
     expect(card.likes).toBe(1);
     expect(card.saved).toBe(true);   // uid(2) followed
     expect(card.liked).toBe(false);  // uid(2) did not like
+  });
+
+  // Positions are append-only and sparse: `list_items.position` is assigned as
+  // COALESCE(MAX(position), -1) + 1 and a removal is a plain delete with no
+  // renumbering (Android Daos.kt:1753, CustomListsRepository.kt:300). A list whose
+  // first four items were removed has every surviving position >= 4, and posters
+  // must still be the top four BY RANK, not the rows whose absolute position happens
+  // to be under CARD_POSTERS.
+  it("returns posters ranked by position even when every surviving item has position >= 4", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 6, "A"); // positions 0..5, tmdb_id 500..505
+    await db
+      .prepare(`DELETE FROM list_items WHERE user_id = ?1 AND list_id = 'A' AND position < 4`)
+      .bind(uid(1))
+      .run();
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const [card] = await browseAs(db, "tok-2");
+    expect(card.posters.map((p) => p.tmdbId)).toEqual([504, 505]);
   });
 
   it("searches name and description", async () => {

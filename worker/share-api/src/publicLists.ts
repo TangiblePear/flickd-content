@@ -337,15 +337,28 @@ export async function handleBrowse(
 
   // One extra indexed read for every card's posters, rather than a denormalised
   // copy on `public_lists` that would drift the moment an author reorders the list.
+  //
+  // Ranked per list rather than bounded by absolute position: `position` is
+  // append-only and sparse (assigned as COALESCE(MAX(position), -1) + 1, and a
+  // removal is a plain delete with no renumbering — Android Daos.kt:1753,
+  // CustomListsRepository.kt:300). A list whose first four items were removed has
+  // every surviving position >= CARD_POSTERS, so `position < CARD_POSTERS` would
+  // return zero posters for a card that still has items. Ranking picks the top
+  // CARD_POSTERS rows by position regardless of what the absolute values are.
   const posters = new Map<string, { tmdbId: number; type: string }[]>();
   if (page.length) {
     const keys = page.map((r) => `${r.owner_id} ${r.list_id}`);
     const placeholders = page.map((_, i) => `(?${i * 2 + 1}, ?${i * 2 + 2})`).join(",");
     const binds = page.flatMap((r) => [r.owner_id, r.list_id]);
     const items = await env.DB.prepare(
-      `SELECT user_id, list_id, tmdb_id, type FROM list_items
-        WHERE (user_id, list_id) IN (${placeholders}) AND position < ${CARD_POSTERS}
-        ORDER BY list_id, position`,
+      `SELECT user_id, list_id, tmdb_id, type FROM (
+         SELECT user_id, list_id, tmdb_id, type,
+                ROW_NUMBER() OVER (PARTITION BY user_id, list_id ORDER BY position, added_at) AS rn
+           FROM list_items
+          WHERE (user_id, list_id) IN (${placeholders})
+       ) AS ranked
+        WHERE ranked.rn <= ${CARD_POSTERS}
+        ORDER BY ranked.list_id, ranked.rn`,
     )
       .bind(...binds)
       .all<{ user_id: string; list_id: string; tmdb_id: number; type: string }>();
