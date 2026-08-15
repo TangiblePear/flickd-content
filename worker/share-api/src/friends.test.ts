@@ -258,6 +258,13 @@ class FakeStmt {
       // from the batch: aggregate counts with no user id, like `telemetry_daily`.
       ["DELETE FROM daily_game_results", "daily_game_results", "user_id"],
       ["DELETE FROM daily_game_stats", "daily_game_stats", "user_id"],
+      // Public lists (0039), part of the erasure batch but not modelled here —
+      // `publicLists.test.ts` owns the assertions for these four tables, including the
+      // both-directions delete on `list_follows` and `public_list_likes`.
+      ["DELETE FROM public_lists", "public_lists", null],
+      ["DELETE FROM public_list_tags", "public_list_tags", null],
+      ["DELETE FROM list_follows", "list_follows", null],
+      ["DELETE FROM public_list_likes", "public_list_likes", null],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],

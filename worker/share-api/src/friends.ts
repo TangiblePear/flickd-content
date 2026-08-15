@@ -814,6 +814,18 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     env.DB.prepare("DELETE FROM daily_game_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_settings WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM user_achievements WHERE user_id = ?").bind(id),
+    // Public lists (0039). Six statements, not four: `list_follows` and
+    // `public_list_likes` are keyed on TWO people — `user_id`, whoever followed or
+    // liked, and `owner_id`, whose list it points at — so this account's own rows AND
+    // other people's rows pointing at its (now-deleted) lists both have to go. Leaving
+    // the `owner_id` half behind would keep a surviving user subscribed to a list whose
+    // owner no longer exists.
+    env.DB.prepare("DELETE FROM public_lists WHERE owner_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM public_list_tags WHERE owner_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM list_follows WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM list_follows WHERE owner_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM public_list_likes WHERE user_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM public_list_likes WHERE owner_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profile_stats WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM profiles WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM identities WHERE user_id = ?").bind(id),

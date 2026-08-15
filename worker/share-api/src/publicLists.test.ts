@@ -12,6 +12,7 @@ import {
   MAX_FOLLOWS,
 } from "./publicLists";
 import { handleModerationAct } from "./moderationQueue";
+import { eraseAccount } from "./friends";
 
 const TOKEN = "tok-owner";
 
@@ -1135,5 +1136,68 @@ describe("reporting", () => {
       .bind(uid(2), `${uid(1)}:A`)
       .first<{ n: number }>();
     expect(reportCount!.n).toBe(1);
+  });
+});
+
+describe("account erasure", () => {
+  /**
+   * A table missing from `eraseAccount`'s batch is a silent compliance gap: the delete
+   * returns 204 and the rows simply stay. This is what makes the claim "your published
+   * lists, follows and likes are removed" true instead of aspirational.
+   *
+   * `list_follows` and `public_list_likes` are keyed on TWO different people —
+   * `user_id`, the one who followed/liked, and `owner_id`, whose list it points at — so
+   * erasing one account has to clear both directions. Leaving the `owner_id` half behind
+   * would keep a surviving user subscribed to a list whose owner no longer exists.
+   */
+  it("erases published lists, tags, follows and likes in both directions", async () => {
+    const db = new TestD1();
+    // uid(1): the account about to be erased. Publishes L1 with a tag.
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    // uid(3): a bystander who owns a different published list, so uid(1) has something
+    // of someone else's to follow and like.
+    seedUser(db, { id: uid(3) });
+    db.exec(
+      `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+       VALUES ('${uid(3)}', 'L3', '[]', 0, 1, NULL)`,
+    );
+    const l3Url = `/api/public/lists/${uid(3)}/L3`;
+    await handleFollow(uid(3), "L3", asUser("tok-owner", `${l3Url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(3), "L3", asUser("tok-owner", `${l3Url}/like`, "POST"), testEnv(db), ctx);
+    // uid(2): a bystander who follows and likes uid(1)'s list L1 — a subscription that
+    // must not survive uid(1)'s erasure either.
+    await withViewer(db, uid(2), "tok-2");
+    const l1Url = `/api/public/lists/${uid(1)}/L1`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", `${l1Url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "L1", asUser("tok-2", `${l1Url}/like`, "POST"), testEnv(db), ctx);
+
+    // Sanity: everything is seeded before erasure runs.
+    expect(db.count("public_lists", "owner_id = ?", uid(1))).toBe(1);
+    expect(db.count("public_list_tags", "owner_id = ?", uid(1))).toBe(1);
+    expect(db.count("list_follows", "user_id = ?", uid(1))).toBe(1);
+    expect(db.count("public_list_likes", "user_id = ?", uid(1))).toBe(1);
+    expect(db.count("list_follows", "owner_id = ?", uid(1))).toBe(1);
+    expect(db.count("public_list_likes", "owner_id = ?", uid(1))).toBe(1);
+
+    await eraseAccount(testEnv(db), uid(1));
+
+    // uid(1)'s own list, its tags, and its own follow/like of someone else's list.
+    expect(db.count("public_lists", "owner_id = ?", uid(1))).toBe(0);
+    expect(db.count("public_list_tags", "owner_id = ?", uid(1))).toBe(0);
+    expect(db.count("list_follows", "user_id = ?", uid(1))).toBe(0);
+    expect(db.count("public_list_likes", "user_id = ?", uid(1))).toBe(0);
+    // Other people's follow/like of uid(1)'s now-gone list.
+    expect(db.count("list_follows", "owner_id = ?", uid(1))).toBe(0);
+    expect(db.count("public_list_likes", "owner_id = ?", uid(1))).toBe(0);
+
+    // Untouched: uid(3)'s own list and uid(1)'s follow/like of it were on uid(1)'s side
+    // (already asserted above), but uid(3)'s list itself must survive uid(1)'s erasure.
+    expect(db.count("public_lists", "owner_id = ?", uid(3))).toBe(1);
   });
 });
