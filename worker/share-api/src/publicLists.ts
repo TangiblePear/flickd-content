@@ -631,7 +631,7 @@ export async function handleMyFollows(
       authorName: gone ? "" : (r.display_name ?? ""),
       authorPictureUrl: gone ? "" : (r.picture_url ?? ""),
       tags: gone ? [] : safeTags(r.tags as string | null),
-      updatedAt: r.updated_at ?? 0,
+      updatedAt: gone ? 0 : (r.updated_at ?? 0),
       // A gone list has no items to fetch; everything else materialises live, which
       // is the whole reason a follow stays current without a propagation step.
       items: gone ? [] : (itemsByList.get(`${r.owner_id} ${r.list_id}`) ?? []),

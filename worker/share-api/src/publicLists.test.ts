@@ -1203,6 +1203,7 @@ describe("my follows", () => {
     expect(f.authorPictureUrl).toBe("");
     expect(f.tags).toEqual([]);
     expect(f.items).toHaveLength(0);
+    expect(f.updatedAt).toBe(0);
   });
 
   // The other direction: the follower is the one who did the blocking.
@@ -1242,6 +1243,7 @@ describe("my follows", () => {
     expect(f.authorPictureUrl).toBe("");
     expect(f.tags).toEqual([]);
     expect(f.items).toHaveLength(0);
+    expect(f.updatedAt).toBe(0);
   });
 
   // The N+1 fix's specific failure mode: a batched query that isn't correctly
