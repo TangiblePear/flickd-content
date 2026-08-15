@@ -7,6 +7,7 @@ import {
   handleLike,
   handleBrowse,
   handleMyFollows,
+  handleMyPublishedLists,
   handlePublicListDetail,
   handleReportPublicList,
   MAX_FOLLOWS,
@@ -1657,5 +1658,130 @@ describe("account erasure", () => {
     // the second (recompute) call throwing.
     expect(db.count("users", "id = ?", uid(1))).toBe(0);
     expect(db.count("list_follows", "user_id = ?", uid(1))).toBe(0);
+  });
+});
+
+interface Published {
+  listId: string;
+  tags: string[];
+  saves: number;
+  likes: number;
+  hidden: boolean;
+  publishedAt: number;
+}
+
+async function myPublished(db: TestD1, token = TOKEN): Promise<Published[]> {
+  const res = await handleMyPublishedLists(
+    asUser(token, "/api/me/lists/published", "GET"),
+    testEnv(db),
+    ctx,
+  );
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { published: Published[] }).published;
+}
+
+describe("GET /api/me/lists/published", () => {
+  it("a published list appears with its tags and true saves/likes counts", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime", "neo-noir"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    await withViewer(db, uid(3), "tok-3");
+    const url = `/api/public/lists/${uid(1)}/L1`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", `${url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "L1", asUser("tok-2", `${url}/like`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "L1", asUser("tok-3", `${url}/like`, "POST"), testEnv(db), ctx);
+
+    const [p] = await myPublished(db);
+    expect(p).toMatchObject({ listId: "L1", tags: ["crime", "neo-noir"], saves: 1, likes: 2, hidden: false });
+    expect(p.publishedAt).toBeGreaterThan(0);
+  });
+
+  it("an unpublished list does not appear", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    expect(await myPublished(db)).toEqual([]);
+  });
+
+  it("another user's published list does not appear", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    expect(await myPublished(db, "tok-2")).toEqual([]);
+  });
+
+  it("a hidden list still appears, flagged hidden: true — this endpoint is owner-only", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await db
+      .prepare(`UPDATE public_lists SET hidden_at = ?2 WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1), Date.now())
+      .run();
+
+    const [p] = await myPublished(db);
+    expect(p.listId).toBe("L1");
+    expect(p.hidden).toBe(true);
+  });
+
+  it("a soft-deleted list does not appear", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await db.prepare(`UPDATE lists SET deleted_at = ?2 WHERE user_id = ?1 AND id = 'L1'`)
+      .bind(uid(1), Date.now())
+      .run();
+
+    expect(await myPublished(db)).toEqual([]);
+  });
+
+  // The one that matters most: `public_lists.engagement` is a decay-weighted ranking
+  // cache (3x per follow, 1x per like — see `recomputeEngagement`), not a count, and
+  // is explicitly off-limits as a source for `saves`/`likes`. Setting it to a value
+  // that could not possibly be a real count proves the handler never reads it — if
+  // someone later "optimises" this to `SELECT engagement`, this test catches it.
+  it("saves/likes come from list_follows/public_list_likes rows, never from the engagement cache", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+    await withViewer(db, uid(2), "tok-2");
+    const url = `/api/public/lists/${uid(1)}/L1`;
+    await handleFollow(uid(1), "L1", asUser("tok-2", `${url}/follow`, "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "L1", asUser("tok-2", `${url}/like`, "POST"), testEnv(db), ctx);
+
+    await db
+      .prepare(`UPDATE public_lists SET engagement = 999 WHERE owner_id = ?1 AND list_id = 'L1'`)
+      .bind(uid(1))
+      .run();
+
+    const [p] = await myPublished(db);
+    expect(p.saves).toBe(1);
+    expect(p.likes).toBe(1);
   });
 });

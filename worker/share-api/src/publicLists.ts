@@ -170,6 +170,57 @@ export async function handleUnpublishList(
   return json({ published: false });
 }
 
+// ── GET /api/me/lists/published ──────────────────────────────────────────────
+//
+// ⚠️ Its own endpoint, NOT folded into `/api/me/lists`.
+//
+// That snapshot is gated on `lists_meta.version`, which bumps only when the OWNER
+// edits a list. Someone else saving or liking your list changes `saves`/`likes` but
+// bumps nothing the owner did — so counts folded into that snapshot would sit stale
+// until the owner happened to make an unrelated edit. A separate, ungated read is
+// the only way this stays current.
+//
+// Owner-only and includes hidden rows: this leaks nothing, since the caller is the
+// only person who can ever see their own row here.
+export async function handleMyPublishedLists(
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  // `saves`/`likes` are counted from `list_follows`/`public_list_likes` at read
+  // time, never from `public_lists.engagement` — that column is a decay-weighted
+  // ranking cache (`recomputeEngagement`), not a count, and drifts from the true
+  // totals by design (3x weight per follow, 1x per like).
+  const rows = await env.DB.prepare(
+    `SELECT p.list_id, p.tags, p.hidden_at, p.published_at,
+            (SELECT COUNT(*) FROM list_follows f
+               WHERE f.owner_id = p.owner_id AND f.list_id = p.list_id) AS saves,
+            (SELECT COUNT(*) FROM public_list_likes k
+               WHERE k.owner_id = p.owner_id AND k.list_id = p.list_id) AS likes
+       FROM public_lists p
+       JOIN lists l ON l.user_id = p.owner_id AND l.id = p.list_id
+      WHERE p.owner_id = ?1 AND l.deleted_at IS NULL
+      ORDER BY p.published_at DESC
+      LIMIT ${MAX_PUBLISHED_PER_USER}`,
+  )
+    .bind(session.userId)
+    .all<Record<string, unknown>>();
+
+  return json({
+    published: (rows.results ?? []).map((r) => ({
+      listId: r.list_id,
+      tags: safeTags(r.tags as string),
+      saves: r.saves,
+      likes: r.likes,
+      hidden: r.hidden_at != null,
+      publishedAt: r.published_at,
+    })),
+  });
+}
+
 export const MAX_FOLLOWS = 100;
 
 /**

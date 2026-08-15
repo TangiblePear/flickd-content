@@ -199,6 +199,7 @@ import {
   handleBrowse,
   handleTagCatalogue,
   handleMyFollows,
+  handleMyPublishedLists,
   handlePublicListDetail,
   handleReportPublicList,
 } from "./publicLists";
@@ -489,6 +490,13 @@ export default {
     const listItems = p.match(/^\/api\/me\/lists\/([A-Za-z0-9._:-]{1,64})\/items$/);
     if (listItems && (req.method === "POST" || req.method === "DELETE")) {
       return handleListItems(listItems[1], req, env, ctx);
+    }
+    // ⚠️ Registered BEFORE `oneList` below: that regex's id character class
+    // ([A-Za-z0-9._:-]{1,64}) matches the literal string "published", so this exact
+    // path must be checked first or it gets read as `/api/me/lists/{id}` with
+    // id = "published".
+    if (p === "/api/me/lists/published" && req.method === "GET") {
+      return handleMyPublishedLists(req, env, ctx);
     }
     const oneList = p.match(/^\/api\/me\/lists\/([A-Za-z0-9._:-]{1,64})$/);
     if (oneList) {
