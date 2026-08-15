@@ -233,6 +233,31 @@ bucket_name = "flickto-content"
 # rule on the route is the equivalent alternative and needs no binding at all.
 
 
+# ── Comment write burst limits ──
+#
+# The hourly cap in comments.ts (COMMENTS_PER_HOUR) has two blind spots these close:
+# it is spent only by a NEW comment, so an edit loop on one subject is free; and it
+# is per-author, so twenty accounts driven by one script cost nothing extra.
+#
+# `simple.period` accepts 10 or 60 seconds ONLY -- these are burst controls that sit
+# alongside the hourly cap, not a replacement for it.
+#
+# Both handlers optional-chain the binding, so removing these lines degrades to no
+# limit rather than to a broken endpoint. Namespace ids must be unique per worker;
+# 1001 is claimed above by ANON_RATE_LIMITER even while that block is commented out.
+[[unsafe.bindings]]
+name = "COMMENT_USER_LIMITER"
+type = "ratelimit"
+namespace_id = "1002"
+simple = { limit = 5, period = 60 }
+
+[[unsafe.bindings]]
+name = "COMMENT_IP_LIMITER"
+type = "ratelimit"
+namespace_id = "1003"
+simple = { limit = 20, period = 60 }
+
+
 # Accounts, profiles, friendships, blocks (server-authoritative — NOT zero-knowledge).
 # Get the id with: wrangler d1 list
 [[d1_databases]]
@@ -319,6 +344,29 @@ RATE_LIMIT_PER_HOUR = "10"
 # would cost the same as a new comment). The real anti-spam control is one comment
 # per user per subject; this is the belt.
 COMMENTS_PER_HOUR = "30"
+# Rate-limit strikes within one hour that trigger an automatic posting suspension,
+# and how long that suspension lasts (default 24h). A limiter only refuses the
+# current request; a script retries at one request per window forever, so without
+# these it is never actually stopped. "0" disables the auto-suspend entirely.
+STRIKES_TO_SUSPEND = "10"
+AUTO_SUSPEND_MS = "86400000"
+# ── App Check (Play Integrity) on comment writes ──
+# "off" | "log" | "enforce".
+#   log     — verify and record the outcome, NEVER reject. This is how adoption gets
+#             measured before enforcement can lock anyone out.
+#   enforce — reject a write with no valid token, EXCEPT from a client identifying
+#             itself below APPCHECK_MIN_VERSION (a build that shipped before the app
+#             sent the header can never pass, so it is exempt rather than broken).
+# ⚠️ Do NOT flip to "enforce" until (a) the logs show real traffic passing and (b) the
+# App Check *debug* provider is registered — Play Integrity fails for any build not
+# installed from Play, so debug builds break first and silently.
+APPCHECK_MODE = "log"
+APPCHECK_MIN_VERSION = "0"
+# Firebase project **NUMBER**, not the id. App Check's `iss`/`aud` carry the number;
+# FIREBASE_PROJECT_ID below carries the id, which is what an ID token's `aud` uses.
+# Swapping them fails every verification with a claim mismatch that reads like a
+# signing bug — this has cost time before.
+FIREBASE_PROJECT_NUMBER = "468641021144"
 # Image moderation. Set to "true" and add the VISION_API_KEY secret to enable the
 # paid Cloud Vision SafeSearch scan (wrangler secret put VISION_API_KEY).
 MODERATION_ENABLED = "true"

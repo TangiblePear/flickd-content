@@ -35,12 +35,34 @@ import { resolveSession } from "./auth";
 import { loadFriendships } from "./friends";
 import { postingSuspendedUntil, suspendedBody } from "./suspension";
 import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
+import { appVersion } from "./profiles";
+import { evaluateAppCheck, logAppCheck, type AppCheckEnv } from "./appcheck";
+import { recordAdminAction } from "./adminAudit";
 
-export interface CommentsEnv {
+export interface CommentsEnv extends AppCheckEnv {
   DB: D1Database;
   FIREBASE_PROJECT_ID?: string;
   /** Per-author hourly cap. Config, not a constant, so it tunes without a deploy. */
   COMMENTS_PER_HOUR?: string;
+  /**
+   * Short-window burst limiters for the comment write path.
+   *
+   * These exist because the hourly cap above has two blind spots: it is spent only
+   * by a NEW comment (so an edit loop is free), and it is per-author (so N accounts
+   * driven by one script cost nothing extra). The user limiter closes the first, the
+   * IP limiter the second.
+   *
+   * Declared optional and always optional-chained, the same shape as
+   * `ANON_RATE_LIMITER` in dailyGame.ts: absent ⇒ no limit, never a broken endpoint.
+   * Cloudflare's `simple` ratelimit accepts a period of 10 or 60 seconds only, so
+   * this is a burst control that complements the hourly cap rather than replacing it.
+   */
+  COMMENT_USER_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  COMMENT_IP_LIMITER?: { limit(options: { key: string }): Promise<{ success: boolean }> };
+  /** Rate-limit strikes in the window that trigger an automatic posting suspension. */
+  STRIKES_TO_SUSPEND?: string;
+  /** How long an automatic suspension lasts. */
+  AUTO_SUSPEND_MS?: string;
   /**
    * Workers AI, for the inline translation tier. **Optional on purpose**: with no
    * binding every comment comes back flagged untranslated and the client falls
@@ -53,7 +75,8 @@ export interface CommentsEnv {
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, If-Match, X-Revoke-Session",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, If-Match, X-Revoke-Session, X-App-Version, X-Firebase-AppCheck",
 };
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
@@ -768,6 +791,106 @@ async function rateLimited(env: CommentsEnv, userId: string): Promise<boolean> {
   return (row?.n ?? 0) >= limit;
 }
 
+/**
+ * Burst limit on a comment write, per author AND per connecting IP.
+ *
+ * Both are checked, not either: the per-user key is what finally bounds the edit
+ * loop that the hourly cap leaves free, and the per-IP key is what makes running
+ * twenty accounts from one script cost twenty times as much as it currently does.
+ *
+ * The IP check runs second so a single abusive account trips its own key first —
+ * an IP strike is the broader signal and shouldn't be spent on one user's typo.
+ */
+async function burstLimited(env: CommentsEnv, req: Request, userId: string): Promise<boolean> {
+  const byUser = await env.COMMENT_USER_LIMITER?.limit({ key: `cw:${userId}` });
+  if (byUser && !byUser.success) return true;
+
+  const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
+  const byIp = await env.COMMENT_IP_LIMITER?.limit({ key: `ci:${ip}` });
+  return !!byIp && !byIp.success;
+}
+
+/**
+ * The 429 body for a comment write.
+ *
+ * `Retry-After` travels because the Android outbox retries blind: a dirty row
+ * whose only feedback is a bare 429 is exactly the shape that produced the
+ * reaction poison pill, where a permanently-failing write retried every sync
+ * forever. A client that is told when to come back can park instead of spinning.
+ */
+const rateLimitedBody = (retryAfterSeconds = 60) =>
+  json({ error: "rate_limited" }, 429, { "Retry-After": String(retryAfterSeconds) });
+
+const STRIKE_WINDOW_MS = 3600_000;
+const DEFAULT_STRIKES_TO_SUSPEND = 10;
+/** One day, matching the shortest option an admin can pick in SUSPEND_DURATIONS. */
+const DEFAULT_AUTO_SUSPEND_MS = 86_400_000;
+
+/**
+ * Record one rate-limit strike and suspend posting once they pile up.
+ *
+ * Hitting a limit once is ordinary — a fast thumb, a retry after a dropped
+ * response. Hitting it ten times in an hour is a script, and the limiter alone
+ * would let that script keep trying forever at one request per window. The strike
+ * table turns "refused" into "stopped".
+ *
+ * Runs entirely inside `ctx.waitUntil`, so a caller that has already been refused
+ * never waits on it, and a failure here can never convert a 429 into a 500 —
+ * the same best-effort posture `recordAdminAction` takes.
+ */
+async function recordStrike(env: CommentsEnv, ctx: ExecutionContext | undefined, userId: string, scope: string): Promise<void> {
+  const work = (async () => {
+    try {
+      const now = Date.now();
+      await env.DB.prepare(
+        "INSERT INTO rate_limit_strikes (id, user_id, scope, created_at) VALUES (?, ?, ?, ?)",
+      )
+        .bind(newId(), userId, scope, now)
+        .run();
+
+      const threshold = Number(env.STRIKES_TO_SUSPEND ?? DEFAULT_STRIKES_TO_SUSPEND);
+      if (threshold <= 0) return;
+
+      const row = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM rate_limit_strikes WHERE user_id = ? AND created_at > ?",
+      )
+        .bind(userId, now - STRIKE_WINDOW_MS)
+        .first<{ n: number }>();
+      if ((row?.n ?? 0) < threshold) return;
+
+      // Only ever EXTENDS a suspension. `MAX` means an automatic 24h cannot cut
+      // short a longer one an admin set by hand.
+      const until = now + Number(env.AUTO_SUSPEND_MS ?? DEFAULT_AUTO_SUSPEND_MS);
+      await env.DB.prepare(
+        "UPDATE users SET posting_suspended_until = MAX(COALESCE(posting_suspended_until, 0), ?) WHERE id = ?",
+      )
+        .bind(until, userId)
+        .run();
+
+      // Logged as an admin action with a `system` actor so an automatic suspension
+      // appears in the same audit trail as a manual one — otherwise a user asking
+      // "why can't I post" has no answer anyone can look up.
+      await recordAdminAction(env.DB, "system", "auto_posting_suspend", userId, {
+        reason: "rate_limit_strikes",
+        scope,
+        strikes: row?.n ?? 0,
+        until,
+      });
+
+      // Prune the window in the same pass. There is no cron budget left on this
+      // account, so anything not cleaned opportunistically grows forever.
+      await env.DB.prepare("DELETE FROM rate_limit_strikes WHERE created_at <= ?")
+        .bind(now - STRIKE_WINDOW_MS)
+        .run();
+    } catch (e) {
+      console.error("recordStrike failed", scope, e);
+    }
+  })();
+
+  if (ctx) ctx.waitUntil(work);
+  else await work;
+}
+
 interface MediaInput {
   kind: string | null;
   provider: string | null;
@@ -814,6 +937,21 @@ export async function handlePostComment(
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
+
+  // App Check proves the caller is a genuine install, which a session token cannot:
+  // a session is a 90-day bearer credential anyone can mint by signing in once and
+  // then use from a script forever. Under `log` this only records; see appcheck.ts.
+  const version = appVersion(req);
+  const { outcome, enforced } = await evaluateAppCheck(req, env, version);
+  logAppCheck(outcome, version, env.APPCHECK_MODE ?? "off");
+  if (enforced) return json({ error: "app_check_required" }, 403);
+
+  // Burst limit BEFORE the body is read: a refused write should cost as little as
+  // possible, and this is the path a flood arrives on.
+  if (await burstLimited(env, req, session.userId)) {
+    await recordStrike(env, ctx, session.userId, "comment_write");
+    return rateLimitedBody();
+  }
 
   let payload: Record<string, unknown>;
   try {
@@ -866,7 +1004,10 @@ export async function handlePostComment(
 
   // Only a NEW comment spends rate-limit budget. Editing is not posting, and
   // charging for it would make a typo fix cost the same as a new comment.
-  if (!existing && (await rateLimited(env, session.userId))) return json({ error: "rate_limited" }, 429);
+  if (!existing && (await rateLimited(env, session.userId))) {
+    await recordStrike(env, ctx, session.userId, "comment_hourly");
+    return rateLimitedBody(3600);
+  }
 
   const now = Date.now();
 
@@ -1010,6 +1151,14 @@ export async function handleDeleteComment(
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
+  // Shares the write budget with POST deliberately: delete-then-repost on the same
+  // subject is an edit, and an edit is free under the hourly cap, so without this
+  // the pair is an uncapped write loop.
+  if (await burstLimited(env, req, session.userId)) {
+    await recordStrike(env, ctx, session.userId, "comment_write");
+    return rateLimitedBody();
+  }
+
   const row = await env.DB.prepare(
     `SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at, deleted_at, body, media_id
        FROM comments WHERE id = ? AND author_id = ?`,
@@ -1055,6 +1204,14 @@ export async function handleReactToComment(
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
+
+  // Adding a reaction is posting: it puts your name on someone else's comment and
+  // can notify its author. Removing one is not gated — withdrawing is always
+  // allowed, and refusing it would strand a reaction a suspended user regrets.
+  if (req.method !== "DELETE") {
+    const suspendedUntil = await postingSuspendedUntil(env.DB, session.userId);
+    if (suspendedUntil > 0) return json(suspendedBody(suspendedUntil), 403);
+  }
 
   const removing = req.method === "DELETE";
   let emoji = "";
@@ -1229,6 +1386,12 @@ export async function handleReportComment(
 ): Promise<Response> {
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
+
+  // A report is the one write that acts on someone ELSE's content: REPORT_AUTOHIDE
+  // distinct reporters hide a comment outright. Leaving it open to a suspended user
+  // makes suspension a promotion — you lose your voice but keep the censorship lever.
+  const suspendedUntil = await postingSuspendedUntil(env.DB, session.userId);
+  if (suspendedUntil > 0) return json(suspendedBody(suspendedUntil), 403);
 
   let payload: Record<string, unknown>;
   try {
