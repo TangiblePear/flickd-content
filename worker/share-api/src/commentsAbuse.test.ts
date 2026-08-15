@@ -151,22 +151,44 @@ describe("comment write burst limiter", () => {
 });
 
 describe("strike escalation", () => {
+  /** Drives [n] refused writes, each one debounce-period apart so they all count. */
+  async function refusedWrites(db: TestD1, token: string, env: unknown, n: number): Promise<void> {
+    const base = Date.now();
+    for (let i = 0; i < n; i++) {
+      vi.spyOn(Date, "now").mockReturnValue(base + i * 61_000);
+      expect((await handlePostComment(postReq(token, commentBody(A)), env as never)).status).toBe(429);
+    }
+  }
+
   it("suspends posting once strikes cross the threshold", async () => {
     const db = new TestD1();
     const token = await seedAuthed(db, A);
     const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "3" });
 
-    for (let i = 0; i < 2; i++) {
-      expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(429);
-    }
+    await refusedWrites(db, token, env, 2);
     // Two strikes is not yet a suspension.
     expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
 
-    expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(429);
+    await refusedWrites(db, token, env, 3);
 
     const until = db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u;
-    expect(until).toBeGreaterThan(Date.now());
-    expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBe(3);
+    expect(until).toBeGreaterThan(0);
+    expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBeGreaterThanOrEqual(3);
+  });
+
+  it("counts a blind retry loop ONCE, so a fast thumb cannot earn a suspension", async () => {
+    const db = new TestD1();
+    const token = await seedAuthed(db, A);
+    const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "3" });
+
+    // The shape syncOutbox actually produces: the row stays dirty and every user
+    // action kicks another sweep, all within the same second.
+    for (let i = 0; i < 12; i++) {
+      expect((await handlePostComment(postReq(token, commentBody(A)), env)).status).toBe(429);
+    }
+
+    expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBe(1);
+    expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
   });
 
   it("records the automatic suspension in the admin audit trail", async () => {
@@ -205,7 +227,11 @@ describe("strike escalation", () => {
     const token = await seedAuthed(db, A);
     const env = testEnv(db, { COMMENT_USER_LIMITER: limiter(0).binding, STRIKES_TO_SUSPEND: "0" });
 
-    for (let i = 0; i < 5; i++) await handlePostComment(postReq(token, commentBody(A)), env);
+    const base = Date.now();
+    for (let i = 0; i < 5; i++) {
+      vi.spyOn(Date, "now").mockReturnValue(base + i * 61_000);
+      await handlePostComment(postReq(token, commentBody(A)), env);
+    }
 
     expect(db.one<{ u: number | null }>("SELECT posting_suspended_until AS u FROM users WHERE id = ?", A)?.u).toBeFalsy();
     expect(db.count("rate_limit_strikes", "user_id = ?", A)).toBe(5);

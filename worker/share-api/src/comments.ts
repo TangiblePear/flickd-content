@@ -822,6 +822,20 @@ const rateLimitedBody = (retryAfterSeconds = 60) =>
   json({ error: "rate_limited" }, 429, { "Retry-After": String(retryAfterSeconds) });
 
 const STRIKE_WINDOW_MS = 3600_000;
+/**
+ * At most one strike per user per scope per minute.
+ *
+ * ⚠️ Load-bearing, and the reason is the CLIENT. `CommentsRepository.syncOutbox`
+ * leaves a row dirty on anything that is not a 403 suspension, and every user action
+ * kicks another sweep — so one refused write is retried repeatedly with no backoff.
+ * Counting each retry would let a person who tapped send a few times too fast rack up
+ * ten strikes in seconds and earn a 24h suspension for it.
+ *
+ * Debounced to the limiter's own period, ten strikes means ten *minutes* of sustained
+ * hammering, which a human bursting through the composer cannot produce and a script
+ * cannot avoid.
+ */
+const STRIKE_DEBOUNCE_MS = 60_000;
 const DEFAULT_STRIKES_TO_SUSPEND = 10;
 /** One day, matching the shortest option an admin can pick in SUSPEND_DURATIONS. */
 const DEFAULT_AUTO_SUSPEND_MS = 86_400_000;
@@ -842,6 +856,14 @@ async function recordStrike(env: CommentsEnv, ctx: ExecutionContext | undefined,
   const work = (async () => {
     try {
       const now = Date.now();
+
+      const recent = await env.DB.prepare(
+        "SELECT 1 AS hit FROM rate_limit_strikes WHERE user_id = ? AND scope = ? AND created_at > ? LIMIT 1",
+      )
+        .bind(userId, scope, now - STRIKE_DEBOUNCE_MS)
+        .first<{ hit: number }>();
+      if (recent) return;
+
       await env.DB.prepare(
         "INSERT INTO rate_limit_strikes (id, user_id, scope, created_at) VALUES (?, ?, ?, ?)",
       )

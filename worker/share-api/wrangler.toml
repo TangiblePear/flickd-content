@@ -361,7 +361,12 @@ AUTO_SUSPEND_MS = "86400000"
 # App Check *debug* provider is registered — Play Integrity fails for any build not
 # installed from Play, so debug builds break first and silently.
 APPCHECK_MODE = "log"
-APPCHECK_MIN_VERSION = "0"
+# versionCode 45 is the first build that attaches X-Firebase-AppCheck to comment
+# writes. Anything below it — including the PWA and any client sending no version
+# header at all, which reads as 0 — is exempt even under "enforce". Raising this is
+# how enforcement is tightened later; it must never be lowered to 0, which would
+# subject every old install to a check it cannot pass.
+APPCHECK_MIN_VERSION = "45"
 # Firebase project **NUMBER**, not the id. App Check's `iss`/`aud` carry the number;
 # FIREBASE_PROJECT_ID below carries the id, which is what an ID token's `aud` uses.
 # Swapping them fails every verification with a claim mismatch that reads like a
