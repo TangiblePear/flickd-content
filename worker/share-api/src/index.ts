@@ -190,6 +190,11 @@ import {
   handleAdhocMeta,
   handleAdhocPut,
 } from "./matchAdhoc";
+import {
+  handlePublishList,
+  handleUnpublishList,
+  handlePublicListsOptions,
+} from "./publicLists";
 
 interface ShareItem {
   tmdbId: number;
@@ -482,6 +487,15 @@ export default {
     if (oneList) {
       if (req.method === "PUT") return handleUpdateList(oneList[1], req, env, ctx);
       if (req.method === "DELETE") return handleDeleteList(oneList[1], req, env, ctx);
+    }
+    // Publishing a list into the public directory (migration 0039). Hangs off
+    // `/api/me/lists/{id}` because it is an act by the OWNER on a list they own;
+    // reading the directory lives under `/api/public/lists*`.
+    const publishList = p.match(/^\/api\/me\/lists\/([A-Za-z0-9._:-]{1,64})\/publish$/);
+    if (publishList) {
+      if (req.method === "POST") return handlePublishList(publishList[1], req, env, ctx);
+      if (req.method === "DELETE") return handleUnpublishList(publishList[1], req, env, ctx);
+      if (req.method === "OPTIONS") return handlePublicListsOptions();
     }
     // Push topics on the account. Replaces `PUT /api/user/{friendId}/push`, which
     // authenticated on a relay-issued owner secret — so the friendId WAS the auth
