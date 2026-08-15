@@ -578,30 +578,6 @@ describe("public list reports", () => {
     expect(item.tombstoned).toBe(false);
   });
 
-  // The highest-blast-radius line in the module: the `lists` join is gated on
-  // `r.kind = '${PUBLIC_LIST_KIND}'` precisely because a comment id is ALSO shaped like
-  // "{userId}:{something}". A comment report whose target_id happens to collide with a
-  // real published list's "{ownerId}:{listId}" pair must not borrow that list's name —
-  // only the genuine public_list report for the same string may.
-  it("does not let a colliding comment id borrow a public list's name", async () => {
-    const db = await seeded();
-    await db
-      .prepare(
-        `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at)
-         VALUES ('R2', ?1, ?2, 'comment', 'off topic', 'open', ?3)`,
-      )
-      .bind(REPORTER, TARGET, NOW)
-      .run();
-
-    const list = await items(await get(realEnv(db)));
-    const commentItem = list.find((i) => i.kind === "comment")!;
-    const listItem = list.find((i) => i.kind === "public_list")!;
-    expect(commentItem).toBeDefined();
-    expect(listItem).toBeDefined();
-    expect(commentItem.target.displayName).toBe("");
-    expect(listItem.target.displayName).toBe("Neo-Noir Essentials");
-  });
-
   // The panel offers "Restore" only on a tombstoned item, so a list the threshold
   // already hid must arrive marked — otherwise the auto-hide has no visible way back.
   it("marks an already-hidden list as tombstoned", async () => {

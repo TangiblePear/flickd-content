@@ -200,6 +200,14 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
        -- "{userId}:{something}", and without the guard one could match a lists row and
        -- borrow its name.
        --
+       -- Defence in depth, not reachable through this API today: the TS mapping below
+       -- only reads list_name when isList (r.kind === PUBLIC_LIST_KIND), so a
+       -- comment-kind row picks its displayName from author_name regardless of what
+       -- this join produces. Verified by sabotage: removing the r.kind = ... guard
+       -- here left every test in this file green. Kept anyway: it is one clause, and it
+       -- stops the join itself from silently attaching a stranger's list name onto a
+       -- comment row if the TS mapping ever changes to read it.
+       --
        -- The name comes from lists, not public_lists, because unpublishing DELETES the
        -- public_lists row while the report stays open — a queue entry that lost its
        -- name the moment the author withdrew the list would be unreadable.
