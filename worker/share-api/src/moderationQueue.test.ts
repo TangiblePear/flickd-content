@@ -498,3 +498,158 @@ describe("handleModerationAct", () => {
     expect((await act(env(new ActFakeD1()), { itemId: `${B}:user`, source: "d1", action: "dismiss" })).status).toBe(404);
   });
 });
+
+// ── Public lists, against REAL SQL ───────────────────────────────────────────
+//
+// The doubles above match SQL by `startsWith` and return a canned shape, which cannot
+// say anything about the join this half depends on: a public list's `target_id` is
+// "{ownerId}:{listId}" and its name is resolved by splitting that in SQL
+// (`substr`/`instr`) and joining `lists` on the PAIR. A double would report whatever it
+// was told to report and pass with the join deleted, so this block builds a real SQLite
+// from the real migrations — 0026 (lists) and 0039 (public_lists) included.
+//
+// What is being pinned is that auto-hide is REVERSIBLE. Before this, `public_list`
+// matched neither COMMENT_KINDS nor PERSON_KINDS, `/act` fell through to actOnUser and
+// 404'd on a users.id that is really two ids, and a list hidden by the report threshold
+// stayed hidden forever with its reports stuck open.
+
+import { TestD1, seedUser, uid } from "./testD1";
+
+describe("public list reports", () => {
+  const OWNER = uid(1);
+  const REPORTER = uid(2);
+  const TARGET = `${OWNER}:A`;
+  const ITEM = `${TARGET}:public_list`;
+
+  /** A published list called "Neo-Noir Essentials" with one open report against it. */
+  async function seeded(opts: { hiddenAt?: number; published?: boolean } = {}) {
+    const db = new TestD1();
+    seedUser(db, { id: OWNER, displayName: "Author" });
+    seedUser(db, { id: REPORTER, displayName: "Reporter" });
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, created_at, updated_at)
+         VALUES (?1, 'A', 'Neo-Noir Essentials', 'MANUAL', ?2, ?2)`,
+      )
+      .bind(OWNER, NOW)
+      .run();
+    if (opts.published !== false) {
+      await db
+        .prepare(
+          `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+           VALUES (?1, 'A', '["neo-noir"]', 0, ?2, ?3)`,
+        )
+        .bind(OWNER, NOW, opts.hiddenAt ?? null)
+        .run();
+    }
+    await db
+      .prepare(
+        `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at)
+         VALUES ('R1', ?1, ?2, 'public_list', 'hate speech', 'open', ?3)`,
+      )
+      .bind(REPORTER, TARGET, NOW)
+      .run();
+    return db;
+  }
+
+  const realEnv = (db: TestD1) => ({ DB: db as unknown as D1Database, ADMIN_KEY: KEY }) as any;
+
+  const hiddenAtOf = (db: TestD1) =>
+    db.one<{ hidden_at: number | null }>(
+      `SELECT hidden_at FROM public_lists WHERE owner_id = ? AND list_id = 'A'`,
+      OWNER,
+    )!.hidden_at;
+
+  const stateOf = (db: TestD1) =>
+    db.one<{ state: string }>(`SELECT state FROM reports WHERE id = 'R1'`)!.state;
+
+  it("surfaces a public_list report with the list's name, not its composite id", async () => {
+    const db = await seeded();
+    const list = await items(await get(realEnv(db)));
+    const item = list.find((i) => i.kind === "public_list")!;
+    expect(item).toBeDefined();
+    expect(item.target.type).toBe("public_list");
+    expect(item.target.displayName).toBe("Neo-Noir Essentials");
+    // The id round-trips to /act unchanged, colons and all.
+    expect(item.id).toBe(ITEM);
+    expect(item.target.id).toBe(TARGET);
+    expect(item.reporterCount).toBe(1);
+    expect(item.reasons).toEqual(["hate speech"]);
+    expect(item.tombstoned).toBe(false);
+  });
+
+  // The panel offers "Restore" only on a tombstoned item, so a list the threshold
+  // already hid must arrive marked — otherwise the auto-hide has no visible way back.
+  it("marks an already-hidden list as tombstoned", async () => {
+    const db = await seeded({ hiddenAt: NOW });
+    const list = await items(await get(realEnv(db)));
+    expect(list[0].tombstoned).toBe(true);
+  });
+
+  it("takes a list down by writing the same hidden_at the threshold writes", async () => {
+    const db = await seeded();
+    const res = await act(realEnv(db), { itemId: ITEM, source: "d1", action: "hide" });
+    expect(res.status).toBe(200);
+    expect(hiddenAtOf(db)).not.toBeNull();
+  });
+
+  // A second hide must not re-date an existing takedown — `hidden_at` is when the list
+  // went down, and the shared statement guards on it being null.
+  it("leaves the first takedown's timestamp alone on a repeat hide", async () => {
+    const db = await seeded({ hiddenAt: NOW });
+    await act(realEnv(db), { itemId: ITEM, source: "d1", action: "hide" });
+    expect(hiddenAtOf(db)).toBe(NOW);
+  });
+
+  // The whole point of the task: the threshold is not terminal.
+  it("restores a hidden list AND dismisses the reports that hid it", async () => {
+    const db = await seeded({ hiddenAt: NOW });
+    const res = await act(realEnv(db), { itemId: ITEM, source: "d1", action: "restore" });
+    expect(res.status).toBe(200);
+    expect(hiddenAtOf(db)).toBeNull();
+    // Left open, the next single report re-trips the threshold and overturns the moderator.
+    expect(stateOf(db)).toBe("dismissed");
+  });
+
+  it("dismissing moves the report out of the open queue and into the resolved one", async () => {
+    const db = await seeded();
+    const res = await act(realEnv(db), { itemId: ITEM, source: "d1", action: "dismiss" });
+    expect(res.status).toBe(200);
+    expect(stateOf(db)).toBe("dismissed");
+    expect(await items(await get(realEnv(db)))).toHaveLength(0);
+    const resolved = await items(await get(realEnv(db), "resolved"));
+    expect(resolved.map((i) => i.id)).toEqual([ITEM]);
+    expect(resolved[0].target.displayName).toBe("Neo-Noir Essentials");
+  });
+
+  // Unpublishing DELETES the public_lists row while the report stays open. Requiring
+  // that row to dismiss would strand the entry in the queue for good.
+  it("still names and dismisses a report whose list the author has since unpublished", async () => {
+    const db = await seeded({ published: false });
+    const list = await items(await get(realEnv(db)));
+    expect(list[0].target.displayName).toBe("Neo-Noir Essentials");
+    expect(list[0].tombstoned).toBe(false);
+    expect((await act(realEnv(db), { itemId: ITEM, source: "d1", action: "dismiss" })).status).toBe(200);
+    expect(stateOf(db)).toBe("dismissed");
+  });
+
+  it("404s rather than silently succeeding when there is no published row to hide", async () => {
+    const db = await seeded({ published: false });
+    expect((await act(realEnv(db), { itemId: ITEM, source: "d1", action: "hide" })).status).toBe(404);
+  });
+
+  // A list is not a person; suspending one is meaningless, and answering 200 would let
+  // the panel show a button that appears to work.
+  it("rejects suspending a list", async () => {
+    const db = await seeded();
+    const res = await act(realEnv(db), { itemId: ITEM, source: "d1", action: "suspend", durationMs: 0 });
+    expect(res.status).toBe(400);
+  });
+
+  // One id where two are required names no row: `lists` is keyed on the pair.
+  it("rejects a target that is not the two-id pair", async () => {
+    const db = await seeded();
+    const res = await act(realEnv(db), { itemId: `${OWNER}:public_list`, source: "d1", action: "hide" });
+    expect(res.status).toBe(400);
+  });
+});

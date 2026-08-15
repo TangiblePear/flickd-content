@@ -572,6 +572,30 @@ export async function handleMyFollows(
   return json({ follows });
 }
 
+/**
+ * The ONE writer of `public_lists.hidden_at`.
+ *
+ * Shared with the admin takedown in moderationQueue.ts — the same rule
+ * moderationQueue.ts:386 already records for comments: a manual takedown and the
+ * automatic one must write the same thing, or the two drift and the admin panel stops
+ * describing what the read paths actually do.
+ *
+ * `at = null` restores. A hide applies only to a row that is not already hidden, so a
+ * later report cannot re-date an existing takedown; a restore is unconditional, which
+ * is what makes the auto-hide threshold reversible rather than terminal.
+ */
+export function setPublicListHidden(
+  env: PublicListsEnv,
+  ownerId: string,
+  listId: string,
+  at: number | null,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `UPDATE public_lists SET hidden_at = ?3
+      WHERE owner_id = ?1 AND list_id = ?2 AND (?3 IS NULL OR hidden_at IS NULL)`,
+  ).bind(ownerId, listId, at);
+}
+
 // ── POST /api/public/lists/{owner}/{id}/report ───────────────────────────────
 //
 // Files into the SAME `reports` table as comments, profiles and pictures, so the
@@ -614,12 +638,7 @@ export async function handleReportPublicList(
     .first<{ n: number }>();
 
   if ((distinct?.n ?? 0) >= threshold) {
-    await env.DB.prepare(
-      `UPDATE public_lists SET hidden_at = ?3
-        WHERE owner_id = ?1 AND list_id = ?2 AND hidden_at IS NULL`,
-    )
-      .bind(ownerId, listId, t)
-      .run();
+    await setPublicListHidden(env, ownerId, listId, t).run();
   }
 
   return json({ ok: true });

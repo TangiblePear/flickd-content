@@ -9,7 +9,10 @@
 // Two backends, because they are two different kinds of thing:
 //
 //   D1 `reports`   comment | comment_spoiler | user | profile | feed_comment | picture
-//                  Session-authenticated, keyed on users.id, has a `state` column.
+//                  | public_list
+//                  Session-authenticated, has a `state` column. Keyed on users.id —
+//                  except `public_list`, whose target is the PAIR "{ownerId}:{listId}"
+//                  because `lists` is keyed on the pair. See PUBLIC_LIST_KIND.
 //   R2 `_reports/` shared_list
 //                  A share link is reportable by someone with NO ACCOUNT — the people
 //                  most likely to see an abusive link were sent it in a group chat.
@@ -28,6 +31,7 @@
 
 import { adminAuthorized } from "./commentsAdmin";
 import { setHidden, type CommentRow, type CommentsEnv } from "./comments";
+import { setPublicListHidden, type PublicListsEnv } from "./publicLists";
 import { suspensionUntil } from "./suspension";
 
 export interface ModerationEnv {
@@ -54,7 +58,7 @@ export interface ReportItem {
   source: "d1" | "r2";
   kind: string;
   target: {
-    type: "user" | "comment" | "share";
+    type: "user" | "comment" | "share" | "public_list";
     id: string;
     displayName: string;
     pictureUrl: string;
@@ -73,7 +77,7 @@ export interface ReportItem {
   firstAt: number;
   lastAt: number;
   state: "open" | "actioned" | "dismissed";
-  /** Picture taken down, share hidden, or comment hidden. */
+  /** Picture taken down, share hidden, comment hidden, or public list hidden. */
   tombstoned: boolean;
   /** Comment blurred as a spoiler. */
   blurred: boolean;
@@ -107,9 +111,26 @@ interface QueueRow {
   target_name: string | null;
   target_picture: string | null;
   posting_suspended_until: number | null;
+  list_name: string | null;
+  list_hidden_at: number | null;
 }
 
 export const COMMENT_KINDS = new Set(["comment", "comment_spoiler"]);
+
+/**
+ * A public list's `reports.target_id` is `"{ownerId}:{listId}"` — TWO ids rather than
+ * one, because `lists` is keyed on the pair. Migration 0026 did that so the built-in
+ * watchlist's shared client id ("watchlist" on every account) cannot collide across
+ * accounts, and the report has to carry both halves to name a row.
+ */
+export const PUBLIC_LIST_KIND = "public_list";
+
+/** Splits `"{ownerId}:{listId}"`. FIRST colon: a users.id has none, a list id may. */
+function splitListTarget(targetId: string): [string, string] | null {
+  const cut = targetId.indexOf(":");
+  if (cut <= 0 || cut === targetId.length - 1) return null;
+  return [targetId.slice(0, cut), targetId.slice(cut + 1)];
+}
 
 /** Where a comment is attached, in the shape an admin can actually look up. */
 function subjectOf(r: QueueRow): string {
@@ -165,13 +186,27 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
             cp.display_name AS author_name,
             cu.posting_suspended_until AS author_suspended_until,
             p.display_name AS target_name, p.picture_url AS target_picture,
-            u.posting_suspended_until
+            u.posting_suspended_until,
+            l.name AS list_name, pl.hidden_at AS list_hidden_at
        FROM reports r
        LEFT JOIN comments c  ON c.id = r.target_id
        LEFT JOIN profiles cp ON cp.user_id = c.author_id
        LEFT JOIN users    cu ON cu.id = c.author_id
        LEFT JOIN profiles p  ON p.user_id = r.target_id
        LEFT JOIN users    u  ON u.id = r.target_id
+       -- A public list's target is two ids joined by ':' (see PUBLIC_LIST_KIND), so the
+       -- name comes from the lists table on the split PAIR rather than from a
+       -- single-column join. Gated on the kind: a comment id is ALSO
+       -- "{userId}:{something}", and without the guard one could match a lists row and
+       -- borrow its name.
+       --
+       -- The name comes from lists, not public_lists, because unpublishing DELETES the
+       -- public_lists row while the report stays open — a queue entry that lost its
+       -- name the moment the author withdrew the list would be unreadable.
+       LEFT JOIN lists l ON r.kind = '${PUBLIC_LIST_KIND}'
+                        AND l.user_id = substr(r.target_id, 1, instr(r.target_id, ':') - 1)
+                        AND l.id      = substr(r.target_id, instr(r.target_id, ':') + 1)
+       LEFT JOIN public_lists pl ON pl.owner_id = l.user_id AND pl.list_id = l.id
       WHERE ${where}
       GROUP BY r.target_id, r.kind
       ORDER BY reporters DESC, last_at DESC
@@ -186,6 +221,7 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
 
   for (const r of rows) {
     const isComment = COMMENT_KINDS.has(r.kind);
+    const isList = r.kind === PUBLIC_LIST_KIND;
     // A comment's suspend target is its AUTHOR; every other kind targets the person
     // directly. Reading the wrong column here would show "not suspended" on a
     // suspended author and invite a moderator to suspend them twice.
@@ -195,9 +231,9 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
       source: "d1",
       kind: r.kind,
       target: {
-        type: isComment ? "comment" : "user",
+        type: isComment ? "comment" : isList ? "public_list" : "user",
         id: r.target_id,
-        displayName: (isComment ? r.author_name : r.target_name) ?? "",
+        displayName: (isComment ? r.author_name : isList ? r.list_name : r.target_name) ?? "",
         pictureUrl: r.target_picture ?? "",
         authorId: r.author_id ?? "",
         subject: isComment ? subjectOf(r) : "",
@@ -210,7 +246,14 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
       firstAt: r.first_at,
       lastAt: r.last_at,
       state: (r.state as ReportItem["state"]) ?? "open",
-      tombstoned: isComment ? r.hidden_at != null : await pictureTombstoned(env, r),
+      // A hidden public list MUST read as tombstoned: the panel offers "Restore" only
+      // on a tombstoned item, so getting this wrong leaves an auto-hidden list with no
+      // way back — which is the thing that turns a report threshold into a brigading tool.
+      tombstoned: isComment
+        ? r.hidden_at != null
+        : isList
+          ? r.list_hidden_at != null
+          : await pictureTombstoned(env, r),
       blurred: r.spoiler === 1,
       deleted: r.deleted_at != null,
       suspendedUntil: rawUntil > now ? rawUntil : 0,
@@ -326,10 +369,13 @@ async function loadR2(env: ModerationEnv): Promise<ReportItem[]> {
 
 type Action = "hide" | "restore" | "unblur" | "suspend" | "unsuspend" | "dismiss";
 
-const ALLOWED: Record<"comment" | "user" | "share", Set<Action>> = {
+const ALLOWED: Record<"comment" | "user" | "share" | "public_list", Set<Action>> = {
   comment: new Set<Action>(["hide", "restore", "unblur", "dismiss"]),
   user: new Set<Action>(["hide", "restore", "suspend", "unsuspend", "dismiss"]),
   share: new Set<Action>(["hide", "restore", "dismiss"]),
+  // No suspend: a list is not a person. The moderator suspends its author from the
+  // author's own item, which is the same separation comments already have.
+  public_list: new Set<Action>(["hide", "restore", "dismiss"]),
 };
 
 /** `POST /api/moderation/act` — `{ itemId, source, action, durationMs? }`. */
@@ -359,9 +405,9 @@ export async function handleModerationAct(req: Request, env: ModerationEnv): Pro
   const targetId = itemId.slice(0, cut);
   const kind = itemId.slice(cut + 1);
 
-  return COMMENT_KINDS.has(kind)
-    ? actOnComment(targetId, action, env)
-    : actOnUser(targetId, action, body.durationMs, env);
+  if (COMMENT_KINDS.has(kind)) return actOnComment(targetId, action, env);
+  if (kind === PUBLIC_LIST_KIND) return actOnPublicList(targetId, action, env);
+  return actOnUser(targetId, action, body.durationMs, env);
 }
 
 const dismissKind = (env: ModerationEnv, targetId: string, kind: string) =>
@@ -405,6 +451,59 @@ async function actOnComment(id: string, action: Action, env: ModerationEnv): Pro
       await env.DB.batch([dismissKind(env, id, "comment"), dismissKind(env, id, "comment_spoiler")]);
       return json({ ok: true });
   }
+}
+
+/**
+ * Hide, restore or dismiss a reported public list.
+ *
+ * Before this existed, `public_list` matched neither COMMENT_KINDS nor PERSON_KINDS and
+ * fell through to `actOnUser("{ownerId}:{listId}")`, whose `SELECT id FROM users`
+ * matched nothing and answered 404 — so a list auto-hidden by the report threshold
+ * could never be un-hidden and its reports could never be cleared. A threshold with no
+ * restore path is a brigading tool, which is exactly what comments.ts's REPORT_AUTOHIDE
+ * note says must not happen.
+ *
+ * ⚠️ Nothing here is observable to a follower. `/api/me/follows` reports a hidden list
+ * and an author-unpublished one identically as `unpublished`, and that must stay true:
+ * a follower who could tell the two apart could tell that a list had been actioned.
+ */
+async function actOnPublicList(targetId: string, action: Action, env: ModerationEnv): Promise<Response> {
+  if (!ALLOWED.public_list.has(action)) return json({ error: "unsupported_action" }, 400);
+
+  const pair = splitListTarget(targetId);
+  if (!pair) return json({ error: "bad_request" }, 400);
+  const [ownerId, listId] = pair;
+
+  // Dismiss deliberately does NOT require the `public_lists` row, unlike hide and
+  // restore. Unpublishing deletes that row while the reports stay open, so requiring it
+  // here would strand the report in the queue with no way to clear it — the same dead
+  // end this function exists to remove.
+  if (action === "dismiss") {
+    await dismissKind(env, targetId, PUBLIC_LIST_KIND).run();
+    return json({ ok: true });
+  }
+
+  const row = await env.DB.prepare(
+    "SELECT hidden_at FROM public_lists WHERE owner_id = ?1 AND list_id = ?2",
+  )
+    .bind(ownerId, listId)
+    .first<{ hidden_at: number | null }>();
+  if (!row) return json({ error: "not_found" }, 404);
+
+  // Both directions go through `setPublicListHidden` rather than a raw UPDATE, so the
+  // admin takedown and the automatic threshold in handleReportPublicList write the same
+  // thing — the rule this file already records for comments at the `setHidden` call.
+  const hiding = action === "hide";
+  const stmt = setPublicListHidden(env as PublicListsEnv, ownerId, listId, hiding ? Date.now() : null);
+  if (hiding) {
+    await stmt.run();
+    return json({ ok: true });
+  }
+  // Restoring dismisses the reports that caused the takedown, for the reason every
+  // reversing action here does: leaving them open lets the next single report re-trip
+  // the threshold and one person overturn the moderator.
+  await env.DB.batch([stmt, dismissKind(env, targetId, PUBLIC_LIST_KIND)]);
+  return json({ ok: true });
 }
 
 const PERSON_KINDS = ["user", "profile", "feed_comment", "picture"];
