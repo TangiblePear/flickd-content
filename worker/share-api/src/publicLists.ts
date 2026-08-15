@@ -12,7 +12,7 @@
 // name and title is materialised on read. See migration 0039.
 
 import { resolveSession } from "./auth";
-import { MAX_TAGS_PER_LIST, normaliseTags } from "./publicListTags";
+import { MAX_TAGS_PER_LIST, PUBLIC_LIST_TAGS, normaliseTags } from "./publicListTags";
 
 export interface PublicListsEnv {
   DB: D1Database;
@@ -251,4 +251,164 @@ export function handleLike(
   ctx: ExecutionContext,
 ): Promise<Response> {
   return toggleEngagement("public_list_likes", ownerId, listId, req, env, ctx);
+}
+
+export const BROWSE_PAGE = 20;
+const MAX_QUERY = 60;
+/** Posters shown on a browse card. */
+const CARD_POSTERS = 4;
+
+/**
+ * Age decay, expressed with arithmetic SQLite is guaranteed to have.
+ *
+ * `engagement / (age_in_days + 2)`. No pow() — its availability in D1's SQLite build
+ * is not worth assuming for a sort key. The +2 keeps a zero-age list finite and softens
+ * the first day, and a linear divisor is gentle enough that a genuinely popular list
+ * survives a few weeks while nothing owns the top of the directory forever.
+ */
+const TRENDING_ORDER =
+  `p.engagement / ((?1 - p.published_at) / 86400000.0 + 2) DESC, p.published_at DESC`;
+
+// ── GET /api/public/lists ────────────────────────────────────────────────────
+//
+// One page per request. Deliberately NOT a re-aggregating endpoint that a client can
+// page through cheaply — every page costs a full sort, so the page size is the guard.
+export async function handleBrowse(
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  const url = new URL(req.url);
+  const sort = url.searchParams.get("sort") ?? "trending";
+  const tag = url.searchParams.get("tag");
+  const q = (url.searchParams.get("q") ?? "").trim().slice(0, MAX_QUERY);
+  const offset = Math.max(0, Number(url.searchParams.get("cursor") ?? 0) || 0);
+  const t = now();
+
+  const order =
+    sort === "new"
+      ? "p.published_at DESC"
+      : sort === "saved"
+        ? "saves DESC, p.published_at DESC"
+        : TRENDING_ORDER;
+
+  // `blocks` is checked in BOTH directions: an author who blocked the viewer should
+  // not be browsable by them, and a viewer who blocked the author should not see them.
+  const rows = await env.DB.prepare(
+    `SELECT p.owner_id, p.list_id, p.tags, p.published_at,
+            l.name, l.description,
+            pr.display_name, pr.picture_url,
+            (SELECT COUNT(*) FROM list_items li
+               WHERE li.user_id = p.owner_id AND li.list_id = p.list_id) AS item_count,
+            (SELECT COUNT(*) FROM list_follows f
+               WHERE f.owner_id = p.owner_id AND f.list_id = p.list_id) AS saves,
+            (SELECT COUNT(*) FROM public_list_likes k
+               WHERE k.owner_id = p.owner_id AND k.list_id = p.list_id) AS likes,
+            (SELECT COUNT(*) FROM list_follows f2
+               WHERE f2.owner_id = p.owner_id AND f2.list_id = p.list_id
+                 AND f2.user_id = ?2) AS is_saved,
+            (SELECT COUNT(*) FROM public_list_likes k2
+               WHERE k2.owner_id = p.owner_id AND k2.list_id = p.list_id
+                 AND k2.user_id = ?2) AS is_liked
+       FROM public_lists p
+       JOIN lists l    ON l.user_id = p.owner_id AND l.id = p.list_id
+       LEFT JOIN profiles pr ON pr.user_id = p.owner_id
+      WHERE p.hidden_at IS NULL
+        AND l.deleted_at IS NULL
+        AND (?3 IS NULL OR EXISTS (
+              SELECT 1 FROM public_list_tags pt
+               WHERE pt.tag = ?3 AND pt.owner_id = p.owner_id AND pt.list_id = p.list_id))
+        AND (?4 = '' OR l.name LIKE ?5 OR l.description LIKE ?5 OR pr.display_name LIKE ?5)
+        AND NOT EXISTS (
+              SELECT 1 FROM blocks b
+               WHERE (b.blocker_id = p.owner_id AND b.blocked_id = ?2)
+                  OR (b.blocker_id = ?2 AND b.blocked_id = p.owner_id))
+      ORDER BY ${order}
+      LIMIT ?6 OFFSET ?7`,
+  )
+    .bind(t, session.userId, tag, q, `%${q}%`, BROWSE_PAGE + 1, offset)
+    .all<Record<string, unknown>>();
+
+  const page = (rows.results ?? []).slice(0, BROWSE_PAGE);
+  const hasMore = (rows.results ?? []).length > BROWSE_PAGE;
+
+  // One extra indexed read for every card's posters, rather than a denormalised
+  // copy on `public_lists` that would drift the moment an author reorders the list.
+  const posters = new Map<string, { tmdbId: number; type: string }[]>();
+  if (page.length) {
+    const keys = page.map((r) => `${r.owner_id} ${r.list_id}`);
+    const placeholders = page.map((_, i) => `(?${i * 2 + 1}, ?${i * 2 + 2})`).join(",");
+    const binds = page.flatMap((r) => [r.owner_id, r.list_id]);
+    const items = await env.DB.prepare(
+      `SELECT user_id, list_id, tmdb_id, type FROM list_items
+        WHERE (user_id, list_id) IN (${placeholders}) AND position < ${CARD_POSTERS}
+        ORDER BY list_id, position`,
+    )
+      .bind(...binds)
+      .all<{ user_id: string; list_id: string; tmdb_id: number; type: string }>();
+    for (const k of keys) posters.set(k, []);
+    for (const i of items.results ?? []) {
+      posters.get(`${i.user_id} ${i.list_id}`)?.push({ tmdbId: i.tmdb_id, type: i.type });
+    }
+  }
+
+  return json({
+    lists: page.map((r) => ({
+      ownerId: r.owner_id,
+      listId: r.list_id,
+      name: r.name,
+      description: r.description ?? "",
+      itemCount: r.item_count,
+      authorName: r.display_name ?? "",
+      authorPictureUrl: r.picture_url ?? "",
+      tags: safeTags(r.tags as string),
+      saves: r.saves,
+      likes: r.likes,
+      saved: Number(r.is_saved) > 0,
+      liked: Number(r.is_liked) > 0,
+      publishedAt: r.published_at,
+      posters: posters.get(`${r.owner_id} ${r.list_id}`) ?? [],
+    })),
+    nextCursor: hasMore ? offset + BROWSE_PAGE : null,
+  });
+}
+
+/** A malformed tags column degrades one card's chips; it does not break the page. */
+function safeTags(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// ── GET /api/public/lists/tags ───────────────────────────────────────────────
+//
+// The vocabulary with live counts, so the client can order the rail by what people
+// actually use and hide tags nothing is filed under.
+export async function handleTagCatalogue(
+  req: Request,
+  env: PublicListsEnv,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return unauthorized();
+
+  const rows = await env.DB.prepare(
+    `SELECT pt.tag, COUNT(*) AS n
+       FROM public_list_tags pt
+       JOIN public_lists p ON p.owner_id = pt.owner_id AND p.list_id = pt.list_id
+      WHERE p.hidden_at IS NULL
+      GROUP BY pt.tag`,
+  ).all<{ tag: string; n: number }>();
+
+  const counts = new Map((rows.results ?? []).map((r) => [r.tag, r.n]));
+  return json({
+    tags: PUBLIC_LIST_TAGS.map((tag) => ({ tag, count: counts.get(tag) ?? 0 })),
+  });
 }

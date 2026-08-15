@@ -196,6 +196,8 @@ import {
   handlePublicListsOptions,
   handleFollow,
   handleLike,
+  handleBrowse,
+  handleTagCatalogue,
 } from "./publicLists";
 
 interface ShareItem {
@@ -506,6 +508,16 @@ export default {
 
     const foreignProfile = p.match(/^\/api\/profile\/([0-9A-HJKMNP-TV-Z]{26})$/);
     if (foreignProfile && req.method === "GET") return handleGetProfile(foreignProfile[1], req, env, ctx);
+
+    // Browsing the directory. `/tags` is registered before the owner/id matchers
+    // below so a later loosening of that ULID character class cannot swallow it.
+    if (p === "/api/public/lists") {
+      if (req.method === "GET") return handleBrowse(req, env, ctx);
+      if (req.method === "OPTIONS") return handlePublicListsOptions();
+    }
+    if (p === "/api/public/lists/tags" && req.method === "GET") {
+      return handleTagCatalogue(req, env, ctx);
+    }
 
     // The directory's engagement verbs. `{owner}` is a users.id (26-char ULID
     // alphabet, matching the foreignProfile route above); `{id}` is a client-minted

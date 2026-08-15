@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { TestD1, seedUser, seedSession, testEnv, uid } from "./testD1";
-import { handlePublishList, handleUnpublishList, handleFollow, handleLike, MAX_FOLLOWS } from "./publicLists";
+import {
+  handlePublishList,
+  handleUnpublishList,
+  handleFollow,
+  handleLike,
+  handleBrowse,
+  MAX_FOLLOWS,
+} from "./publicLists";
 
 const TOKEN = "tok-owner";
 
@@ -440,5 +447,158 @@ describe("follow and like", () => {
     );
     expect(res.status).toBe(409);
     expect((await res.json()) as { error: string }).toEqual({ error: "too_many_follows" });
+  });
+});
+
+interface Card {
+  ownerId: string;
+  listId: string;
+  name: string;
+  tags: string[];
+  saves: number;
+  likes: number;
+  saved: boolean;
+  liked: boolean;
+}
+
+/** Publish `listId` owned by `owner`, `ageDays` old, with the given tags. */
+async function publishAged(
+  db: TestD1,
+  owner: string,
+  listId: string,
+  tags: string[],
+  ageDays: number,
+) {
+  await db
+    .prepare(
+      `INSERT INTO public_lists (owner_id, list_id, tags, engagement, published_at, hidden_at)
+       VALUES (?1, ?2, ?3, 0, ?4, NULL)`,
+    )
+    .bind(owner, listId, JSON.stringify(tags), Date.now() - ageDays * 86_400_000)
+    .run();
+  for (const tag of tags) {
+    await db
+      .prepare(`INSERT INTO public_list_tags (tag, owner_id, list_id) VALUES (?1, ?2, ?3)`)
+      .bind(tag, owner, listId)
+      .run();
+  }
+}
+
+async function browseAs(db: TestD1, token: string, query = ""): Promise<Card[]> {
+  const res = await handleBrowse(
+    asUser(token, `/api/public/lists${query}`, "GET"),
+    testEnv(db),
+    ctx,
+  );
+  expect(res.status).toBe(200);
+  return ((await res.json()) as { lists: Card[] }).lists;
+}
+
+describe("browse", () => {
+  it("decays: a fresh list with less engagement can outrank an old one with more", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "OLD");
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+           display_order, home_order, version, created_at, updated_at)
+         VALUES (?1, 'NEW', 'Fresh Picks', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+         VALUES (?1, 'NEW', 99, 'MOVIE', 0, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+
+    await publishAged(db, uid(1), "OLD", ["crime"], 100);
+    await publishAged(db, uid(1), "NEW", ["crime"], 0);
+    // OLD has far more raw engagement, but it is 100 days old.
+    await db.prepare(`UPDATE public_lists SET engagement = 60 WHERE list_id = 'OLD'`).run();
+    await db.prepare(`UPDATE public_lists SET engagement = 10 WHERE list_id = 'NEW'`).run();
+
+    await withViewer(db, uid(2), "tok-2");
+    const cards = await browseAs(db, "tok-2", "?sort=trending");
+    // 60/(100+2) = 0.59 versus 10/(0+2) = 5.0
+    expect(cards[0].listId).toBe("NEW");
+  });
+
+  it("filters by tag exactly — 'horror' must not match 'horror' via a substring on another tag", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+           display_order, home_order, version, created_at, updated_at)
+         VALUES (?1, 'B', 'Comfort', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+    await db
+      .prepare(
+        `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+         VALUES (?1, 'B', 7, 'MOVIE', 0, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+    await publishAged(db, uid(1), "A", ["horror"], 1);
+    await publishAged(db, uid(1), "B", ["comfort-watch"], 1);
+
+    await withViewer(db, uid(2), "tok-2");
+    const cards = await browseAs(db, "tok-2", "?tag=horror");
+    expect(cards.map((c) => c.listId)).toEqual(["A"]);
+  });
+
+  it("hides a list from someone the author blocked, and vice versa", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    expect(await browseAs(db, "tok-2")).toHaveLength(1);
+
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+    expect(await browseAs(db, "tok-2")).toHaveLength(0);
+  });
+
+  it("omits hidden lists", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE public_lists SET hidden_at = 1 WHERE list_id = 'A'`).run();
+    await withViewer(db, uid(2), "tok-2");
+    expect(await browseAs(db, "tok-2")).toHaveLength(0);
+  });
+
+  it("counts come from the rows, and reflect the viewer's own state", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await withViewer(db, uid(3), "tok-3");
+    await handleFollow(uid(1), "A", asUser("tok-2", "/x/follow", "POST"), testEnv(db), ctx);
+    await handleFollow(uid(1), "A", asUser("tok-3", "/x/follow", "POST"), testEnv(db), ctx);
+    await handleLike(uid(1), "A", asUser("tok-3", "/x/like", "POST"), testEnv(db), ctx);
+
+    const [card] = await browseAs(db, "tok-2");
+    expect(card.saves).toBe(2);
+    expect(card.likes).toBe(1);
+    expect(card.saved).toBe(true);   // uid(2) followed
+    expect(card.liked).toBe(false);  // uid(2) did not like
+  });
+
+  it("searches name and description", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");  // named "Neo-Noir Essentials"
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    expect(await browseAs(db, "tok-2", "?q=noir")).toHaveLength(1);
+    expect(await browseAs(db, "tok-2", "?q=zzzz")).toHaveLength(0);
   });
 });
