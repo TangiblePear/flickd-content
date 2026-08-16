@@ -349,6 +349,24 @@ const MAX_QUERY = 60;
 const CARD_POSTERS = 4;
 
 /**
+ * "Find public lists that CONTAIN a given title." The client resolves whatever the
+ * user typed to a TMDB id via its own catalogue search and sends the id — this server
+ * never matches on titles, and `list_items` stores none (see the header of 0026).
+ *
+ * Malformed input is ignored rather than a 400: a client-side resolver bug or a stale
+ * app should degrade to the plain text search, not break browsing entirely.
+ */
+function parseTitleFilter(url: URL): { tmdbId: number; type: "MOVIE" | "SHOW" } | null {
+  const idRaw = url.searchParams.get("tmdbId");
+  const typeRaw = url.searchParams.get("type");
+  if (idRaw === null || typeRaw === null) return null;
+  const tmdbId = Number(idRaw);
+  if (!Number.isInteger(tmdbId) || tmdbId <= 0) return null;
+  if (typeRaw !== "MOVIE" && typeRaw !== "SHOW") return null;
+  return { tmdbId, type: typeRaw };
+}
+
+/**
  * Age decay, expressed with arithmetic SQLite is guaranteed to have.
  *
  * `engagement / (age_in_days + 2)`. No pow() — its availability in D1's SQLite build
@@ -379,6 +397,7 @@ export async function handleBrowse(
   // wildcards themselves, so an unescaped `?q=%` would match every list and `_` any
   // single character, rather than only lists containing that literal character.
   const likeSafeQ = q.replace(/[\\%_]/g, "\\$&");
+  const titleFilter = parseTitleFilter(url);
   const offset = Math.max(0, Number(url.searchParams.get("cursor") ?? 0) || 0);
   const t = now();
 
@@ -391,6 +410,13 @@ export async function handleBrowse(
 
   // `blocks` is checked in BOTH directions: an author who blocked the viewer should
   // not be browsable by them, and a viewer who blocked the author should not see them.
+  //
+  // The text match and the containment match are ORed, but NOT simply `(?4 = '' OR
+  // text) OR containment` — with `titleFilter` set, an empty `q` must mean "match
+  // purely on containment", not "match everything" the way an empty `q` does when
+  // `titleFilter` is absent. So the "empty q passes everything" behaviour is scoped to
+  // exactly the no-filter-at-all case (?4 = '' AND ?8 IS NULL); once a title filter is
+  // present, an empty `q` contributes nothing and containment alone decides it.
   const rows = await env.DB.prepare(
     `SELECT p.owner_id, p.list_id, p.tags, p.published_at,
             l.name, l.description,
@@ -406,7 +432,11 @@ export async function handleBrowse(
                  AND f2.user_id = ?2) AS is_saved,
             (SELECT COUNT(*) FROM public_list_likes k2
                WHERE k2.owner_id = p.owner_id AND k2.list_id = p.list_id
-                 AND k2.user_id = ?2) AS is_liked
+                 AND k2.user_id = ?2) AS is_liked,
+            (?8 IS NOT NULL AND EXISTS (
+              SELECT 1 FROM list_items li
+               WHERE li.user_id = p.owner_id AND li.list_id = p.list_id
+                 AND li.tmdb_id = ?8 AND li.type = ?9)) AS matched_title
        FROM public_lists p
        JOIN lists l    ON l.user_id = p.owner_id AND l.id = p.list_id
        LEFT JOIN profiles pr ON pr.user_id = p.owner_id
@@ -415,8 +445,15 @@ export async function handleBrowse(
         AND (?3 IS NULL OR EXISTS (
               SELECT 1 FROM public_list_tags pt
                WHERE pt.tag = ?3 AND pt.owner_id = p.owner_id AND pt.list_id = p.list_id))
-        AND (?4 = '' OR l.name LIKE ?5 ESCAPE '\\' OR l.description LIKE ?5 ESCAPE '\\'
-                      OR pr.display_name LIKE ?5 ESCAPE '\\')
+        AND (
+              (?4 = '' AND ?8 IS NULL)
+              OR (?4 <> '' AND (l.name LIKE ?5 ESCAPE '\\' OR l.description LIKE ?5 ESCAPE '\\'
+                                OR pr.display_name LIKE ?5 ESCAPE '\\'))
+              OR (?8 IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM list_items li
+                     WHERE li.user_id = p.owner_id AND li.list_id = p.list_id
+                       AND li.tmdb_id = ?8 AND li.type = ?9))
+            )
         AND NOT EXISTS (
               SELECT 1 FROM blocks b
                WHERE (b.blocker_id = p.owner_id AND b.blocked_id = ?2)
@@ -424,7 +461,17 @@ export async function handleBrowse(
       ORDER BY ${order}
       LIMIT ?6 OFFSET ?7`,
   )
-    .bind(t, session.userId, tag, q, `%${likeSafeQ}%`, BROWSE_PAGE + 1, offset)
+    .bind(
+      t,
+      session.userId,
+      tag,
+      q,
+      `%${likeSafeQ}%`,
+      BROWSE_PAGE + 1,
+      offset,
+      titleFilter?.tmdbId ?? null,
+      titleFilter?.type ?? null,
+    )
     .all<Record<string, unknown>>();
 
   const page = (rows.results ?? []).slice(0, BROWSE_PAGE);
@@ -479,6 +526,7 @@ export async function handleBrowse(
       liked: Number(r.is_liked) > 0,
       publishedAt: r.published_at,
       posters: posters.get(`${r.owner_id} ${r.list_id}`) ?? [],
+      matchedTitle: Number(r.matched_title) > 0,
     })),
     nextCursor: hasMore ? offset + BROWSE_PAGE : null,
   });

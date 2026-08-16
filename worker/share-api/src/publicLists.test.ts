@@ -686,6 +686,7 @@ interface Card {
   saved: boolean;
   liked: boolean;
   posters: { tmdbId: number; type: string }[];
+  matchedTitle: boolean;
 }
 
 /** Publish `listId` owned by `owner`, `ageDays` old, with the given tags. */
@@ -887,6 +888,171 @@ describe("browse", () => {
     await publishAged(db, uid(1), "A", ["crime"], 1);
     await withViewer(db, uid(2), "tok-2");
     expect(await browseAs(db, "tok-2", "?q=%25")).toHaveLength(0);
+  });
+});
+
+/** Adds one `list_items` row with an explicit tmdb_id/type, independent of `withList`'s
+ *  fixed 500+i/MOVIE items — the containment tests below need to pick exact ids/types. */
+async function addItem(
+  db: TestD1,
+  owner: string,
+  listId: string,
+  tmdbId: number,
+  type: string,
+  position = 0,
+) {
+  const t = Date.now();
+  await db
+    .prepare(
+      `INSERT INTO list_items (user_id, list_id, tmdb_id, type, position, added_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)`,
+    )
+    .bind(owner, listId, tmdbId, type, position, t)
+    .run();
+}
+
+// "Find public lists that CONTAIN a given title." The client resolves a typed query to
+// a TMDB id via its own catalogue search and sends the id — the server never matches on
+// titles. `tmdbId`/`type` are additive: absent, browse must behave exactly as before;
+// present, a list also matches if `list_items` contains that (tmdb_id, type) pair, ORed
+// with the existing name/description/author text match. `matchedTitle` on every card
+// says which arm produced the match, so the client can section "named this" from
+// "contains this".
+describe("browse: find public lists containing a title", () => {
+  it("a list containing the title but whose name does NOT match is returned, with matchedTitle true", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A"); // named "Neo-Noir Essentials"
+    await addItem(db, uid(1), "A", 950, "MOVIE");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const cards = await browseAs(db, "tok-2", "?q=totally-unrelated-text&tmdbId=950&type=MOVIE");
+    expect(cards.map((c) => c.listId)).toEqual(["A"]);
+    expect(cards[0].matchedTitle).toBe(true);
+  });
+
+  it("a list whose NAME matches but does not contain the title is still returned (the OR), with matchedTitle false", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A"); // named "Neo-Noir Essentials"
+    await addItem(db, uid(1), "A", 100, "MOVIE"); // does not contain 950
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const cards = await browseAs(db, "tok-2", "?q=noir&tmdbId=950&type=MOVIE");
+    expect(cards.map((c) => c.listId)).toEqual(["A"]);
+    expect(cards[0].matchedTitle).toBe(false);
+  });
+
+  it("type discriminates — the same tmdb_id as a MOVIE and as a SHOW must not cross-match", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A"); // named "Neo-Noir Essentials"
+    await addItem(db, uid(1), "A", 700, "MOVIE");
+    await db
+      .prepare(
+        `INSERT INTO lists (user_id, id, name, kind, auto_updated, is_pinned_to_home,
+           display_order, home_order, version, created_at, updated_at)
+         VALUES (?1, 'B', 'Totally Different Title', 'MANUAL', 0, 0, 0, 0, 1, 1, 1)`,
+      )
+      .bind(uid(1))
+      .run();
+    await addItem(db, uid(1), "B", 700, "SHOW");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await publishAged(db, uid(1), "B", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const movieCards = await browseAs(db, "tok-2", "?tmdbId=700&type=MOVIE");
+    expect(movieCards.map((c) => c.listId)).toEqual(["A"]);
+
+    const showCards = await browseAs(db, "tok-2", "?tmdbId=700&type=SHOW");
+    expect(showCards.map((c) => c.listId)).toEqual(["B"]);
+  });
+
+  it("absent tmdbId behaves exactly as today, with matchedTitle false on every row", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A"); // items 500,501,502 MOVIE
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const byText = await browseAs(db, "tok-2", "?q=noir");
+    expect(byText).toHaveLength(1);
+    expect(byText[0].matchedTitle).toBe(false);
+
+    const unfiltered = await browseAs(db, "tok-2");
+    expect(unfiltered).toHaveLength(1);
+    expect(unfiltered[0].matchedTitle).toBe(false);
+  });
+
+  it("ignores a malformed tmdbId or type rather than erroring", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+
+    const nonNumeric = await browseAs(db, "tok-2", "?tmdbId=abc&type=MOVIE");
+    expect(nonNumeric).toHaveLength(1);
+    expect(nonNumeric[0].matchedTitle).toBe(false);
+
+    const notPositive = await browseAs(db, "tok-2", "?tmdbId=-5&type=MOVIE");
+    expect(notPositive).toHaveLength(1);
+    expect(notPositive[0].matchedTitle).toBe(false);
+
+    const badType = await browseAs(db, "tok-2", "?tmdbId=500&type=BOOK");
+    expect(badType).toHaveLength(1);
+    expect(badType[0].matchedTitle).toBe(false);
+  });
+
+  // The highest-value case: containment must not defeat the privacy filters browse
+  // already applies. Each guard below gets its own row, the same way the plain
+  // block/hidden tests above do — each proves that ONE specific guard still wins over
+  // an otherwise-matching containment probe.
+  it("a list that contains the title stays out of results once hidden by moderation", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A");
+    await addItem(db, uid(1), "A", 950, "MOVIE");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE public_lists SET hidden_at = 1 WHERE owner_id = ?1 AND list_id = 'A'`).bind(uid(1)).run();
+    await withViewer(db, uid(2), "tok-2");
+
+    expect(await browseAs(db, "tok-2", "?tmdbId=950&type=MOVIE")).toHaveLength(0);
+  });
+
+  it("a list that contains the title stays out of results when the author blocked the viewer", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A");
+    await addItem(db, uid(1), "A", 950, "MOVIE");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(1), uid(2))
+      .run();
+
+    expect(await browseAs(db, "tok-2", "?tmdbId=950&type=MOVIE")).toHaveLength(0);
+  });
+
+  it("a list that contains the title stays out of results when the viewer blocked the author", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A");
+    await addItem(db, uid(1), "A", 950, "MOVIE");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    await db
+      .prepare(`INSERT INTO blocks (blocker_id, blocked_id, created_at) VALUES (?1, ?2, 1)`)
+      .bind(uid(2), uid(1))
+      .run();
+
+    expect(await browseAs(db, "tok-2", "?tmdbId=950&type=MOVIE")).toHaveLength(0);
+  });
+
+  it("a list that contains the title stays out of results once its underlying list is soft-deleted", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 0, "A");
+    await addItem(db, uid(1), "A", 950, "MOVIE");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE lists SET deleted_at = 1 WHERE user_id = ?1 AND id = 'A'`).bind(uid(1)).run();
+    await withViewer(db, uid(2), "tok-2");
+
+    expect(await browseAs(db, "tok-2", "?tmdbId=950&type=MOVIE")).toHaveLength(0);
   });
 });
 

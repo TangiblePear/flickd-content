@@ -1,0 +1,11 @@
+-- Index for "find public lists that CONTAIN a given title".
+--
+-- `handleBrowse` (publicLists.ts) grew a containment probe — an EXISTS correlated on
+-- `list_items.user_id = p.owner_id AND list_items.list_id = p.list_id AND
+-- list_items.tmdb_id = ? AND list_items.type = ?` — evaluated once per candidate row
+-- of `public_lists` on every browse request that carries `tmdbId`/`type`. The only
+-- existing index, `idx_list_items_list (user_id, list_id)`, is keyed on the two
+-- columns the probe does NOT filter by directly; this index is keyed on the two it
+-- does, so the planner has a seek available for the (tmdb_id, type) half of the
+-- predicate rather than a scan.
+CREATE INDEX IF NOT EXISTS idx_list_items_tmdb ON list_items(tmdb_id, type);
