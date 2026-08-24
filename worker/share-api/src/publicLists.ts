@@ -386,8 +386,17 @@ export async function handleBrowse(
   env: PublicListsEnv,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  // ⚠️ READ-ONLY, so NO ACCOUNT REQUIRED — same as `handleGetComments`. Browsing the
+  // directory is public; only publishing and the engagement verbs need a session. This
+  // used to 401, which the app surfaced as a bare "error - retry" and made the whole
+  // directory look broken to anyone who had not signed in.
+  //
+  // ⚠️ The session is still RESOLVED, just not required. A signed-in reader gets their
+  // block list and their like state applied; an anonymous one gets an id that matches no
+  // row — `users.id` is a 26-char ULID, so "" can never collide — which is exactly the
+  // right answer for both: no blocks, nothing liked.
   const session = await resolveSession(req, env as never, ctx);
-  if (!session) return unauthorized();
+  const viewerId = session?.userId ?? "";
 
   const url = new URL(req.url);
   const sort = url.searchParams.get("sort") ?? "trending";
@@ -463,7 +472,7 @@ export async function handleBrowse(
   )
     .bind(
       t,
-      session.userId,
+      viewerId,
       tag,
       q,
       `%${likeSafeQ}%`,
@@ -562,8 +571,17 @@ export async function handlePublicListDetail(
   env: PublicListsEnv,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  // ⚠️ READ-ONLY, so NO ACCOUNT REQUIRED — same as `handleGetComments`. Browsing the
+  // directory is public; only publishing and the engagement verbs need a session. This
+  // used to 401, which the app surfaced as a bare "error - retry" and made the whole
+  // directory look broken to anyone who had not signed in.
+  //
+  // ⚠️ The session is still RESOLVED, just not required. A signed-in reader gets their
+  // block list and their like state applied; an anonymous one gets an id that matches no
+  // row — `users.id` is a 26-char ULID, so "" can never collide — which is exactly the
+  // right answer for both: no blocks, nothing liked.
   const session = await resolveSession(req, env as never, ctx);
-  if (!session) return unauthorized();
+  const viewerId = session?.userId ?? "";
 
   const row = await env.DB.prepare(
     `SELECT p.tags, p.published_at, l.name, l.description, l.updated_at,
@@ -586,7 +604,7 @@ export async function handlePublicListDetail(
                WHERE (b.blocker_id = p.owner_id AND b.blocked_id = ?3)
                   OR (b.blocker_id = ?3 AND b.blocked_id = p.owner_id))`,
   )
-    .bind(ownerId, listId, session.userId)
+    .bind(ownerId, listId, viewerId)
     .first<Record<string, unknown>>();
   if (!row) return notFound();
 
@@ -831,8 +849,10 @@ export async function handleTagCatalogue(
   env: PublicListsEnv,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const session = await resolveSession(req, env as never, ctx);
-  if (!session) return unauthorized();
+  // ⚠️ READ-ONLY, so NO ACCOUNT REQUIRED — see `handleBrowse`. The tag catalogue is the
+  // directory's filter chips; gating them behind a session left an anonymous reader with a
+  // browse they could now perform and no way to narrow it. Nothing here is per-viewer, so
+  // unlike browse and detail there is not even a session to resolve.
 
   const rows = await env.DB.prepare(
     `SELECT pt.tag, COUNT(*) AS n

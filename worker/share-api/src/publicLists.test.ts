@@ -10,6 +10,7 @@ import {
   handleMyPublishedLists,
   handlePublicListDetail,
   handleReportPublicList,
+  handleTagCatalogue,
   MAX_FOLLOWS,
   MAX_PUBLISHED_PER_USER,
 } from "./publicLists";
@@ -1949,5 +1950,109 @@ describe("GET /api/me/lists/published", () => {
     const [p] = await myPublished(db);
     expect(p.saves).toBe(1);
     expect(p.likes).toBe(1);
+  });
+});
+
+/**
+ * The directory is READ-ONLY PUBLIC — browsing needs no account, exactly as
+ * `handleGetComments` needs none.
+ *
+ * ⚠️ These endpoints used to 401 without a session. The app surfaced that as a bare
+ * "error - retry", so to anyone who had not signed in the entire directory looked broken
+ * rather than gated — and it was never meant to be gated at all: an account is for
+ * PUBLISHING a list, not for reading one.
+ *
+ * ⚠️ Every test here sends NO Authorization header whatsoever, which is the case that was
+ * never covered. The existing suite only ever browsed as a signed-in user, so it passed
+ * happily either side of the change.
+ */
+describe("the public directory is readable without an account", () => {
+  const anonymous = (url: string) =>
+    new Request(`https://flickto.app${url}`, { method: "GET" });
+
+  it("browse returns lists to a reader with no session", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "L1");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+
+    const res = await handleBrowse(anonymous("/api/public/lists"), testEnv(db), ctx);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { lists: Card[] };
+    expect(body.lists.length).toBe(1);
+  });
+
+  it("the tag catalogue is readable with no session", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "L1");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+
+    const res = await handleTagCatalogue(
+      anonymous("/api/public/lists/tags"),
+      testEnv(db),
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  /**
+   * ⚠️ `liked` must be FALSE, not absent and not an error. An anonymous reader has liked
+   * nothing, and the query resolves that by binding a viewer id of "" — `users.id` is a
+   * 26-character ULID, so it can never collide with a real row.
+   */
+  it("list detail is readable with no session, and reports nothing liked", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "L1");
+    await handlePublishList(
+      "L1",
+      authed("/api/me/lists/L1/publish", "POST", { tags: ["crime"] }),
+      testEnv(db),
+      ctx,
+    );
+
+    const res = await handlePublicListDetail(
+      uid(1),
+      "L1",
+      anonymous(`/api/public/lists/${uid(1)}/L1`),
+      testEnv(db),
+      ctx,
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { liked: boolean };
+    expect(body.liked).toBe(false);
+  });
+
+  /**
+   * ⚠️ The WRITE verbs stay closed, and that is the whole point of the change: reading is
+   * public, acting is not. A test that only proved the reads opened would not notice if
+   * the same edit had opened publishing too.
+   */
+  it("publishing still requires an account", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "L1");
+
+    const res = await handlePublishList(
+      "L1",
+      new Request("https://flickto.app/api/me/lists/L1/publish", {
+        method: "POST",
+        body: JSON.stringify({ tags: ["crime"] }),
+      }),
+      testEnv(db),
+      ctx,
+    );
+
+    expect(res.status).toBe(401);
   });
 });
