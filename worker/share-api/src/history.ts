@@ -465,6 +465,12 @@ export async function handleHistorySync(
       // of the same rule, and the second one is what rots.
       versionName: body.versionName,
       buildType: body.buildType,
+      // ⚠️ Without this the row said "android" for every iOS device. `recordTelemetry` defaults
+      // a missing platform to "android" and — unlike the other columns — writes it with NO
+      // `COALESCE`, so this thin caller overwrote what the rich block had set. It claims the UTC
+      // day on essentially every device, so it won that race daily. Undefined from an older
+      // client falls back to the same default as before.
+      platform: body.platform,
     }).catch(() => {});
     await maybeRollup(env).catch(() => {});
   };

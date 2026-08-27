@@ -334,6 +334,25 @@ describe("history: fleet telemetry rides this endpoint", () => {
     expect(env.DB.user_telemetry[0]).toMatchObject({ user_id: A, device_id: "dev-1", platform: "android" });
   });
 
+  it("records the platform the client reports, so an iOS row is not labelled android", async () => {
+    // `recordTelemetry` defaults a missing platform to "android" AND writes the column with no
+    // COALESCE, so this thin caller stamped its default over whatever the rich `/api/sync`
+    // block had said — and it claims the UTC day on essentially every device. Every iOS
+    // handset's real row therefore read as an Android one in the admin Devices panel.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "dev-1", platform: "ios" }), env);
+
+    expect(env.DB.user_telemetry[0]).toMatchObject({ device_id: "dev-1", platform: "ios" });
+  });
+
+  it("still defaults to android for a client that sends no platform", async () => {
+    // The field is additive: every shipped Android build omits it and must keep its old row.
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "dev-1" }), env);
+
+    expect(env.DB.user_telemetry[0]).toMatchObject({ platform: "android" });
+  });
+
   it("keys the row per device, so an account's phone and tablet do not overwrite each other", async () => {
     const env = await env0();
     await handleHistorySync(syncReq("tok-a", { ...base, deviceId: "phone" }), env);
