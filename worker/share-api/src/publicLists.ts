@@ -12,6 +12,7 @@
 // name and title is materialised on read. See migration 0039.
 
 import { resolveSession } from "./auth";
+import { canView, canViewAnonymous, parseVisibility } from "./authz";
 import { MAX_TAGS_PER_LIST, PUBLIC_LIST_TAGS, normaliseTags } from "./publicListTags";
 
 export interface PublicListsEnv {
@@ -429,7 +430,7 @@ export async function handleBrowse(
   const rows = await env.DB.prepare(
     `SELECT p.owner_id, p.list_id, p.tags, p.published_at,
             l.name, l.description,
-            pr.display_name, pr.picture_url,
+            pr.display_name, pr.picture_url, pr.avatar_id,
             (SELECT COUNT(*) FROM list_items li
                WHERE li.user_id = p.owner_id AND li.list_id = p.list_id) AS item_count,
             (SELECT COUNT(*) FROM list_follows f
@@ -528,6 +529,7 @@ export async function handleBrowse(
       itemCount: r.item_count,
       authorName: r.display_name ?? "",
       authorPictureUrl: r.picture_url ?? "",
+      authorAvatarId: r.avatar_id ?? "",
       tags: safeTags(r.tags as string),
       saves: r.saves,
       likes: r.likes,
@@ -585,7 +587,7 @@ export async function handlePublicListDetail(
 
   const row = await env.DB.prepare(
     `SELECT p.tags, p.published_at, l.name, l.description, l.updated_at,
-            pr.display_name, pr.picture_url,
+            pr.display_name, pr.picture_url, pr.avatar_id, pr.visibility,
             (SELECT COUNT(*) FROM list_follows f
                WHERE f.owner_id = p.owner_id AND f.list_id = p.list_id) AS saves,
             (SELECT COUNT(*) FROM public_list_likes k
@@ -608,6 +610,20 @@ export async function handlePublicListDetail(
     .first<Record<string, unknown>>();
   if (!row) return notFound();
 
+  // ⚠️ **Whether the byline may be TAPPED, answered here rather than guessed at by the
+  // client.** `profiles.visibility` defaults to 'friends' (migration 0001), and publishing a
+  // list does not change it — the two are separate decisions and both are legitimate. So the
+  // ordinary case is an author whose list is public and whose profile is not, and the app was
+  // offering a tap into `GET /api/profile/{userId}`, which correctly answers 404 for exactly
+  // that reader. The user sees "This profile isn't available" and reads it as a broken link.
+  //
+  // The same `canView` the profile endpoint itself uses, so the two can never disagree about
+  // who may read what; this is one extra indexed read on a page that already does several.
+  // NOT added to the directory listing, where it would be one per card.
+  const authorProfileViewable = (viewerId
+    ? await canView(env as never, viewerId, ownerId, parseVisibility(row.visibility))
+    : canViewAnonymous(parseVisibility(row.visibility))) !== null;
+
   return json({
     ownerId,
     listId,
@@ -615,6 +631,8 @@ export async function handlePublicListDetail(
     description: row.description ?? "",
     authorName: row.display_name ?? "",
     authorPictureUrl: row.picture_url ?? "",
+    authorAvatarId: row.avatar_id ?? "",
+    authorProfileViewable,
     tags: safeTags(row.tags as string),
     saves: row.saves,
     likes: row.likes,

@@ -1079,6 +1079,86 @@ describe("detail", () => {
     expect(res.status).toBe(404);
   });
 
+  // The author's chosen PACK avatar rides the detail payload. It is not the uploaded
+  // photo and not derivable from it: most accounts have an avatar_id and no picture_url,
+  // which is why every byline rendered as a coloured initial until this field existed.
+  it("carries the author's pack avatar id", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE profiles SET avatar_id = 'fox' WHERE user_id = ?1`).bind(uid(1)).run();
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as any).authorAvatarId).toBe("fox");
+  });
+
+  // `profiles.visibility` defaults to 'friends' and publishing a list does not change it,
+  // so this — a stranger reading an ordinary author's list — is the COMMON case, not an
+  // edge one. The byline must not offer a tap that `GET /api/profile/{userId}` will 404.
+  it("says the author's profile is not viewable by a stranger at the default visibility", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(((await res.json()) as any).authorProfileViewable).toBe(false);
+  });
+
+  it("says the author's profile is viewable when they made it public", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await db.prepare(`UPDATE profiles SET visibility = 'public' WHERE user_id = ?1`).bind(uid(1)).run();
+    await withViewer(db, uid(2), "tok-2");
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(((await res.json()) as any).authorProfileViewable).toBe(true);
+  });
+
+  // The friends case is the reason this is `canView` and not `visibility === 'public'`:
+  // a friend may read a `friends` profile, and withholding the tap from them would trade
+  // one wrong answer for another.
+  it("says the author's profile is viewable by an accepted friend at the default visibility", async () => {
+    const db = new TestD1();
+    await withList(db, uid(1), "MANUAL", 3, "A");
+    await publishAged(db, uid(1), "A", ["crime"], 1);
+    await withViewer(db, uid(2), "tok-2");
+    const [a, b] = [uid(1), uid(2)].sort();
+    await db
+      .prepare(
+        `INSERT INTO friendships (user_a, user_b, state, requested_by, created_at, updated_at)
+         VALUES (?1, ?2, 'accepted', ?1, 1, 1)`,
+      )
+      .bind(a, b)
+      .run();
+    const res = await handlePublicListDetail(
+      uid(1),
+      "A",
+      asUser("tok-2", detailUrl(uid(1), "A"), "GET"),
+      testEnv(db),
+      ctx,
+    );
+    expect(((await res.json()) as any).authorProfileViewable).toBe(true);
+  });
+
   it("404s when the underlying list is deleted", async () => {
     const db = new TestD1();
     await withList(db, uid(1), "MANUAL", 3, "A");
