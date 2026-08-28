@@ -430,7 +430,7 @@ export async function handleBrowse(
   const rows = await env.DB.prepare(
     `SELECT p.owner_id, p.list_id, p.tags, p.published_at,
             l.name, l.description,
-            pr.display_name, pr.picture_url, pr.avatar_id,
+            pr.display_name, pr.picture_url, pr.avatar_id, pr.border_id,
             (SELECT COUNT(*) FROM list_items li
                WHERE li.user_id = p.owner_id AND li.list_id = p.list_id) AS item_count,
             (SELECT COUNT(*) FROM list_follows f
@@ -530,6 +530,7 @@ export async function handleBrowse(
       authorName: r.display_name ?? "",
       authorPictureUrl: r.picture_url ?? "",
       authorAvatarId: r.avatar_id ?? "",
+      authorBorderId: r.border_id ?? "",
       tags: safeTags(r.tags as string),
       saves: r.saves,
       likes: r.likes,
@@ -587,7 +588,7 @@ export async function handlePublicListDetail(
 
   const row = await env.DB.prepare(
     `SELECT p.tags, p.published_at, l.name, l.description, l.updated_at,
-            pr.display_name, pr.picture_url, pr.avatar_id, pr.visibility,
+            pr.display_name, pr.picture_url, pr.avatar_id, pr.border_id, pr.visibility,
             (SELECT COUNT(*) FROM list_follows f
                WHERE f.owner_id = p.owner_id AND f.list_id = p.list_id) AS saves,
             (SELECT COUNT(*) FROM public_list_likes k
@@ -632,6 +633,7 @@ export async function handlePublicListDetail(
     authorName: row.display_name ?? "",
     authorPictureUrl: row.picture_url ?? "",
     authorAvatarId: row.avatar_id ?? "",
+    authorBorderId: row.border_id ?? "",
     authorProfileViewable,
     tags: safeTags(row.tags as string),
     saves: row.saves,
