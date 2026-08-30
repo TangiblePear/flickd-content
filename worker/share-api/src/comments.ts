@@ -45,6 +45,15 @@ export interface CommentsEnv extends AppCheckEnv {
   /** Per-author hourly cap. Config, not a constant, so it tunes without a deploy. */
   COMMENTS_PER_HOUR?: string;
   /**
+   * Per-author hourly cap on NEW comments **on one subject**.
+   *
+   * ⚠️ This is the control that replaced one-comment-per-user-per-subject. That
+   * restriction was the primary anti-spam design, and lifting it leaves
+   * `COMMENTS_PER_HOUR` — which is product-wide, so nothing stopped one author
+   * spending the whole hourly budget flooding a single title's sheet. "0" disables.
+   */
+  COMMENTS_PER_SUBJECT_PER_HOUR?: string;
+  /**
    * Short-window burst caps on the comment write path, per minute.
    *
    * These exist because the hourly cap above has two blind spots: it is spent only
@@ -116,6 +125,7 @@ const MAX_LANG_OPTIONS = 25;
 /** The caller's own reactions on one subject. Realistically a handful; this is the belt. */
 const MY_REACTIONS_LIMIT = 200;
 const DEFAULT_COMMENTS_PER_HOUR = 30;
+const DEFAULT_COMMENTS_PER_SUBJECT_PER_HOUR = 5;
 /** Public list TTL. Also the exact size of the public → friends-only leak window. */
 export const PUBLIC_CACHE_SECONDS = 60;
 
@@ -790,6 +800,28 @@ async function rateLimited(env: CommentsEnv, userId: string): Promise<boolean> {
   return (row?.n ?? 0) >= limit;
 }
 
+/**
+ * Has this author already written the hour's allowance on **this subject**?
+ *
+ * ⚠️ The belt that became the control. `wrangler.toml` used to say plainly that
+ * "the real anti-spam control is one comment per user per subject" — that is gone,
+ * so a per-thread cap has to exist or one sheet can absorb the entire product-wide
+ * hourly budget. Counted over `comments` on the same index the subject reads use,
+ * so it costs one indexed row count rather than a new table.
+ */
+async function subjectRateLimited(env: CommentsEnv, userId: string, s: Subject): Promise<boolean> {
+  const limit = Number(env.COMMENTS_PER_SUBJECT_PER_HOUR ?? DEFAULT_COMMENTS_PER_SUBJECT_PER_HOUR);
+  if (limit <= 0) return false;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM comments
+      WHERE author_id = ? AND tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?
+        AND created_at > ?`,
+  )
+    .bind(userId, s.tmdbId, s.mediaType, s.season, s.episode, Date.now() - 3600_000)
+    .first<{ n: number }>();
+  return (row?.n ?? 0) >= limit;
+}
+
 const BURST_WINDOW_MS = 60_000;
 const DEFAULT_WRITES_PER_MINUTE = 5;
 const DEFAULT_WRITES_PER_MINUTE_IP = 20;
@@ -1057,14 +1089,22 @@ export async function handlePostComment(
   // A comment with no text, no media and no media reaction is not a comment.
   if (!body && !media.id && !reaction) return json({ error: "invalid_payload" }, 400);
 
+  // ⚠️ **Looked up by ID, not by (author, subject).** A user may now hold many
+  // comments on one subject, so the subject no longer identifies a row — and a
+  // by-subject lookup would turn every second comment into an edit of the first,
+  // silently collapsing them. The id IS the create/edit distinction now: an id that
+  // already exists is an edit, an id that does not is a create. Client ids are
+  // deterministic per user action, so a retry after a dropped response still lands
+  // on the same row rather than duplicating.
   const existing = await env.DB.prepare(
-    `SELECT id, visibility, hidden_at, deleted_at, body, media_id, created_at
+    `SELECT id, author_id, visibility, hidden_at, deleted_at, body, media_id, created_at
        FROM comments
-      WHERE author_id = ? AND tmdb_id = ? AND media_type = ? AND season = ? AND episode = ?`,
+      WHERE id = ?`,
   )
-    .bind(session.userId, subject.tmdbId, subject.mediaType, subject.season, subject.episode)
+    .bind(id)
     .first<{
       id: string;
+      author_id: string;
       visibility: string;
       hidden_at: number | null;
       deleted_at: number | null;
@@ -1073,10 +1113,25 @@ export async function handlePostComment(
       created_at: number;
     }>();
 
+  // ⚠️ An edit must be by the author. The old by-subject lookup could only ever
+  // return the caller's own row, so ownership was implicit; addressing by id makes
+  // it a guessable parameter and the check has to become explicit. 404, not 403 —
+  // the same answer a missing id gets, so ids cannot be probed for existence.
+  if (existing && existing.author_id !== session.userId) return notFound();
+
   // Only a NEW comment spends rate-limit budget. Editing is not posting, and
   // charging for it would make a typo fix cost the same as a new comment.
   if (!existing && (await rateLimited(env, session.userId))) {
     await recordStrike(env, ctx, session.userId, "comment_hourly");
+    return rateLimitedBody(3600);
+  }
+
+  // ⚠️ The per-subject cap replaces one-comment-per-subject as the flood control on
+  // a single thread. `COMMENTS_PER_HOUR` alone is product-wide, so without this one
+  // user could spend their whole hourly budget on one title's sheet. Checked after
+  // the hourly cap so the coarser refusal wins, and only for a NEW comment.
+  if (!existing && (await subjectRateLimited(env, session.userId, subject))) {
+    await recordStrike(env, ctx, session.userId, "comment_subject_hourly");
     return rateLimitedBody(3600);
   }
 

@@ -109,15 +109,29 @@ class FakeStmt {
     if (s.startsWith("SELECT COUNT(*) AS n FROM comment_write_events WHERE ip_hash")) {
       return { n: this.db.comment_write_events.filter((e) => e.ip_hash === a[0] && e.created_at > a[1]).length } as T;
     }
-    if (s.startsWith("SELECT COUNT(*) AS n FROM comments WHERE author_id")) {
+    // ⚠️ Matched EXACTLY, not by prefix. The per-subject cap's query below starts
+    // with these same words, so a `startsWith` here silently answered it with the
+    // product-wide count — and the per-subject cap then fired on every subject.
+    if (s === "SELECT COUNT(*) AS n FROM comments WHERE author_id = ? AND created_at > ?") {
       return { n: this.db.comments.filter((c) => c.author_id === a[0] && c.created_at > a[1]).length } as T;
     }
-    if (s.startsWith("SELECT id, visibility, hidden_at, deleted_at, body, media_id, created_at FROM comments")) {
-      const r = this.db.comments.find(
-        (c) =>
-          c.author_id === a[0] && c.tmdb_id === a[1] && c.media_type === a[2] && c.season === a[3] && c.episode === a[4],
-      );
-      return (r as T) ?? null;
+    if (s.startsWith("SELECT id, author_id, visibility, hidden_at, deleted_at, body, media_id, created_at FROM comments")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    // The per-subject hourly cap. Distinct from the product-wide one above, which is
+    // keyed on author alone — matched on the longer prefix so the two cannot collide.
+    if (s.startsWith("SELECT COUNT(*) AS n FROM comments WHERE author_id = ? AND tmdb_id")) {
+      return {
+        n: this.db.comments.filter(
+          (c) =>
+            c.author_id === a[0] &&
+            c.tmdb_id === a[1] &&
+            c.media_type === a[2] &&
+            c.season === a[3] &&
+            c.episode === a[4] &&
+            c.created_at > a[5],
+        ).length,
+      } as T;
     }
     if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at")) {
       return (this.db.comments.find((c) => c.id === a[0] && c.author_id === a[1]) as T) ?? null;
@@ -623,19 +637,51 @@ describe("writing", () => {
   it("keeps the EXISTING row's id on an edit, so reactions are not orphaned", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "ORIGINAL", author_id: A });
-    const res = await handlePostComment(post("/api/comments", body({ id: "0123456789ABCDEF" }), "tok-a"), e, ctx);
+    // ⚠️ Addressed by ID now. The same request naming a DIFFERENT id is no longer
+    // an edit of this row — it is a second comment. See the test below.
+    const res = await handlePostComment(post("/api/comments", body({ id: "ORIGINAL" }), "tok-a"), e, ctx);
     expect((await res.json()).id).toBe("ORIGINAL");
     expect(e.DB.comments).toHaveLength(1);
   });
 
+  it("writes a SECOND comment on a subject the author has already commented on", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "ORIGINAL", author_id: A });
+    const res = await handlePostComment(post("/api/comments", body({ id: "SECONDONE" }), "tok-a"), e, ctx);
+    expect(res.status).toBe(200);
+    // The whole point of A1: one comment per user per subject is lifted. Before this,
+    // the by-subject lookup turned this request into an edit of ORIGINAL.
+    expect(e.DB.comments).toHaveLength(2);
+    expect((await res.json()).id).toBe("SECONDONE");
+  });
+
+  it("⚠️ refuses an edit of someone ELSE's comment, as a 404 rather than a 403", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "THEIRSCOMMENT", author_id: B, body: "theirs" });
+    // Ownership was implicit while the lookup was by (author, subject) — it could only
+    // ever return the caller's own row. Addressing by id makes it a guessable
+    // parameter, so the check has to be explicit. 404 so ids cannot be probed.
+    const res = await handlePostComment(post("/api/comments", body({ id: "THEIRSCOMMENT" }), "tok-a"), e, ctx);
+    expect(res.status).toBe(404);
+    expect(e.DB.comments[0].body).toBe("theirs");
+  });
+
   it("drops from the public count when an edit changes visibility, in both directions", async () => {
     const e = await withSessions(env());
-    seed(e.DB, { id: "C1", author_id: A, visibility: "public" });
+    seed(e.DB, { id: "SEEDCOMMENT01", author_id: A, visibility: "public" });
 
-    await handlePostComment(post("/api/comments", body({ visibility: "friends" }), "tok-a"), e, ctx);
+    await handlePostComment(
+      post("/api/comments", body({ id: "SEEDCOMMENT01", visibility: "friends" }), "tok-a"),
+      e,
+      ctx,
+    );
     expect(e.DB.count(603, "movie")).toBe(0);
 
-    await handlePostComment(post("/api/comments", body({ visibility: "public" }), "tok-a"), e, ctx);
+    await handlePostComment(
+      post("/api/comments", body({ id: "SEEDCOMMENT01", visibility: "public" }), "tok-a"),
+      e,
+      ctx,
+    );
     expect(e.DB.count(603, "movie")).toBe(1);
   });
 
@@ -705,18 +751,51 @@ describe("writing", () => {
   it("rate-limits NEW comments but never edits", async () => {
     const e = await withSessions(env());
     e.COMMENTS_PER_HOUR = "1";
-    await handlePostComment(post("/api/comments", body({ tmdbId: 1 }), "tok-a"), e, ctx);
-    const blocked = await handlePostComment(post("/api/comments", body({ tmdbId: 2 }), "tok-a"), e, ctx);
+    // ⚠️ Distinct ids. The id is what distinguishes a create from an edit now, so
+    // reusing one across two subjects would read as an edit and never be charged.
+    await handlePostComment(post("/api/comments", body({ id: "AAAAAAAAAAAA", tmdbId: 1 }), "tok-a"), e, ctx);
+    const blocked = await handlePostComment(
+      post("/api/comments", body({ id: "BBBBBBBBBBBB", tmdbId: 2 }), "tok-a"),
+      e,
+      ctx,
+    );
     expect(blocked.status).toBe(429);
     // The same author editing what they already wrote is not spending budget.
-    const edit = await handlePostComment(post("/api/comments", body({ tmdbId: 1, body: "fixed" }), "tok-a"), e, ctx);
+    const edit = await handlePostComment(
+      post("/api/comments", body({ id: "AAAAAAAAAAAA", tmdbId: 1, body: "fixed" }), "tok-a"),
+      e,
+      ctx,
+    );
     expect(edit.status).toBe(200);
+  });
+
+  it("⚠️ caps NEW comments per SUBJECT, the control that replaced one-per-subject", async () => {
+    const e = await withSessions(env());
+    // `COMMENTS_PER_HOUR` is product-wide, so without this cap one author could spend
+    // the entire hourly budget flooding a single title's sheet — which is exactly what
+    // one-comment-per-user-per-subject used to make impossible.
+    e.COMMENTS_PER_SUBJECT_PER_HOUR = "2";
+    const write = (id: string, over: Record<string, unknown> = {}) =>
+      handlePostComment(post("/api/comments", body({ id, ...over }), "tok-a"), e, ctx);
+
+    expect((await write("AAAAAAAAAAAA")).status).toBe(200);
+    expect((await write("BBBBBBBBBBBB")).status).toBe(200);
+    expect((await write("CCCCCCCCCCCC")).status).toBe(429);
+
+    // …and it is PER SUBJECT: a different title is unaffected.
+    expect((await write("DDDDDDDDDDDD", { tmdbId: 604 })).status).toBe(200);
+    // …and an EDIT of an existing row is never charged, exactly as the hourly cap.
+    expect((await write("AAAAAAAAAAAA", { body: "fixed" })).status).toBe(200);
   });
 
   it("keeps a hidden comment hidden through an edit", async () => {
     const e = await withSessions(env());
-    seed(e.DB, { id: "C1", author_id: A, hidden_at: 123 });
-    await handlePostComment(post("/api/comments", body({ body: "rewritten" }), "tok-a"), e, ctx);
+    seed(e.DB, { id: "SEEDCOMMENT01", author_id: A, hidden_at: 123 });
+    await handlePostComment(
+      post("/api/comments", body({ id: "SEEDCOMMENT01", body: "rewritten" }), "tok-a"),
+      e,
+      ctx,
+    );
     expect(e.DB.comments[0].hidden_at).toBe(123);
   });
 });
@@ -893,8 +972,8 @@ describe("reporting", () => {
 
   it("snapshots the body, because editing forever is otherwise a way to escape a report", async () => {
     const e = await withSessions(env());
-    seed(e.DB, { id: "C1", author_id: B, body: "the original text" });
-    await report(e, "C1", "abuse", "tok-a");
+    seed(e.DB, { id: "SEEDCOMMENT01", author_id: B, body: "the original text" });
+    await report(e, "SEEDCOMMENT01", "abuse", "tok-a");
     expect(e.DB.reports[0].body_snapshot).toBe("the original text");
 
     // The author rewrites it. The live row changes; the snapshot does not, and the
@@ -902,7 +981,7 @@ describe("reporting", () => {
     await handlePostComment(
       post(
         "/api/comments",
-        { id: "0123456789ABCDEF", tmdbId: 603, mediaType: "movie", body: "something innocuous" },
+        { id: "SEEDCOMMENT01", tmdbId: 603, mediaType: "movie", body: "something innocuous" },
         "tok-b",
       ),
       e,

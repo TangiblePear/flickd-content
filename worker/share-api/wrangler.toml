@@ -347,9 +347,14 @@ REPORT_TTL_SECONDS = "31536000"
 # Per-IP hourly cap for share-create; inbox-post allows 6x this.
 RATE_LIMIT_PER_HOUR = "10"
 # Per-author hourly cap on NEW comments (edits are free — charging for a typo fix
-# would cost the same as a new comment). The real anti-spam control is one comment
-# per user per subject; this is the belt.
+# would cost the same as a new comment).
+#
+# ⚠️ This used to be the belt, with "one comment per user per subject" as the real
+# anti-spam control. Migration 0043 lifted that restriction, so these two caps ARE
+# the control now. COMMENTS_PER_HOUR is product-wide; the per-subject cap is what
+# stops one author absorbing the whole of it in a single title's sheet.
 COMMENTS_PER_HOUR = "30"
+COMMENTS_PER_SUBJECT_PER_HOUR = "5"
 # Rate-limit strikes within one hour that trigger an automatic posting suspension,
 # and how long that suspension lasts (default 24h). A limiter only refuses the
 # current request; a script retries at one request per window forever, so without
