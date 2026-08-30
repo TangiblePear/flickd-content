@@ -331,6 +331,44 @@ function toWire(
   translation?: Translated,
   replies?: unknown[],
 ) {
+  /**
+   * ⚠️ A tombstone carries NOTHING of the original — not the text, not the media, not
+   * the author. It exists only so a thread whose parent was deleted still has
+   * somewhere to hang. Stripping here rather than at the query keeps the one place
+   * that decides what a comment looks like on the wire.
+   */
+  const tombstone = r.deleted_at != null;
+  if (tombstone) {
+    return {
+      reactions: {},
+      translated: null,
+      translationFailed: false,
+      id: r.id,
+      authorId: "",
+      authorName: null,
+      authorAvatarId: null,
+      authorBorderId: null,
+      authorPictureUrl: null,
+      authorIsPremiere: false,
+      body: "",
+      reaction: null,
+      visibility: r.visibility,
+      spoiler: false,
+      lang: null,
+      media: null,
+      edited: false,
+      deleted: true,
+      parentCommentId: r.parent_id,
+      inReplyToCommentId: null,
+      rootCommentId: r.root_id ?? r.id,
+      depth: r.depth ?? 0,
+      replyCount: r.reply_count ?? 0,
+      mentions: [],
+      replies: replies ?? null,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
   return {
     reactions,
     /** Server-side translation, when one was asked for and succeeded. */
@@ -366,6 +404,7 @@ function toWire(
             h: r.media_h,
           },
     edited: r.updated_at > r.created_at,
+    deleted: false,
     /**
      * Thread fields, named as the archive names them so one client model and one
      * renderer serve both layers. `parentCommentId` places the row;
@@ -439,6 +478,21 @@ const RENDERABLE = `c.hidden_at IS NULL AND c.deleted_at IS NULL AND (c.body <> 
  * of 20 would be spent on them.
  */
 const TOP_LEVEL = `c.parent_id IS NULL`;
+
+/**
+ * What a **top-level** list read may return: anything renderable, plus a deleted
+ * comment that still has replies.
+ *
+ * ⚠️ Without the second half, deleting a parent silently orphans its whole subtree:
+ * [RENDERABLE] excludes deleted rows, so the parent leaves the list and its replies —
+ * other people's words, which we deliberately do not cascade — become unreachable.
+ * The row comes back as a tombstone instead: no text, no media, no author, no
+ * actions. `toWire` is what strips it; this predicate only decides it is returned.
+ *
+ * Replies themselves stay on plain [RENDERABLE] — a deleted reply has nothing
+ * hanging off it, so there is nothing to orphan and nothing to mark.
+ */
+const LISTABLE = `(${RENDERABLE} OR (c.deleted_at IS NOT NULL AND c.reply_count > 0))`;
 
 // ── The friend feed ─────────────────────────────────────────────────────────
 
@@ -720,7 +774,7 @@ export async function loadPublicComments(env: CommentsEnv, s: Subject, lang: str
        FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
                        LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
-        AND c.visibility = 'public' AND c.created_at < ? AND ${RENDERABLE} AND ${TOP_LEVEL}${langFilter}
+        AND c.visibility = 'public' AND c.created_at < ? AND ${LISTABLE} AND ${TOP_LEVEL}${langFilter}
       ORDER BY c.created_at DESC
       LIMIT ?`,
   )
@@ -934,7 +988,7 @@ export async function handleGetFriendComments(
                        LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
         AND c.visibility = 'friends' AND c.author_id IN (${placeholders})
-        AND c.created_at < ? AND ${RENDERABLE} AND ${TOP_LEVEL}
+        AND c.created_at < ? AND ${LISTABLE} AND ${TOP_LEVEL}
       ORDER BY c.created_at DESC
       LIMIT ?`,
   )

@@ -242,7 +242,17 @@ class FakeStmt {
         .filter(this.onSubject(a))
         .filter((c) => c.visibility === (isPublic ? "public" : "friends"))
         .filter((c) => (authors ? authors.has(c.author_id) : true))
-        .filter((c) => c.created_at < cursor && this.renderable(c))
+        .filter((c) => {
+          if (c.created_at >= cursor) return false;
+          if (this.renderable(c)) return true;
+          // A deleted parent that still has replies is LISTABLE as a tombstone.
+          // Keyed on the SQL so removing the predicate fails the test.
+          return (
+            s.includes("c.deleted_at IS NOT NULL AND c.reply_count > 0") &&
+            c.deleted_at != null &&
+            (c.reply_count ?? 0) > 0
+          );
+        })
         // ⚠️ Conditional on the SQL actually SAYING so, not on what this fake
         // assumes the query does. Hardcoding `parent_id == null` here made the
         // "replies stay out of the list" test pass with the predicate removed from
@@ -1056,6 +1066,39 @@ describe("replies", () => {
     const stored = JSON.parse(e.DB.comments[0].mentions_json);
     expect(stored).toHaveLength(1);
     expect(stored[0].authorId).toBe(B);
+  });
+
+  it("keeps a DELETED parent in the list as a tombstone, so its thread is not orphaned", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001", { body: "the original text" });
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", body: "a reply" }, "tok-b");
+    await del(e, "TOPLEVEL0001", "tok-a");
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const out = await res.json();
+
+    // Without this the parent leaves the list (RENDERABLE excludes deleted rows) and
+    // its replies - other people's words, deliberately not cascaded - become
+    // unreachable through any route.
+    expect(out.comments).toHaveLength(1);
+    const row = out.comments[0];
+    expect(row.deleted).toBe(true);
+    expect(row.replyCount).toBe(1);
+    // A tombstone carries NOTHING of the original.
+    expect(row.body).toBe("");
+    expect(row.authorId).toBe("");
+    expect(row.media).toBeNull();
+    expect(row.replies.map((r: any) => r.body)).toEqual(["a reply"]);
+  });
+
+  it("drops a deleted comment with NO replies entirely, rather than tombstoning it", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await del(e, "TOPLEVEL0001", "tok-a");
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    // Nothing hangs off it, so there is nothing to hold a place for.
+    expect((await res.json()).comments).toEqual([]);
   });
 
   it("never re-parents a comment on an edit", async () => {
