@@ -11,6 +11,7 @@ import {
   handleDeleteComment,
   handleGetComments,
   handleGetFriendComments,
+  handleGetReplies,
   handlePostComment,
   handleReactToComment,
   handleReportComment,
@@ -139,6 +140,22 @@ class FakeStmt {
     if (s.startsWith("SELECT id, author_id, visibility, hidden_at, deleted_at FROM comments")) {
       return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
     }
+    // Reply parent resolution, for depth flattening.
+    if (s.startsWith("SELECT id, parent_id, root_id, depth, tmdb_id")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    // The replies endpoint's parent gate.
+    if (s.startsWith("SELECT id, author_id, visibility, hidden_at, deleted_at FROM comments WHERE id")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    // notifyReply's target read.
+    if (s.startsWith("SELECT id, author_id, last_notified_at FROM comments")) {
+      return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
+    }
+    if (s.startsWith("SELECT display_name FROM profiles")) {
+      const r = this.db.profiles.find((x) => x.user_id === a[0]);
+      return r ? ({ display_name: r.display_name } as T) : null;
+    }
     if (s.startsWith("SELECT emoji FROM comment_reactions")) {
       const r = this.db.comment_reactions.find((x) => x.comment_id === a[0] && x.user_id === a[1]);
       return r ? ({ emoji: r.emoji } as T) : null;
@@ -180,6 +197,7 @@ class FakeStmt {
       const by = new Map<string, number>();
       for (const c of this.db.comments) {
         if (!this.onSubject(a)(c) || c.visibility !== "public" || !this.renderable(c)) continue;
+        if (s.includes("c.parent_id IS NULL") && c.parent_id != null) continue;
         if (c.lang == null) continue;
         by.set(c.lang, (by.get(c.lang) ?? 0) + 1);
       }
@@ -187,6 +205,33 @@ class FakeStmt {
         .map(([lang, n]) => ({ lang, n }))
         .sort((x, y) => y.n - x.n);
       return { results: results as T[] };
+    }
+    // The inline reply preview: one windowed query for the whole page.
+    if (s.startsWith("SELECT * FROM (")) {
+      const parents = new Set(a.slice(0, a.length - 1));
+      const perParent = a[a.length - 1];
+      const seen = new Map<string, number>();
+      const rows: any[] = [];
+      for (const c of this.db.comments
+        .filter((c) => c.parent_id != null && parents.has(c.parent_id) && this.renderable(c))
+        .sort((x, y) => x.created_at - y.created_at)) {
+        const n = (seen.get(c.parent_id) ?? 0) + 1;
+        seen.set(c.parent_id, n);
+        if (n <= perParent) {
+          rows.push({ ...c, ...(this.db.profiles.find((p) => p.user_id === c.author_id) ?? {}) });
+        }
+      }
+      return { results: rows as T[] };
+    }
+    // One page of replies under a parent, OLDEST first — a thread reads in the
+    // order it was written, so the cursor is a floor rather than a ceiling.
+    if (s.startsWith("SELECT c.id, c.tmdb_id, c.media_type") && s.includes("c.parent_id = ?")) {
+      const rows = this.db.comments
+        .filter((c) => c.parent_id === a[0] && c.created_at > a[1] && this.renderable(c))
+        .sort((x, y) => x.created_at - y.created_at)
+        .slice(0, a[2])
+        .map((c) => ({ ...c, ...(this.db.profiles.find((p) => p.user_id === c.author_id) ?? {}) }));
+      return { results: rows as T[] };
     }
     if (s.startsWith("SELECT c.id, c.tmdb_id, c.media_type")) {
       const isPublic = s.includes("c.visibility = 'public'");
@@ -198,6 +243,11 @@ class FakeStmt {
         .filter((c) => c.visibility === (isPublic ? "public" : "friends"))
         .filter((c) => (authors ? authors.has(c.author_id) : true))
         .filter((c) => c.created_at < cursor && this.renderable(c))
+        // ⚠️ Conditional on the SQL actually SAYING so, not on what this fake
+        // assumes the query does. Hardcoding `parent_id == null` here made the
+        // "replies stay out of the list" test pass with the predicate removed from
+        // the real query — a test that cannot fail is not a test.
+        .filter((c) => (s.includes("c.parent_id IS NULL") ? c.parent_id == null : true))
         .filter((c) => (lang ? c.lang == null || c.lang === lang : true))
         .sort((x, y) => y.created_at - x.created_at)
         .slice(0, PAGE_LIMIT)
@@ -237,20 +287,35 @@ class FakeStmt {
         id: a[0], tmdb_id: a[1], media_type: a[2], season: a[3], episode: a[4], author_id: a[5],
         body: a[6], reaction: a[7], visibility: a[8], spoiler: a[9], lang: a[10],
         media_kind: a[11], media_provider: a[12], media_id: a[13], media_url: a[14],
-        media_w: a[15], media_h: a[16], hidden_at: null, deleted_at: null,
-        created_at: a[17], updated_at: a[18],
+        media_w: a[15], media_h: a[16],
+        parent_id: a[17], in_reply_to_id: a[18], root_id: a[19], depth: a[20],
+        mentions_json: a[21], reply_count: 0,
+        hidden_at: null, deleted_at: null,
+        created_at: a[22], updated_at: a[23],
       });
       return { success: true, meta: { changes: 1 } };
     }
     if (s.startsWith("UPDATE comments SET body =")) {
-      const r = this.db.comments.find((c) => c.id === a[12] && c.author_id === a[13]);
+      const r = this.db.comments.find((c) => c.id === a[13] && c.author_id === a[14]);
       if (r) {
         Object.assign(r, {
           body: a[0], reaction: a[1], visibility: a[2], spoiler: a[3], lang: a[4],
           media_kind: a[5], media_provider: a[6], media_id: a[7], media_url: a[8],
-          media_w: a[9], media_h: a[10], deleted_at: null, updated_at: a[11],
+          media_w: a[9], media_h: a[10], mentions_json: a[11],
+          deleted_at: null, updated_at: a[12],
         });
       }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    // The maintained reply counter, bumped in the same batch as the reply's insert.
+    if (s.startsWith("UPDATE comments SET reply_count = reply_count + 1")) {
+      const r = this.db.comments.find((c) => c.id === a[0]);
+      if (r) r.reply_count = (r.reply_count ?? 0) + 1;
+      return { success: true, meta: { changes: r ? 1 : 0 } };
+    }
+    if (s.startsWith("UPDATE comments SET reply_count = MAX(reply_count - 1, 0)")) {
+      const r = this.db.comments.find((c) => c.id === a[0]);
+      if (r) r.reply_count = Math.max((r.reply_count ?? 0) - 1, 0);
       return { success: true, meta: { changes: r ? 1 : 0 } };
     }
     if (s.startsWith("UPDATE comments SET deleted_at")) {
@@ -797,6 +862,214 @@ describe("writing", () => {
       ctx,
     );
     expect(e.DB.comments[0].hidden_at).toBe(123);
+  });
+});
+
+describe("replies", () => {
+  const body = (over: Partial<any> = {}) => ({
+    id: "0123456789ABCDEF", tmdbId: 603, mediaType: "movie", body: "nice", visibility: "public", ...over,
+  });
+  const write = (e: any, id: string, over: Record<string, unknown> = {}, token = "tok-a") =>
+    handlePostComment(post("/api/comments", body({ id, ...over }), token), e, ctx);
+  const del = (e: any, id: string, token: string) =>
+    handleDeleteComment(
+      id,
+      new Request("https://flickto.app/api/comments/" + id, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer " + token },
+      }),
+      e,
+      ctx,
+    );
+
+  it("stores a reply under its parent and bumps the maintained count", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    const res = await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", body: "agreed" });
+    expect(res.status).toBe(200);
+
+    const reply = e.DB.comments.find((c: any) => c.id === "REPLY0000001");
+    expect(reply.parent_id).toBe("TOPLEVEL0001");
+    expect(reply.depth).toBe(1);
+    expect(reply.root_id).toBe("TOPLEVEL0001");
+    // Maintained, not counted per read: a correlated subquery here would multiply
+    // the cost of the hottest query in the product.
+    expect(e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").reply_count).toBe(1);
+  });
+
+  it("flattens past depth 2, keeping who was actually answered", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" });
+    await write(e, "REPLY0000002", { parentId: "REPLY0000001" });
+    // Replying to a depth-2 comment. The row is stored AT the cap under the same
+    // parent, and in_reply_to_id is what stops the answer being lost.
+    await write(e, "REPLY0000003", { parentId: "REPLY0000002" });
+
+    const two = e.DB.comments.find((c: any) => c.id === "REPLY0000002");
+    const three = e.DB.comments.find((c: any) => c.id === "REPLY0000003");
+    expect(two.depth).toBe(2);
+    expect(three.depth).toBe(2);
+    expect(three.parent_id).toBe(two.parent_id);
+    expect(three.in_reply_to_id).toBe("REPLY0000002");
+    expect(three.root_id).toBe("TOPLEVEL0001");
+  });
+
+  it("keeps replies OUT of the top-level list", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" });
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const out = await res.json();
+    // Otherwise a thread's replies appear as loose rows in created_at order,
+    // detached from what they answer, spending the page limit.
+    expect(out.comments.map((c: any) => c.id)).toEqual(["TOPLEVEL0001"]);
+    expect(out.comments[0].replyCount).toBe(1);
+  });
+
+  it("carries an inline preview, so a short thread needs no expand call", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", body: "first reply" });
+    await write(e, "REPLY0000002", { parentId: "TOPLEVEL0001", body: "second reply" });
+
+    const res = await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx);
+    const out = await res.json();
+    expect(out.comments[0].replies.map((r: any) => r.body)).toEqual(["first reply", "second reply"]);
+  });
+
+  it("returns a reply page oldest-first, unlike the top-level list", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", body: "earlier" });
+    e.DB.comments[e.DB.comments.length - 1].created_at = 1000;
+    await write(e, "REPLY0000002", { parentId: "TOPLEVEL0001", body: "later" });
+    e.DB.comments[e.DB.comments.length - 1].created_at = 2000;
+
+    const res = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies"), e, ctx);
+    const out = await res.json();
+    expect(out.comments.map((c: any) => c.body)).toEqual(["earlier", "later"]);
+  });
+
+  it("hides a whole subtree from the replies route when the parent is hidden", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" });
+    e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").hidden_at = Date.now();
+
+    // Moderation must not be escapable by addressing the subtree directly.
+    const res = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies"), e, ctx);
+    expect(res.status).toBe(404);
+  });
+
+  it("refuses a reply to a hidden or missing parent", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    e.DB.comments[0].hidden_at = Date.now();
+    expect((await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" })).status).toBe(404);
+    expect((await write(e, "REPLY0000002", { parentId: "NOSUCHPARENT0" })).status).toBe(404);
+  });
+
+  it("refuses a reply whose subject differs from its parent's", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    // The reply would land on a page its parent is not on, where nothing renders it.
+    const res = await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", tmdbId: 604 });
+    expect(res.status).toBe(400);
+  });
+
+  it("decrements the parent's count when a reply is deleted, never below zero", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" });
+
+    await del(e, "REPLY0000001", "tok-a");
+    expect(e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").reply_count).toBe(0);
+    await del(e, "REPLY0000001", "tok-a");
+    expect(e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").reply_count).toBe(0);
+  });
+
+  it("tombstones a deleted parent rather than cascading over other people's words", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" }, "tok-b");
+
+    await del(e, "TOPLEVEL0001", "tok-a");
+
+    // B's reply is B's to delete. The parent row survives as a tombstone so the
+    // subtree is not orphaned, and reply_count is left alone - it is what tells the
+    // client to draw the tombstone rather than omit the row.
+    const reply = e.DB.comments.find((c: any) => c.id === "REPLY0000001");
+    expect(reply.deleted_at).toBeFalsy();
+    expect(e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").reply_count).toBe(1);
+  });
+
+  it("notifies the person ANSWERED, not the author's friend list", async () => {
+    const e = await withSessions(env());
+    e.DB.friendships.push({ user_a: A, user_b: C, state: "accepted", requested_by: A, updated_at: 0 });
+    e.DB.profiles.push({ user_id: A, display_name: "Alex" });
+    await write(e, "TOPLEVEL0001", {}, "tok-b");
+
+    const calls: Array<{ userId: string; data: Record<string, string> }> = [];
+    await handlePostComment(
+      post("/api/comments", body({ id: "REPLY0000001", parentId: "TOPLEVEL0001" }), "tok-a"),
+      e,
+      ctx,
+      (userId, data) => calls.push({ userId, data }),
+    );
+    await flush();
+
+    // Fanning "Alex commented" out per reply would turn one busy thread into a
+    // notification storm, and C, a friend, is not part of this conversation.
+    expect(calls.map((c) => c.userId)).toEqual([B]);
+    expect(calls[0].data.kind).toBe("comment_reply");
+    expect(calls[0].data.authorName).toBe("Alex");
+  });
+
+  it("never notifies you about a reply to your own comment", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    const calls: string[] = [];
+    await handlePostComment(
+      post("/api/comments", body({ id: "REPLY0000001", parentId: "TOPLEVEL0001" }), "tok-a"),
+      e,
+      ctx,
+      (userId) => calls.push(userId),
+    );
+    await flush();
+    expect(calls).toEqual([]);
+  });
+
+  it("stores mention spans, and drops malformed ones rather than the comment", async () => {
+    const e = await withSessions(env());
+    const res = await write(e, "TOPLEVEL0001", {
+      mentions: [
+        { authorId: B, start: 0, end: 5, text: "@Bee" },
+        { authorId: "not-a-user-id", start: 0, end: 5, text: "@nope" },
+        { authorId: C, start: 9, end: 4, text: "@backwards" },
+      ],
+    });
+    expect(res.status).toBe(200);
+    // Rendering reads these spans, so a bad one is a rendering bug in every app
+    // that consumes the mirrored row - ours and every other partner's.
+    const stored = JSON.parse(e.DB.comments[0].mentions_json);
+    expect(stored).toHaveLength(1);
+    expect(stored[0].authorId).toBe(B);
+  });
+
+  it("never re-parents a comment on an edit", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" });
+    await write(e, "OTHERTOP0001");
+
+    await write(e, "REPLY0000001", { parentId: "OTHERTOP0001", body: "edited" });
+
+    // Re-parenting a comment that already has replies would strand the subtree.
+    const reply = e.DB.comments.find((c: any) => c.id === "REPLY0000001");
+    expect(reply.parent_id).toBe("TOPLEVEL0001");
+    expect(reply.body).toBe("edited");
   });
 });
 

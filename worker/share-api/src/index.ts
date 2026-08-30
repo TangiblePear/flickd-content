@@ -109,6 +109,7 @@ import {
 } from "./match";
 import {
   handleDeleteComment,
+  handleGetReplies,
   handleGetComments,
   handleGetFriendComments,
   handlePostComment,
@@ -749,6 +750,11 @@ export default {
 
     const commentTarget = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})$/);
     if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
+
+    // Lazy, on expand only — never while rendering a list. The inline preview the
+    // parent carries is what keeps short threads from reaching this at all.
+    const commentReplies = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/replies$/);
+    if (commentReplies && req.method === "GET") return handleGetReplies(commentReplies[1], req, env, ctx);
 
     const commentReaction = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/reaction$/);
     if (commentReaction && (req.method === "POST" || req.method === "DELETE")) {

@@ -120,6 +120,36 @@ const MAX_LANG = 8;
  * that already forced `FRESHNESS_CHUNK = 25`.
  */
 export const PAGE_LIMIT = 20;
+
+/**
+ * One page of replies inside an expanded thread.
+ *
+ * ⚠️ Sized against the SAME 50-subrequest budget [PAGE_LIMIT] is, and smaller
+ * because a reply page can be fully untranslated: replies are translated exactly
+ * like top-level comments, so a page of N spends up to N AI calls on top of the
+ * session and reaction-count queries. Replies must not be able to inflate that
+ * budget just because they arrive on their own request.
+ */
+export const REPLY_PAGE_LIMIT = 10;
+
+/**
+ * Replies carried inline on a top-level row, so a short thread needs no expand
+ * call at all. Most threads are short, which is what makes this the difference
+ * between "one extra request per expanded thread" and "one per thread, always".
+ */
+const INLINE_REPLY_PREVIEW = 2;
+
+/**
+ * ⚠️ **Depth is capped at 2 and flattened SERVER-side**, copied from the archive:
+ * a reply to a depth-2 comment is stored at depth 2 under the same `parent_id`,
+ * with `in_reply_to_id` naming what the user actually answered. Clients post to
+ * whatever was tapped and render what comes back — they do not pre-compute this.
+ */
+const MAX_DEPTH = 2;
+
+/** Mention spans per comment. Structured `{authorId, start, end, text}`, never a regex. */
+const MAX_MENTIONS = 3;
+
 /** Bounds the language picker so a subject with absurd variety cannot become a scan. */
 const MAX_LANG_OPTIONS = 25;
 /** The caller's own reactions on one subject. Realistically a handful; this is the belt. */
@@ -227,6 +257,17 @@ export function parseSubject(mediaType: string, rawId: string, params: URLSearch
 
 // ── Rows and wire shape ─────────────────────────────────────────────────────
 
+/**
+ * One mention span. `start`/`end` index into the comment body, so rendering is a
+ * substring replacement rather than a pattern match over prose.
+ */
+export interface Mention {
+  authorId: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface CommentRow {
   id: string;
   tmdb_id: number;
@@ -247,6 +288,18 @@ export interface CommentRow {
   media_h: number | null;
   hidden_at: number | null;
   deleted_at: number | null;
+  /**
+   * Thread placement. ⚠️ `parent_id` and `in_reply_to_id` are NOT redundant:
+   * the first groups the thread, the second names who was actually answered, and
+   * they differ exactly when a deeper reply is flattened up into the display
+   * level. Migration 0044 has the full reasoning.
+   */
+  parent_id: string | null;
+  in_reply_to_id: string | null;
+  root_id: string | null;
+  depth: number;
+  reply_count: number;
+  mentions_json: string | null;
   created_at: number;
   updated_at: number;
   display_name?: string | null;
@@ -272,7 +325,12 @@ export interface CommentRow {
  * caller's own reaction is the one reader-specific bit, and it rides
  * `myReactions` on the authenticated path instead.
  */
-function toWire(r: CommentRow, reactions: Record<string, number> = {}, translation?: Translated) {
+function toWire(
+  r: CommentRow,
+  reactions: Record<string, number> = {},
+  translation?: Translated,
+  replies?: unknown[],
+) {
   return {
     reactions,
     /** Server-side translation, when one was asked for and succeeded. */
@@ -308,14 +366,55 @@ function toWire(r: CommentRow, reactions: Record<string, number> = {}, translati
             h: r.media_h,
           },
     edited: r.updated_at > r.created_at,
+    /**
+     * Thread fields, named as the archive names them so one client model and one
+     * renderer serve both layers. `parentCommentId` places the row;
+     * `inReplyToCommentId` is who was actually answered and drives the "replying
+     * to" label, mentions, notifications and jump-to-target.
+     */
+    parentCommentId: r.parent_id,
+    inReplyToCommentId: r.in_reply_to_id,
+    rootCommentId: r.root_id ?? r.id,
+    depth: r.depth ?? 0,
+    replyCount: r.reply_count ?? 0,
+    mentions: parseMentions(r.mentions_json),
+    /**
+     * The inline preview of the first replies, present only on top-level rows of a
+     * list read. ⚠️ This is what stops the expand call happening at all for short
+     * threads — most threads are short, so it removes the large majority of those
+     * requests. `null` means "not loaded here", which is NOT the same as "none":
+     * `replyCount` is the authority on whether any exist.
+     */
+    replies: replies ?? null,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
   };
 }
 
+/**
+ * Mention spans, or an empty list.
+ *
+ * ⚠️ Rendering reads these SPANS, never a regex over the body. A regex cannot tell
+ * an @-mention from an email address or a literal @ in prose, and it cannot resolve
+ * which account was meant — and our mirrored replies would reach other partner apps
+ * as plain text they render as ordinary prose.
+ */
+function parseMentions(raw: string | null): Mention[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(0, MAX_MENTIONS) : [];
+  } catch {
+    // Stored JSON that will not parse is a bug, but a comment that will not RENDER
+    // because of its mention metadata is a worse one.
+    return [];
+  }
+}
+
 const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.author_id, c.body,
        c.reaction, c.visibility, c.spoiler, c.lang, c.media_kind, c.media_provider,
        c.media_id, c.media_url, c.media_w, c.media_h, c.hidden_at, c.deleted_at,
+       c.parent_id, c.in_reply_to_id, c.root_id, c.depth, c.reply_count, c.mentions_json,
        c.created_at, c.updated_at,
        p.display_name, p.avatar_id, p.border_id, p.picture_url,
        u.premiere_until, u.premiere_comp_until, u.picture_animated`;
@@ -330,6 +429,16 @@ const SELECT_COLUMNS = `c.id, c.tmdb_id, c.media_type, c.season, c.episode, c.au
  * matching the list.
  */
 const RENDERABLE = `c.hidden_at IS NULL AND c.deleted_at IS NULL AND (c.body <> '' OR c.media_id IS NOT NULL)`;
+
+/**
+ * The list endpoints return **top-level comments only**; replies arrive through
+ * `handleGetReplies` on expand, or in the inline preview carried on the parent.
+ *
+ * ⚠️ Without this a thread's replies would appear as separate rows in the main
+ * list, in `created_at` order, detached from what they answer — and the page limit
+ * of 20 would be spent on them.
+ */
+const TOP_LEVEL = `c.parent_id IS NULL`;
 
 // ── The friend feed ─────────────────────────────────────────────────────────
 
@@ -611,7 +720,7 @@ export async function loadPublicComments(env: CommentsEnv, s: Subject, lang: str
        FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
                        LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
-        AND c.visibility = 'public' AND c.created_at < ? AND ${RENDERABLE}${langFilter}
+        AND c.visibility = 'public' AND c.created_at < ? AND ${RENDERABLE} AND ${TOP_LEVEL}${langFilter}
       ORDER BY c.created_at DESC
       LIMIT ?`,
   )
@@ -619,6 +728,69 @@ export async function loadPublicComments(env: CommentsEnv, s: Subject, lang: str
     .all<CommentRow>();
 
   return results ?? [];
+}
+
+/**
+ * The first [INLINE_REPLY_PREVIEW] replies for each of [parentIds], keyed by parent.
+ *
+ * ⚠️ **One query for the whole page, never one per parent.** A per-parent query
+ * would put 20 subrequests into a read that already spends several, against a
+ * 50-subrequest budget — the same arithmetic that caps `PAGE_LIMIT`. A window
+ * function does it in one: rank each parent's replies by age and keep the first
+ * few.
+ *
+ * Empty in, empty out, and no query at all — a signed-out read of a subject with
+ * no threads must not pay for this.
+ */
+async function loadInlineReplies(
+  env: CommentsEnv,
+  parentIds: string[],
+): Promise<Record<string, CommentRow[]>> {
+  const out: Record<string, CommentRow[]> = {};
+  if (parentIds.length === 0) return out;
+
+  const placeholders = parentIds.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM (
+       SELECT ${SELECT_COLUMNS},
+              ROW_NUMBER() OVER (PARTITION BY c.parent_id ORDER BY c.created_at ASC) AS rn
+         FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
+                         LEFT JOIN users u ON u.id = c.author_id
+        WHERE c.parent_id IN (${placeholders}) AND ${RENDERABLE}
+     ) WHERE rn <= ?`,
+  )
+    .bind(...parentIds, INLINE_REPLY_PREVIEW)
+    .all<CommentRow>();
+
+  for (const r of results ?? []) {
+    if (r.parent_id == null) continue;
+    (out[r.parent_id] ??= []).push(r);
+  }
+  return out;
+}
+
+/**
+ * Attach the inline reply preview to a page of top-level rows.
+ *
+ * Only rows that actually report replies are asked for — `reply_count` is a
+ * maintained column, so this is free and skips the query entirely for the common
+ * case of a page with no threads on it.
+ */
+async function withInlineReplies(
+  env: CommentsEnv,
+  rows: CommentRow[],
+  counts: Record<string, Record<string, number>>,
+): Promise<Array<ReturnType<typeof toWire>>> {
+  const threaded = rows.filter((r) => (r.reply_count ?? 0) > 0).map((r) => r.id);
+  const inline = await loadInlineReplies(env, threaded);
+  return rows.map((r) =>
+    toWire(
+      r,
+      counts[r.id],
+      undefined,
+      inline[r.id]?.map((reply) => toWire(reply, counts[reply.id])),
+    ),
+  );
 }
 
 /**
@@ -639,7 +811,7 @@ async function languageBreakdown(env: CommentsEnv, s: Subject): Promise<Array<{ 
     `SELECT c.lang AS lang, COUNT(*) AS n
        FROM comments c
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
-        AND c.visibility = 'public' AND ${RENDERABLE} AND c.lang IS NOT NULL
+        AND c.visibility = 'public' AND ${RENDERABLE} AND ${TOP_LEVEL} AND c.lang IS NOT NULL
       GROUP BY c.lang
       ORDER BY n DESC
       LIMIT ?`,
@@ -687,9 +859,24 @@ export async function handleGetComments(req: Request, env: CommentsEnv, s: Subje
   // Automatic, not opt-in. Cached per comment in D1 and keyed on `src_updated_at`, so
   // the cost is paid once per comment per language across every reader — and the
   // response stays per-LANGUAGE rather than per-reader, so it still edge-caches.
-  const translations = lang ? await translateRows(env, rows, lang, ctx) : {};
+  const threaded = rows.filter((r) => (r.reply_count ?? 0) > 0).map((r) => r.id);
+  const inline = await loadInlineReplies(env, threaded);
+  const inlineRows = Object.values(inline).flat();
+  const replyCounts = await loadReactionCounts(env, inlineRows.map((r) => r.id));
+  // ⚠️ Replies are translated exactly like top-level comments — decided, not an
+  // oversight. They go through the SAME `translateRows` call as the page they ride
+  // on, so the subrequest budget sees one batch, not two, and the per-comment D1
+  // cache means steady-state spend is proportional to NEW replies, not to reads.
+  const translations = lang ? await translateRows(env, [...rows, ...inlineRows], lang, ctx) : {};
   const res = json({
-    comments: rows.map((r) => toWire(r, counts[r.id], translations[r.id])),
+    comments: rows.map((r) =>
+      toWire(
+        r,
+        counts[r.id],
+        translations[r.id],
+        inline[r.id]?.map((reply) => toWire(reply, replyCounts[reply.id], translations[reply.id])),
+      ),
+    ),
     languages: await languageBreakdown(env, s),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
@@ -747,7 +934,7 @@ export async function handleGetFriendComments(
                        LEFT JOIN users u ON u.id = c.author_id
       WHERE c.tmdb_id = ? AND c.media_type = ? AND c.season = ? AND c.episode = ?
         AND c.visibility = 'friends' AND c.author_id IN (${placeholders})
-        AND c.created_at < ? AND ${RENDERABLE}
+        AND c.created_at < ? AND ${RENDERABLE} AND ${TOP_LEVEL}
       ORDER BY c.created_at DESC
       LIMIT ?`,
   )
@@ -757,9 +944,80 @@ export async function handleGetFriendComments(
   const rows = results ?? [];
   const counts = await loadReactionCounts(env, rows.map((r) => r.id));
   return json({
-    comments: rows.map((r) => toWire(r, counts[r.id])),
+    comments: await withInlineReplies(env, rows, counts),
     myReactions: await loadMyReactions(env, s, session.userId),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
+  });
+}
+
+/**
+ * One page of replies under a parent, oldest first.
+ *
+ * ⚠️ **Fetched lazily, on expand only — never while rendering a list.** This is
+ * the one genuinely new per-user-action invocation replies add, and it applies to
+ * native comments as much as archive ones. The inline preview on the parent is what
+ * keeps it from firing for the short threads that are the majority.
+ *
+ * Oldest first, unlike the top-level list: a thread reads in the order it was
+ * written. The cursor is therefore a `created_at` FLOOR, not a ceiling.
+ *
+ * ⚠️ **A hidden or deleted parent returns nothing.** Moderation must not be
+ * escapable by addressing the subtree directly — hiding a parent that still has
+ * replies would otherwise leave every reply readable through this route.
+ */
+export async function handleGetReplies(
+  parentId: string,
+  req: Request,
+  env: CommentsEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  if (!COMMENT_ID_RE.test(parentId)) return json({ error: "invalid_payload" }, 400);
+
+  const url = new URL(req.url);
+  const cursor = Number(url.searchParams.get("cursor")) || 0;
+  const lang = (url.searchParams.get("lang") ?? "").slice(0, MAX_LANG);
+
+  const parent = await env.DB.prepare(
+    `SELECT id, author_id, visibility, hidden_at, deleted_at FROM comments WHERE id = ?`,
+  )
+    .bind(parentId)
+    .first<{
+      id: string;
+      author_id: string;
+      visibility: string;
+      hidden_at: number | null;
+      deleted_at: number | null;
+    }>();
+  if (!parent) return notFound();
+  if (parent.hidden_at != null || parent.deleted_at != null) return notFound();
+
+  // A friends-only thread is readable by exactly the people who may read its
+  // parent, so the check is the parent's, not a second rule. `mayReadComment`
+  // already handles blocks bidirectionally and the author's own view.
+  if (parent.visibility !== "public") {
+    const session = await resolveSession(req, env as any, ctx);
+    if (!session) return json({ error: "unauthorized" }, 401);
+    const allowed = await mayReadComment(env, session.userId, parent as CommentRow);
+    if (!allowed) return notFound();
+  }
+
+  const { results } = await env.DB.prepare(
+    `SELECT ${SELECT_COLUMNS}
+       FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
+                       LEFT JOIN users u ON u.id = c.author_id
+      WHERE c.parent_id = ? AND c.created_at > ? AND ${RENDERABLE}
+      ORDER BY c.created_at ASC
+      LIMIT ?`,
+  )
+    .bind(parentId, cursor, REPLY_PAGE_LIMIT)
+    .all<CommentRow>();
+
+  const rows = results ?? [];
+  const counts = await loadReactionCounts(env, rows.map((r) => r.id));
+  const translations = lang ? await translateRows(env, rows, lang, ctx) : {};
+  return json({
+    comments: rows.map((r) => toWire(r, counts[r.id], translations[r.id])),
+    cursor: rows.length === REPLY_PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
   });
 }
 
@@ -1004,6 +1262,31 @@ interface MediaInput {
 }
 
 /** One media item per comment, or none. Any malformed part drops the whole item. */
+/**
+ * Validate client-supplied mention spans.
+ *
+ * Capped at [MAX_MENTIONS] and shape-checked rather than trusted: the spans index
+ * into the body and are rendered as substring replacements, so a bad `start`/`end`
+ * is a rendering bug on every client that reads them — ours and, once mirrored,
+ * every other partner app's.
+ */
+function parseMentionsInput(raw: unknown): Mention[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Mention[] = [];
+  for (const m of raw.slice(0, MAX_MENTIONS)) {
+    if (!m || typeof m !== "object") continue;
+    const o = m as Record<string, unknown>;
+    const authorId = typeof o.authorId === "string" ? o.authorId : "";
+    const start = Number(o.start);
+    const end = Number(o.end);
+    const text = typeof o.text === "string" ? o.text.slice(0, MAX_BODY) : "";
+    if (!USER_ID_RE.test(authorId)) continue;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start) continue;
+    out.push({ authorId, start, end, text });
+  }
+  return out;
+}
+
 function parseMedia(raw: unknown): MediaInput {
   const none: MediaInput = { kind: null, provider: null, id: null, url: null, w: null, h: null };
   if (!raw || typeof raw !== "object") return none;
@@ -1089,6 +1372,14 @@ export async function handlePostComment(
   // A comment with no text, no media and no media reaction is not a comment.
   if (!body && !media.id && !reaction) return json({ error: "invalid_payload" }, 400);
 
+  // Thread placement. Absent ⇒ a top-level comment, which is every comment written
+  // before 0044 and most written after it.
+  const parentIdRaw = typeof payload.parentId === "string" ? payload.parentId : "";
+  const inReplyToRaw = typeof payload.inReplyToId === "string" ? payload.inReplyToId : "";
+  const mentions = parseMentionsInput(payload.mentions);
+  if (parentIdRaw && !COMMENT_ID_RE.test(parentIdRaw)) return json({ error: "invalid_payload" }, 400);
+  if (inReplyToRaw && !COMMENT_ID_RE.test(inReplyToRaw)) return json({ error: "invalid_payload" }, 400);
+
   // ⚠️ **Looked up by ID, not by (author, subject).** A user may now hold many
   // comments on one subject, so the subject no longer identifies a row — and a
   // by-subject lookup would turn every second comment into an edit of the first,
@@ -1135,6 +1426,66 @@ export async function handlePostComment(
     return rateLimitedBody(3600);
   }
 
+  /**
+   * Resolve where this reply actually lands.
+   *
+   * ⚠️ **The flattening is ours to do, not the client's.** Depth is capped at
+   * [MAX_DEPTH]: a reply to a comment already at the cap is stored at the cap under
+   * the SAME `parent_id`, with `in_reply_to_id` naming what the user actually
+   * tapped. Clients post to whatever was tapped and render what comes back, which
+   * is also what the archive does — so one mirror path serves both.
+   */
+  let parentId: string | null = null;
+  let inReplyToId: string | null = null;
+  let rootId: string | null = null;
+  let depth = 0;
+  if (!existing && parentIdRaw) {
+    const target = await env.DB.prepare(
+      `SELECT id, parent_id, root_id, depth, tmdb_id, media_type, season, episode,
+              hidden_at, deleted_at
+         FROM comments WHERE id = ?`,
+    )
+      .bind(parentIdRaw)
+      .first<{
+        id: string;
+        parent_id: string | null;
+        root_id: string | null;
+        depth: number;
+        tmdb_id: number;
+        media_type: string;
+        season: number;
+        episode: number;
+        hidden_at: number | null;
+        deleted_at: number | null;
+      }>();
+    if (!target) return json({ error: "parent_not_found" }, 404);
+    // Replying to something moderated away would resurrect it as a visible thread.
+    if (target.hidden_at != null || target.deleted_at != null) return json({ error: "parent_not_found" }, 404);
+    // A reply belongs to its parent's subject. Accepting a mismatch would put the
+    // reply on a page its parent is not on, where nothing would ever render it.
+    if (
+      target.tmdb_id !== subject.tmdbId ||
+      target.media_type !== subject.mediaType ||
+      target.season !== subject.season ||
+      target.episode !== subject.episode
+    ) {
+      return json({ error: "invalid_payload" }, 400);
+    }
+
+    const targetDepth = target.depth ?? 0;
+    if (targetDepth >= MAX_DEPTH) {
+      // Flattened: same parent as the comment being answered.
+      parentId = target.parent_id;
+      depth = MAX_DEPTH;
+    } else {
+      parentId = target.id;
+      depth = targetDepth + 1;
+    }
+    rootId = target.root_id ?? target.id;
+    // What the user actually answered, which is the target even when flattened.
+    inReplyToId = inReplyToRaw || target.id;
+  }
+
   const now = Date.now();
 
   const statements: D1PreparedStatement[] = [];
@@ -1144,7 +1495,8 @@ export async function handlePostComment(
         `UPDATE comments
             SET body = ?, reaction = ?, visibility = ?, spoiler = ?, lang = ?,
                 media_kind = ?, media_provider = ?, media_id = ?, media_url = ?,
-                media_w = ?, media_h = ?, deleted_at = NULL, updated_at = ?
+                media_w = ?, media_h = ?, mentions_json = ?, deleted_at = NULL,
+                updated_at = ?
           WHERE id = ? AND author_id = ?`,
       ).bind(
         body,
@@ -1158,6 +1510,11 @@ export async function handlePostComment(
         media.url,
         media.w,
         media.h,
+        // ⚠️ Mentions move with the text and nothing else does. An edit must NOT
+        // touch `parent_id` / `depth` / `root_id`: re-parenting a comment that
+        // already has replies would strand the subtree, and the columns are simply
+        // absent from this statement so it cannot happen by accident.
+        mentions.length ? JSON.stringify(mentions) : null,
         now,
         existing.id,
         session.userId,
@@ -1168,8 +1525,10 @@ export async function handlePostComment(
       env.DB.prepare(
         `INSERT INTO comments (id, tmdb_id, media_type, season, episode, author_id, body,
                                reaction, visibility, spoiler, lang, media_kind, media_provider,
-                               media_id, media_url, media_w, media_h, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                               media_id, media_url, media_w, media_h,
+                               parent_id, in_reply_to_id, root_id, depth, mentions_json,
+                               created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         id,
         subject.tmdbId,
@@ -1188,10 +1547,26 @@ export async function handlePostComment(
         media.url,
         media.w,
         media.h,
+        parentId,
+        inReplyToId,
+        // A top-level comment's root is itself, so `root_id` is never null and no
+        // read site needs a COALESCE. Migration 0044 backfills the same way.
+        rootId ?? id,
+        depth,
+        mentions.length ? JSON.stringify(mentions) : null,
         now,
         now,
       ),
     );
+
+    // ⚠️ **Maintained, in the SAME batch as the insert.** A correlated count on
+    // every page read would multiply the cost of the hottest query in the product.
+    // In the batch so a reply and its count can never disagree.
+    if (parentId) {
+      statements.push(
+        env.DB.prepare(`UPDATE comments SET reply_count = reply_count + 1 WHERE id = ?`).bind(parentId),
+      );
+    }
   }
 
   await env.DB.batch(statements);
@@ -1201,10 +1576,25 @@ export async function handlePostComment(
   // "Alex commented" arriving twice about the same comment is indistinguishable from
   // Alex commenting twice.
   if (!existing) {
-    ctx?.waitUntil(notifyFriendsOfComment(env, session.userId, id, subject, notify));
+    // ⚠️ A reply notifies the person answered, NOT the author's whole friend list.
+    // "Alex commented" fanning out for every reply would turn one busy thread into
+    // a notification storm, and the reply is already visible to anyone reading it.
+    const task = parentId
+      ? notifyReply(env, session.userId, id, inReplyToId ?? parentId, subject, notify)
+      : notifyFriendsOfComment(env, session.userId, id, subject, notify);
+    const p = task;
+    if (ctx) ctx.waitUntil(p);
+    else await p;
   }
 
-  return json({ id: existing?.id ?? id, createdAt: existing?.created_at ?? now, updatedAt: now });
+  return json({
+    id: existing?.id ?? id,
+    createdAt: existing?.created_at ?? now,
+    updatedAt: now,
+    parentCommentId: parentId,
+    inReplyToCommentId: inReplyToId,
+    depth,
+  });
 }
 
 /**
@@ -1286,7 +1676,8 @@ export async function handleDeleteComment(
   }
 
   const row = await env.DB.prepare(
-    `SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at, deleted_at, body, media_id
+    `SELECT id, tmdb_id, media_type, season, episode, visibility, hidden_at, deleted_at, body, media_id,
+            parent_id, reply_count
        FROM comments WHERE id = ? AND author_id = ?`,
   )
     .bind(id, session.userId)
@@ -1303,6 +1694,26 @@ export async function handleDeleteComment(
     ),
     env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ?").bind(id),
   ];
+
+  // ⚠️ Deleting a REPLY decrements its parent's maintained count. Without this the
+  // parent advertises replies that no longer render, and the badge stops matching
+  // the thread — the same class of drift the renderable predicate warns about.
+  // Floored at zero so a double-delete can never drive it negative.
+  if (row.parent_id) {
+    statements.push(
+      env.DB
+        .prepare("UPDATE comments SET reply_count = MAX(reply_count - 1, 0) WHERE id = ?")
+        .bind(row.parent_id),
+    );
+  }
+
+  // ⚠️ A deleted PARENT is a tombstone, never a cascade. Its replies are other
+  // people's words and deleting them would be deleting content their authors never
+  // asked to remove — so the row survives (`deleted_at`, not DELETE) and the reads
+  // render the minimal tombstone the archive uses: no old text, no media, no author
+  // actions. `reply_count` is deliberately left alone; it is what tells the client
+  // to draw a tombstone rather than omit the row entirely.
+
   await env.DB.batch(statements);
   return noContent();
 }
@@ -1411,6 +1822,67 @@ export async function handleReactToComment(
  * two reactions landing together would both see a stale timestamp and both notify.
  * `meta.changes === 0` means another request won the race, and this one stays quiet.
  */
+/**
+ * Tell the person who was answered that someone replied.
+ *
+ * ⚠️ **Reuses the reaction machinery deliberately, never a fresh mechanism**: the
+ * 15-minute cooldown, and above all the **conditional UPDATE** that claims
+ * `last_notified_at` — read-then-write would let two concurrent replies both see a
+ * stale timestamp and both notify. `meta.changes` is the claim; losing it means
+ * another request already sent one.
+ *
+ * The target is `in_reply_to_id` — who the user actually answered — not
+ * `parent_id`, which is merely where the row is placed. On a flattened depth-2
+ * reply those differ, and notifying the thread's parent instead of the person
+ * addressed is the whole reason both columns exist.
+ *
+ * Never to yourself, and never across a block, exactly as reactions.
+ */
+async function notifyReply(
+  env: CommentsEnv,
+  authorId: string,
+  replyId: string,
+  targetCommentId: string,
+  s: Subject,
+  notify?: CommentNotifier,
+): Promise<void> {
+  if (!notify) return;
+
+  const target = await env.DB.prepare(
+    `SELECT id, author_id, last_notified_at FROM comments WHERE id = ?`,
+  )
+    .bind(targetCommentId)
+    .first<{ id: string; author_id: string; last_notified_at: number }>();
+  if (!target) return;
+  if (target.author_id === authorId) return;
+  if (await isBlockedEitherWay(env as any, authorId, target.author_id)) return;
+
+  const now = Date.now();
+  const claimed = await env.DB.prepare(
+    "UPDATE comments SET last_notified_at = ? WHERE id = ? AND last_notified_at < ?",
+  )
+    .bind(now, target.id, now - REACTION_NOTIFY_COOLDOWN_MS)
+    .run();
+  if (!claimed.meta?.changes) return;
+
+  const profile = await env.DB.prepare("SELECT display_name FROM profiles WHERE user_id = ?")
+    .bind(authorId)
+    .first<{ display_name: string | null }>();
+
+  notify(target.author_id, {
+    kind: "comment_reply",
+    commentId: replyId,
+    parentCommentId: target.id,
+    // The client cannot render "Alex replied" from an opaque id, and making the
+    // recipient look it up would turn one push into a second request.
+    authorName: profile?.display_name ?? "",
+    tmdbId: String(s.tmdbId),
+    mediaType: s.mediaType,
+    season: String(s.season),
+    episode: String(s.episode),
+  });
+}
+
 async function notifyReaction(
   env: CommentsEnv,
   comment: CommentRow,
