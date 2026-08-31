@@ -144,6 +144,23 @@ export async function loadArchivePage(
     { actor },
   );
 
+  // ⚠️ Log EVERY outcome, not just the ones carrying RateLimit headers.
+  //
+  // A 404 has no such header, so the original logging was silent on exactly the case
+  // that matters — and "no log line" was indistinguishable from "the read never ran".
+  // That ambiguity cost a full debugging cycle: an empty archive, a malformed request
+  // and a scope error all present as a blank section.
+  console.log(
+    JSON.stringify({
+      msg: "commsuni archive read",
+      ref: path,
+      ok: res.ok,
+      status: res.status ?? null,
+      code: res.code ?? null,
+      comments: Array.isArray(res.data?.comments) ? res.data!.comments!.length : null,
+    }),
+  );
+
   if (!res.ok) {
     // 404 not_archived / not_found is an EMPTY STATE, not a failure: nothing was ever
     // captured for this entity. Cache it so the long tail stops costing anything.
