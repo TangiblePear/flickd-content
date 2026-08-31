@@ -22,32 +22,51 @@ export interface EntitiesEnv {
 export type MediaType = "movie" | "show";
 
 /**
- * Build the archive's reference for a subject.
+ * Build the archive's reference for a subject: **an entity TYPE and an entity ID**.
  *
- * The four shapes, copied from the partner guide:
- *   show     → `tvdb-{id}`
- *   season   → `tvdb-{id}-s{n}`
- *   episode  → `tvdb-{id}-s{n}e{m}`
- *   movie    → `movie/tvdb-{id}`
+ * ⚠️ These are two separate path segments — `/v1/entities/{entityType}/{entityId}/…` —
+ * not one string. Getting this wrong is silent: a request to
+ * `/v1/entities/tvdb-121361/comments` answers **404 not_archived**, which is
+ * indistinguishable from "this title genuinely has no conversation". Four of the
+ * biggest shows on television came back empty before the missing segment was spotted,
+ * and the negative cache dutifully remembered every one of them.
  *
- * ⚠️ `season`/`episode` are the **-1 sentinels** the rest of the comment stack uses, never
- * null — see `comments.ts`. -1 means "this level does not apply", so a title-level show
- * reference is `tvdb-{id}` with no suffix, and a movie can never carry one at all.
+ *   show    → `show`    + `tvdb-{id}`
+ *   season  → `season`  + `tvdb-{id}-s{n}`
+ *   episode → `episode` + `tvdb-{id}-s{n}e{m}`
+ *   movie   → `movie`   + `tvdb-{id}`
+ *
+ * The type is what disambiguates: `season/tvdb-X-s1e1` and `episode/tvdb-X-s1` are both
+ * errors rather than being silently coerced, so the pair has to be built together.
+ *
+ * ⚠️ `season`/`episode` are the **-1 sentinels** the rest of the comment stack uses,
+ * never null — see `comments.ts`. -1 means "this level does not apply".
  */
-export function entityReference(mediaType: MediaType, tvdbId: number, season = -1, episode = -1): string | null {
+export interface EntityRef {
+  type: "show" | "season" | "episode" | "movie";
+  id: string;
+}
+
+export function entityReference(
+  mediaType: MediaType,
+  tvdbId: number,
+  season = -1,
+  episode = -1,
+): EntityRef | null {
   if (!Number.isInteger(tvdbId) || tvdbId <= 0) return null;
 
-  if (mediaType === "movie") {
-    // ⚠️ Movies are namespaced. A bare `tvdb-{id}` is a SERIES reference, and TheTVDB's
-    // series and movie id spaces overlap numerically — so dropping the prefix silently
-    // addresses an unrelated show's conversation rather than failing.
-    return `movie/tvdb-${tvdbId}`;
-  }
+  // A movie's ID is a plain `tvdb-{n}`, exactly like a show's — the `movie` TYPE is
+  // what separates them. TheTVDB's series and movie id spaces overlap numerically, so
+  // sending the wrong type addresses an unrelated title rather than failing.
+  if (mediaType === "movie") return { type: "movie", id: `tvdb-${tvdbId}` };
 
-  if (season < 0) return `tvdb-${tvdbId}`;
-  if (episode < 0) return `tvdb-${tvdbId}-s${season}`;
-  return `tvdb-${tvdbId}-s${season}e${episode}`;
+  if (season < 0) return { type: "show", id: `tvdb-${tvdbId}` };
+  if (episode < 0) return { type: "season", id: `tvdb-${tvdbId}-s${season}` };
+  return { type: "episode", id: `tvdb-${tvdbId}-s${season}e${episode}` };
 }
+
+/** `show/tvdb-121361` — the path fragment, and the negative cache's key. */
+export const refPath = (ref: EntityRef): string => `${ref.type}/${ref.id}`;
 
 /**
  * The cached TVDB id for a TMDB title, or null.
@@ -107,7 +126,7 @@ export async function resolveReference(
   season: number,
   episode: number,
   clientTvdbId?: number | null,
-): Promise<string | null> {
+): Promise<EntityRef | null> {
   let tvdbId = clientTvdbId ?? null;
   if (tvdbId != null && Number.isInteger(tvdbId) && tvdbId > 0) {
     await rememberTvdbId(env, mediaType, tmdbId, tvdbId);

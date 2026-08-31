@@ -230,12 +230,12 @@ describe("negative cache — the biggest cost lever", () => {
     stubFetch(ok([{ slug: "tvtime", status: "active" }]), err(404, "not_archived"));
     const e = env();
     expect(await load(e)).toBeNull();
-    expect(e.DB.misses.map((m: any) => m.entity_ref)).toEqual(["tvdb-121361-s2e5"]);
+    expect(e.DB.misses.map((m: any) => m.entity_ref)).toEqual(["episode/tvdb-121361-s2e5"]);
   });
 
   it("⚠️ a cached miss SKIPS the upstream call entirely, not merely renders empty", async () => {
     const e = env();
-    e.DB.misses.push({ entity_ref: "tvdb-121361-s2e5", expires_at: Date.now() + 60_000 });
+    e.DB.misses.push({ entity_ref: "episode/tvdb-121361-s2e5", expires_at: Date.now() + 60_000 });
     stubFetch(ok([{ slug: "tvtime", status: "active" }]));
 
     expect(await load(e)).toBeNull();
@@ -246,7 +246,7 @@ describe("negative cache — the biggest cost lever", () => {
 
   it("an EXPIRED miss does not suppress the read", async () => {
     const e = env();
-    e.DB.misses.push({ entity_ref: "tvdb-121361-s2e5", expires_at: Date.now() - 1 });
+    e.DB.misses.push({ entity_ref: "episode/tvdb-121361-s2e5", expires_at: Date.now() - 1 });
     stubFetch(ok([{ slug: "tvtime", status: "active" }]), ok({ comments: [{ id: "x" }] }));
     const page = await load(e);
     expect(page?.comments).toHaveLength(1);
@@ -254,8 +254,8 @@ describe("negative cache — the biggest cost lever", () => {
 
   it("clearMiss reopens a reference, for the moment one of our users writes there", async () => {
     const e = env();
-    e.DB.misses.push({ entity_ref: "tvdb-121361-s2e5", expires_at: Date.now() + 60_000 });
-    await clearMiss(e, "tvdb-121361-s2e5");
+    e.DB.misses.push({ entity_ref: "episode/tvdb-121361-s2e5", expires_at: Date.now() + 60_000 });
+    await clearMiss(e, "episode/tvdb-121361-s2e5");
     expect(e.DB.misses).toHaveLength(0);
   });
 
@@ -271,6 +271,9 @@ describe("negative cache — the biggest cost lever", () => {
     await load(env());
     const read = calls[calls.length - 1];
     expect((read.init.headers as any)["X-TVTA-Actor-ID"]).toMatch(/^[0-9a-f]{64}$/);
+    // ⚠️ BOTH path segments. `/entities/tvdb-…/comments` — with the type omitted —
+    // answers 404 not_archived, which reads exactly like an unarchived title.
+    expect(read.url).toContain("/entities/episode/tvdb-121361-s2e5/comments");
     // …and the source filter excludes us.
     expect(read.url).toContain("source=tvtime");
     expect(read.url).not.toContain("flickto");

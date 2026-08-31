@@ -15,7 +15,7 @@ import {
   type CommsuniEnv,
   type CommsuniSource,
 } from "./commsuni";
-import { resolveReference, type MediaType } from "./commsuniEntities";
+import { refPath, resolveReference, type MediaType } from "./commsuniEntities";
 
 /** How long a "nothing archived here" answer is trusted. */
 const MISS_TTL_MS = 6 * 60 * 60 * 1000;
@@ -118,8 +118,10 @@ export async function loadArchivePage(
 
   const ref = await resolveReference(env, mediaType, tmdbId, season, episode, clientTvdbId);
   if (!ref) return null;
+  // `show/tvdb-121361` — both segments. The type is not optional; omitting it 404s.
+  const path = refPath(ref);
 
-  if (await isKnownMiss(env, ref)) return null;
+  if (await isKnownMiss(env, path)) return null;
 
   // ⚠️ No slug list ⇒ do NOT fetch. Unfiltered means our own mirrored comments come
   // back and render twice beside the native rows they duplicate.
@@ -136,7 +138,9 @@ export async function loadArchivePage(
 
   const res = await commsuniCall<{ comments?: unknown[]; cursor?: string | null; complete?: boolean }>(
     env,
-    `/entities/${encodeURIComponent(ref)}/comments?${params.toString()}`,
+    // ⚠️ Both segments, each encoded separately — encoding the joined path would turn
+    // the `/` between type and id into `%2F` and 404 just as surely as omitting it.
+    `/entities/${encodeURIComponent(ref.type)}/${encodeURIComponent(ref.id)}/comments?${params.toString()}`,
     { actor },
   );
 
@@ -144,7 +148,7 @@ export async function loadArchivePage(
     // 404 not_archived / not_found is an EMPTY STATE, not a failure: nothing was ever
     // captured for this entity. Cache it so the long tail stops costing anything.
     if (res.status === 404 || res.code === "not_archived" || res.code === "not_found") {
-      await rememberMiss(env, ref);
+      await rememberMiss(env, path);
     }
     return null;
   }
