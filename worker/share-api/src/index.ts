@@ -124,6 +124,7 @@ import {
   loadArchiveReplies,
   removeArchiveBlock,
 } from "./commsuniComments";
+import { identityChoice, setIdentityChoice } from "./commsuniMirror";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
@@ -792,6 +793,33 @@ export default {
      * one block store per person. The client routes by source; this route does not
      * accept our own slug.
      */
+    /**
+     * How this account appears to other apps.
+     *
+     * `shares: null` means never asked, which is what the client needs to know whether
+     * to show the one-time prompt — distinct from `false`, which means asked and
+     * declined and must not be asked again.
+     */
+    if (p === "/api/archive/identity" && req.method === "GET") {
+      const session = await resolveSession(req, env as any, ctx);
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+      return json({ shares: await identityChoice(env as any, session.userId) });
+    }
+
+    if (p === "/api/archive/identity" && req.method === "PUT") {
+      const session = await resolveSession(req, env as any, ctx);
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+      const body = (await req.json().catch(() => null)) as { shares?: unknown } | null;
+      // ⚠️ Strict boolean. A missing or malformed field must not read as consent —
+      // `!!body?.shares` would turn the string "false", and any truthy junk, into an
+      // opt-in to publishing this person's name in other apps.
+      if (typeof body?.shares !== "boolean") {
+        return json({ error: "shares_required" }, { status: 400 });
+      }
+      await setIdentityChoice(env as any, session.userId, body.shares);
+      return json({ shares: body.shares });
+    }
+
     if (p === "/api/archive/blocks" && req.method === "GET") {
       const session = await resolveSession(req, env as any, ctx);
       if (!session) return json({ error: "unauthorized" }, { status: 401 });

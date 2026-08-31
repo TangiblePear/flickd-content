@@ -300,6 +300,77 @@ async function publishReport(env: MirrorEnv, row: OutboxRow): Promise<boolean> {
   return res.ok || !retryable(res);
 }
 
+// ── Author identity (opt-in) ────────────────────────────────────────────────
+
+/**
+ * How this account appears to other apps.
+ *
+ * `null` = never asked. ⚠️ Deliberately distinct from `false`, and the distinction is
+ * the whole point: "has not decided" must still publish anonymously, but it must also
+ * still be ASKED, whereas "declined" must never be asked again. Collapsing the two
+ * would either re-prompt someone who already said no, or silently treat silence as
+ * consent — and only one of those is merely annoying.
+ */
+export async function identityChoice(env: MirrorEnv, userId: string): Promise<boolean | null> {
+  const row = await env.DB
+    .prepare("SELECT shares FROM archive_identity WHERE user_id = ?")
+    .bind(userId)
+    .first<{ shares: number }>()
+    .catch(() => null);
+  return row ? row.shares === 1 : null;
+}
+
+/**
+ * Record the choice, and make it true upstream.
+ *
+ * ⚠️ The local row is written FIRST and the upstream call is best-effort. If the order
+ * were reversed a failed write would leave the user opted in upstream while we believe
+ * they are anonymous — and we would then never re-send it, because nothing would know
+ * the state disagreed. Recording intent first means the worst case is a retry away.
+ *
+ * Opting OUT clears the overlay upstream. Past comments KEEP the same author id and
+ * fall back to the generated persona; they are not deleted, and this is not a way to
+ * retract what was already published under a name. Deleting the comments is.
+ */
+export async function setIdentityChoice(
+  env: MirrorEnv,
+  userId: string,
+  shares: boolean,
+): Promise<void> {
+  await env.DB
+    .prepare(
+      `INSERT INTO archive_identity (user_id, shares, decided_at) VALUES (?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET shares = excluded.shares, decided_at = excluded.decided_at`,
+    )
+    .bind(userId, shares ? 1 : 0, Date.now())
+    .run();
+
+  const actor = await actorId(env, userId);
+  if (!actor) return;
+
+  if (!shares) {
+    await commsuniCall(env, "/authors/me/profile", { method: "DELETE", actor }).catch(() => {});
+    return;
+  }
+
+  const profile = await env.DB
+    .prepare("SELECT display_name, picture_url FROM profiles WHERE user_id = ?")
+    .bind(userId)
+    .first<{ display_name: string | null; picture_url: string | null }>()
+    .catch(() => null);
+
+  // ⚠️ A blank display name is not an identity. Sending one would replace a readable
+  // generated persona with nothing at all, which is worse than staying anonymous.
+  const name = (profile?.display_name ?? "").trim();
+  if (!name) return;
+
+  await commsuniCall(env, "/authors/me/profile", {
+    method: "PUT",
+    actor,
+    body: { displayName: name, avatarUrl: profile?.picture_url || null },
+  }).catch(() => {});
+}
+
 /**
  * Queue a freshly posted or edited comment for mirroring.
  *

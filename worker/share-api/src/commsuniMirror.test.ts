@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { DRAIN_LIMIT, mayMirror, mirrorEnabled, mirrorKey } from "./commsuniMirror";
+import { DRAIN_LIMIT, identityChoice, mayMirror, mirrorEnabled, mirrorKey } from "./commsuniMirror";
 
 /**
  * The write mirror is the only code here that makes a user's words leave our systems.
@@ -96,5 +96,27 @@ describe("the drain bound", () => {
     // and take down whatever request happened to trigger it.
     expect(DRAIN_LIMIT).toBe(5);
     expect(DRAIN_LIMIT).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("author identity", () => {
+  const envWith = (row: unknown) =>
+    ({
+      DB: { prepare: () => ({ bind: () => ({ first: async () => row }) }) },
+    }) as any;
+
+  it("⚠️ returns null for never-asked, NOT false", async () => {
+    // The distinction carries the whole feature. Both publish anonymously, but
+    // "never asked" must still be prompted and "declined" must never be prompted
+    // again. Collapsing them either nags someone who said no, or lets silence pass
+    // for consent to putting their name in other apps.
+    expect(await identityChoice(envWith(null), "u1")).toBe(null);
+    expect(await identityChoice(envWith({ shares: 0 }), "u1")).toBe(false);
+    expect(await identityChoice(envWith({ shares: 1 }), "u1")).toBe(true);
+  });
+
+  it("treats a database failure as never-asked rather than as consent", async () => {
+    const env = { DB: { prepare: () => ({ bind: () => ({ first: async () => { throw new Error("d1 down"); } }) }) } } as any;
+    expect(await identityChoice(env, "u1")).toBe(null);
   });
 });
