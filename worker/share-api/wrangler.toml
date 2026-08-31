@@ -388,7 +388,7 @@ COMMSUNI_SLUG = "flickto"
 #
 # Turning it back off stops publishing but NOT retraction: deletes and reports keep
 # draining, because rows published while it was on must stay retractable afterwards.
-COMMSUNI_MIRROR = "0"
+COMMSUNI_MIRROR = "1"
 # Rate-limit strikes within one hour that trigger an automatic posting suspension,
 # and how long that suspension lasts (default 24h). A limiter only refuses the
 # current request; a script retries at one request per window forever, so without
