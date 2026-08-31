@@ -16,7 +16,7 @@ import {
   __resetBreaker,
   __resetSources,
 } from "./commsuni";
-import { clearMiss, loadArchivePage } from "./commsuniComments";
+import { clearMiss, loadArchivePage, platformSources } from "./commsuniComments";
 
 const KEY = "tvta_live_abc_secret";
 
@@ -405,5 +405,26 @@ describe("cross-app blocking", () => {
       ok({ comments: [{ id: "a", origin: { slug: "tvtime" }, userId: "author-1" }] }),
     );
     expect((await load(e))!.comments).toHaveLength(1);
+  });
+});
+
+describe("platformSources", () => {
+  const row = (slug: string) => ({ slug, displayName: slug, kind: "app", status: "active" }) as any;
+
+  it("takes the first two catalog rows, which §9 fixes as the platform entries", () => {
+    const out = platformSources([row("tvtime"), row("commsunitv"), row("flickto"), row("other")]);
+    expect(out.map((s: any) => s.slug)).toEqual(["tvtime", "commsunitv"]);
+  });
+
+  it("⚠️ yields nothing when commsunitv is not among them, rather than the wrong brand", () => {
+    // Position alone is not identity. If the catalog is ever reordered, a banner built
+    // on slice(0,2) would attribute the archive to whichever partner sorted first —
+    // showing someone else's mark under "Comments by commsuni.tv".
+    expect(platformSources([row("flickto"), row("tvtime"), row("commsunitv")])).toEqual([]);
+  });
+
+  it("yields nothing when the catalog is unavailable", () => {
+    // A half-built banner reads as broken; no banner waits for the next request.
+    expect(platformSources([])).toEqual([]);
   });
 });

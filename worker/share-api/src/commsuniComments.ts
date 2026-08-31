@@ -57,6 +57,34 @@ export interface ArchivePage {
    * growing, and a page typically carries two or three.
    */
   sources: CommsuniSource[];
+  /**
+   * The two platform rows, for the mandatory attribution banner.
+   *
+   * ⚠️ Sent SEPARATELY from [sources] rather than by widening it, because they answer
+   * different questions. `sources` is "who wrote on this page" and is correctly empty
+   * when nothing here is foreign; the banner must appear on **any** commsuni-backed
+   * surface whether or not a partner happens to have commented on this title, so a
+   * banner built from `sources` would vanish exactly where attribution is still owed.
+   *
+   * §9 fixes the identity: the catalog is ordered by `source_id`, and rows 1 and 2 are
+   * TV Community Archive and `commsunitv`. Order is preserved from upstream, and the
+   * slug check below is the belt to that braces — position alone would silently attribute
+   * the wrong brand if the catalog were ever reordered.
+   */
+  platforms: CommsuniSource[];
+}
+
+/**
+ * The two platform catalog entries, in `source_id` order.
+ *
+ * Returns [] when the catalog is unavailable or does not contain `commsunitv`, and the
+ * client then renders no banner rather than a half-built one — a banner missing an icon
+ * looks broken, and attribution that shows the wrong mark is worse than one that waits
+ * for the next request.
+ */
+export function platformSources(sources: CommsuniSource[]): CommsuniSource[] {
+  const first = sources.slice(0, 2);
+  return first.some((s) => s.slug?.toLowerCase() === "commsunitv") ? first : [];
 }
 
 // ── Negative cache ──────────────────────────────────────────────────────────
@@ -589,5 +617,6 @@ export async function loadArchivePage(
     cursor: res.data?.nextCursor ?? null,
     complete: res.data?.complete ?? comments.length < ARCHIVE_PAGE_LIMIT,
     sources: sources.filter((s) => present.has(s.slug)),
+    platforms: platformSources(sources),
   };
 }
