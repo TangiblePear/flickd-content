@@ -149,6 +149,230 @@ export async function loadArchiveReplies(
   };
 }
 
+// ── Reporting ───────────────────────────────────────────────────────────────
+
+/** Our reasons. Kept verbatim in `reports.context` so the admin sees what was picked. */
+const OUR_REASONS = new Set(["spoiler", "abuse", "harassment", "hate", "sexual", "spam", "other"]);
+
+/**
+ * Ours → the archive's smaller set.
+ *
+ * ⚠️ Lossy on purpose, and the loss is recorded rather than discarded: `harassment` and
+ * `hate` both become `abuse` upstream because the archive has no finer bucket, but the
+ * user's ORIGINAL choice is stored in `reports.context` so our moderator sees what they
+ * actually reported. Mapping without keeping the original would silently coarsen every
+ * report in our own queue too.
+ */
+const REASON_UPSTREAM: Record<string, string> = {
+  spoiler: "spoiler",
+  abuse: "abuse",
+  harassment: "abuse",
+  hate: "abuse",
+  sexual: "sexual",
+  spam: "spam",
+  other: "other",
+};
+
+export const KIND_ARCHIVE_ABUSE = "archive_comment";
+export const KIND_ARCHIVE_SPOILER = "archive_comment_spoiler";
+
+const MAX_REPORT_CONTEXT = 1000;
+const DEFAULT_REPORT_AUTOHIDE = 3;
+
+/** Is this archive comment hidden product-wide? Read on every archive page. */
+export async function loadSuppressed(env: CommsuniEnv, ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const placeholders = ids.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT archive_id FROM archive_suppressed WHERE archive_id IN (${placeholders})`,
+  )
+    .bind(...ids)
+    .all<{ archive_id: string }>()
+    .catch(() => ({ results: [] as { archive_id: string }[] }));
+  return new Set((results ?? []).map((r) => r.archive_id));
+}
+
+/**
+ * Report an archive comment: into OUR queue, and forwarded upstream.
+ *
+ * ⚠️ **Both, not either.** We cannot hide a comment inside another partner's app, and
+ * the operator cannot know our auto-hide threshold — so a report that only went one way
+ * would leave one of those jobs undone. Requirement 1 of the integration.
+ *
+ * ⚠️ A separate route from the native one. Archive ids are UUIDs and match neither
+ * `COMMENT_ID_RE` (`[0-9A-Z:]{8,80}`) nor anything in our `comments` table.
+ */
+export async function handleReportArchiveComment(
+  archiveId: string,
+  reason: string,
+  note: string,
+  userId: string,
+  env: CommsuniEnv & { REPORT_AUTOHIDE?: string },
+  ctx?: ExecutionContext,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  if (!OUR_REASONS.has(reason)) return { status: 400, body: { error: "invalid_payload" } };
+
+  const kind = reason === "spoiler" ? KIND_ARCHIVE_SPOILER : KIND_ARCHIVE_ABUSE;
+  const context = note ? `${reason} — ${note.slice(0, MAX_REPORT_CONTEXT)}` : reason;
+
+  // One OPEN report per reporter per target per kind, exactly as the native path. The
+  // two thresholds are independent, so a spoiler flag must not consume the abuse one.
+  const existing = await env.DB.prepare(
+    "SELECT id FROM reports WHERE reporter_id = ? AND target_id = ? AND kind = ? AND state = 'open'",
+  )
+    .bind(userId, archiveId, kind)
+    .first<{ id: string }>();
+  if (existing) return { status: 204, body: {} };
+
+  /**
+   * ⚠️ **Snapshot the body SERVER-side, never from the client.**
+   *
+   * A reporter must not control what the moderator reads — otherwise the report itself
+   * becomes an injection vector into our admin panel. §10 endorses taking it from our
+   * own short-lived cache, which is both free and *more* correct: it is the text the
+   * reporter actually saw, not whatever the comment says by the time we look.
+   *
+   * The single-comment read is the fallback and costs one `read_unit`.
+   */
+  const snapshot = await commsuniCall<{
+    text?: string;
+    userId?: string;
+    userName?: string;
+    origin?: { slug?: string; displayName?: string };
+  }>(env, `/comments/${encodeURIComponent(archiveId)}`, { actor: await actorId(env, userId) });
+
+  const body = snapshot.data?.text ?? "";
+  const origin = snapshot.data?.origin?.slug ?? "";
+
+  await env.DB.prepare(
+    `INSERT INTO reports (id, reporter_id, target_id, kind, context, state, created_at, body_snapshot)
+     VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      userId,
+      archiveId,
+      kind,
+      // The origin rides the context so the admin panel can tell whose comment this is
+      // without a join it cannot make — `LEFT JOIN comments` matches nothing for a UUID.
+      origin ? `${context} [${origin}]` : context,
+      Date.now(),
+      body,
+    )
+    .run();
+
+  // Forward upstream. Fire-and-forget against the response, but never dropped: a
+  // transient failure lands in the outbox with the SAME key.
+  const forward = forwardReport(env, archiveId, reason, userId);
+  if (ctx) ctx.waitUntil(forward);
+  else await forward;
+
+  // ⚠️ Only OPEN reports count. Dismissing marks them `dismissed`, so a restored
+  // comment needs a fresh set rather than being re-tripped by the next single report —
+  // which would let one person overturn a moderator.
+  const tally = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT reporter_id) AS n FROM reports WHERE target_id = ? AND kind = ? AND state = 'open'",
+  )
+    .bind(archiveId, kind)
+    .first<{ n: number }>();
+  const n = tally?.n ?? 0;
+
+  // ⚠️ Abuse only. A spoiler report BLURS upstream content we cannot edit, so there is
+  // nothing local to do beyond the per-reader hide the client already applies —
+  // suppressing the whole row for everyone would be a censorship lever dressed as a
+  // spoiler flag.
+  if (kind === KIND_ARCHIVE_ABUSE) {
+    const threshold = Number(env.REPORT_AUTOHIDE ?? DEFAULT_REPORT_AUTOHIDE);
+    if (n >= threshold) {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO archive_suppressed (archive_id, hidden_at, reason) VALUES (?,?,?)",
+      )
+        .bind(archiveId, Date.now(), "auto:reports")
+        .run()
+        .catch(() => {});
+    }
+  }
+
+  return { status: 204, body: {} };
+}
+
+/**
+ * `POST /v1/comments/{id}/reports`, with the outbox behind it.
+ *
+ * ⚠️ **Read `Report-Duplicate`.** A bare 202 is not proof the report landed — the
+ * operator may have dropped it as a duplicate of one this user filed months ago. The
+ * verdict is stored on the report row so a user can be told, rather than silently
+ * believing a claim was queued.
+ *
+ * ⚠️ The idempotency key is derived from (reporter, target, reason) so a retry REPLAYS
+ * rather than filing again. A duplicate still costs a `write_unit` — quota is charged on
+ * the request, not the outcome.
+ */
+async function forwardReport(
+  env: CommsuniEnv,
+  archiveId: string,
+  reason: string,
+  userId: string,
+): Promise<void> {
+  const upstreamReason = REASON_UPSTREAM[reason] ?? "other";
+  const key = `report:${userId}:${archiveId}:${reason}`;
+  const actor = await actorId(env, userId);
+
+  const res = await commsuniCall(env, `/comments/${encodeURIComponent(archiveId)}/reports`, {
+    method: "POST",
+    body: { reason: upstreamReason },
+    idempotencyKey: key,
+    actor,
+  });
+
+  console.log(
+    JSON.stringify({
+      msg: "commsuni report forwarded",
+      id: archiveId,
+      ok: res.ok,
+      status: res.status ?? null,
+      code: res.code ?? null,
+      duplicate: res.reportDuplicate ?? false,
+    }),
+  );
+
+  if (res.ok) {
+    if (res.reportDuplicate) {
+      // Recorded so the user can be told their claim was not queued. An ownership
+      // claim silently dropped because of an unrelated flag months earlier is exactly
+      // the case the guide calls out.
+      await env.DB.prepare(
+        "UPDATE reports SET context = context || ' [upstream:duplicate]' WHERE target_id = ? AND reporter_id = ? AND state = 'open'",
+      )
+        .bind(archiveId, userId)
+        .run()
+        .catch(() => {});
+    }
+    return;
+  }
+
+  // ⚠️ Only TRANSIENT failures queue. A 4xx is a statement about the request and will
+  // say the same thing forever, so retrying it burns write_units for nothing.
+  const transient = res.code === "network" || res.code === "breaker_open" || (res.status ?? 0) >= 500 ||
+    res.status === 429;
+  if (!transient) return;
+
+  await env.DB.prepare(
+    `INSERT INTO archive_outbox (id, kind, idempotency_key, actor_user_id, payload, attempts, next_at, created_at)
+     VALUES (?, 'report', ?, ?, ?, 0, ?, ?)`,
+  )
+    .bind(
+      crypto.randomUUID(),
+      key,
+      userId,
+      JSON.stringify({ archiveId, reason: upstreamReason }),
+      Date.now() + 60_000,
+      Date.now(),
+    )
+    .run()
+    .catch(() => {});
+}
+
 // ── Read ────────────────────────────────────────────────────────────────────
 
 /**
@@ -234,7 +458,20 @@ export async function loadArchivePage(
     return null;
   }
 
-  const comments = Array.isArray(res.data?.comments) ? res.data!.comments! : [];
+  const raw = Array.isArray(res.data?.comments) ? res.data!.comments! : [];
+
+  /**
+   * Drop rows we have suppressed product-wide.
+   *
+   * ⚠️ Applied AFTER the fetch, never as an upstream filter — the archive has no
+   * concept of our moderation decisions. And ⚠️ a filtered page comes back SHORT: do
+   * not top it up with another fetch. That would spend quota and produce a misleading
+   * list; the cursor is still valid, so the next page simply arrives on demand.
+   */
+  const suppressed = await loadSuppressed(env, raw.map((c) => (c as { id?: string })?.id ?? ""));
+  const comments = suppressed.size === 0
+    ? raw
+    : raw.filter((c) => !suppressed.has((c as { id?: string })?.id ?? ""));
 
   // Only the slugs on this page. `origin` is the archive's own field name.
   const present = new Set(

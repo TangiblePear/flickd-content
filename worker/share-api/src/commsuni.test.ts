@@ -24,6 +24,8 @@ const KEY = "tvta_live_abc_secret";
 class FakeD1 {
   map: any[] = [];
   misses: any[] = [];
+  /** Archive ids hidden product-wide. Plain strings; see archive_suppressed. */
+  suppressed: string[] = [];
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
   }
@@ -46,6 +48,14 @@ class FakeStmt {
     if (this.sql.startsWith("SELECT expires_at FROM archive_misses")) {
       const r = this.db.misses.find((x) => x.entity_ref === this.a[0]);
       return r ? ({ expires_at: r.expires_at } as T) : null;
+    }
+    throw new Error("unhandled SQL: " + this.sql);
+  }
+  async all<T>(): Promise<{ results: T[] }> {
+    // Product-wide hides. Empty by default: suppression is the exception.
+    if (this.sql.startsWith("SELECT archive_id FROM archive_suppressed")) {
+      const ids = new Set(this.a);
+      return { results: this.db.suppressed.filter((x: any) => ids.has(x)).map((archive_id: any) => ({ archive_id })) as T[] };
     }
     throw new Error("unhandled SQL: " + this.sql);
   }
@@ -287,6 +297,24 @@ describe("negative cache — the biggest cost lever", () => {
     );
     const page = await load(env());
     expect(page?.cursor).toBeNull();
+  });
+
+  it("⚠️ drops a suppressed row, and does NOT top the page back up", async () => {
+    const e = env();
+    e.DB.suppressed.push("bad");
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "good" }, { id: "bad" }, { id: "alsogood" }], nextCursor: "c2" }),
+    );
+    const page = await load(e);
+    // Applied after the fetch — the archive has no concept of our moderation.
+    expect((page!.comments as any[]).map((c) => c.id)).toEqual(["good", "alsogood"]);
+    // ⚠️ A filtered page comes back SHORT and stays short. Topping it up would spend
+    // quota and produce a misleading list; the cursor survives, so the next page
+    // arrives on demand.
+    expect(page!.cursor).toBe("c2");
+    // One sources call + one comments call. No second fetch to backfill.
+    expect(calls).toHaveLength(2);
   });
 
   it("carries the actor header, so the page comes back viewer-aware", async () => {

@@ -117,7 +117,7 @@ import {
   handleReportComment,
   parseSubject,
 } from "./comments";
-import { loadArchiveReplies } from "./commsuniComments";
+import { handleReportArchiveComment, loadArchiveReplies } from "./commsuniComments";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
@@ -776,6 +776,42 @@ export default {
         new URL(req.url).searchParams.get("cursor"),
       );
       return json(page ?? { comments: [], cursor: null, complete: true });
+    }
+
+    /**
+     * Report an archive comment — into OUR queue AND upstream (requirement 1).
+     *
+     * Separate from the native report route: archive ids are UUIDs and match neither
+     * COMMENT_ID_RE nor anything in our comments table.
+     */
+    const archiveReport = p.match(/^\/api\/archive\/comments\/([0-9a-fA-F-]{36})\/report$/);
+    if (archiveReport && req.method === "POST") {
+      const session = await resolveSession(req, env as any, ctx);
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+
+      // ⚠️ Suspension check, same as the native path. Leaving reporting open to a
+      // suspended user makes suspension a promotion: they lose their voice but keep
+      // the censorship lever.
+      const until = await postingSuspendedUntil(env.DB, session.userId);
+      if (until > 0) return json(suspendedBody(until), { status: 403 });
+
+      let payload: Record<string, unknown>;
+      try {
+        payload = (await req.json()) as Record<string, unknown>;
+      } catch {
+        return json({ error: "invalid_json" }, { status: 400 });
+      }
+      const result = await handleReportArchiveComment(
+        archiveReport[1],
+        typeof payload.reason === "string" ? payload.reason : "",
+        typeof payload.context === "string" ? payload.context : "",
+        session.userId,
+        env as any,
+        ctx,
+      );
+      return result.status === 204
+        ? new Response(null, { status: 204, headers: CORS })
+        : json(result.body, { status: result.status });
     }
 
     // Lazy, on expand only — never while rendering a list. The inline preview the

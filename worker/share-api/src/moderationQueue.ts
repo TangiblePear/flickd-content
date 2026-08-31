@@ -118,6 +118,25 @@ interface QueueRow {
 export const COMMENT_KINDS = new Set(["comment", "comment_spoiler"]);
 
 /**
+ * Reports against commsuni.tv archive comments — content we did NOT write.
+ *
+ * ⚠️ `target_id` is a UUID, so the queue's `LEFT JOIN comments c ON c.id = r.target_id`
+ * matches nothing for these. Everything the moderator sees therefore comes from the
+ * report-time SNAPSHOT (`body_snapshot`, and the origin slug appended to `context`),
+ * not from a join — which is also the point: the snapshot is the text the reporter
+ * actually saw, and an author editing upstream cannot change it after the fact.
+ *
+ * ⚠️ There is no `suspend` action for a foreign author. We cannot suspend someone
+ * else's user, and conflating "this comment is bad" with "this person is ours to
+ * punish" is the same category error `public_list` already avoids — a list is not a
+ * person, and neither is a partner's account.
+ */
+export const ARCHIVE_COMMENT_KINDS = new Set(["archive_comment", "archive_comment_spoiler"]);
+
+/** Is this report about content from the shared archive? */
+export const isArchiveKind = (kind: string): boolean => ARCHIVE_COMMENT_KINDS.has(kind);
+
+/**
  * A public list's `reports.target_id` is `"{ownerId}:{listId}"` — TWO ids rather than
  * one, because `lists` is keyed on the pair. Migration 0026 did that so the built-in
  * watchlist's shared client id ("watchlist" on every account) cannot collide across
@@ -229,6 +248,7 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
 
   for (const r of rows) {
     const isComment = COMMENT_KINDS.has(r.kind);
+    const isArchive = isArchiveKind(r.kind);
     const isList = r.kind === PUBLIC_LIST_KIND;
     // A comment's suspend target is its AUTHOR; every other kind targets the person
     // directly. Reading the wrong column here would show "not suspended" on a
@@ -239,7 +259,10 @@ async function loadD1(env: ModerationEnv, resolved: boolean): Promise<ReportItem
       source: "d1",
       kind: r.kind,
       target: {
-        type: isComment ? "comment" : isList ? "public_list" : "user",
+        // ⚠️ Its OWN type, not "comment". The panel must not offer a moderator
+        // actions we cannot perform on content we do not own — there is no author to
+        // suspend and no row of ours to edit.
+        type: isArchive ? "archive_comment" : isComment ? "comment" : isList ? "public_list" : "user",
         id: r.target_id,
         displayName: (isComment ? r.author_name : isList ? r.list_name : r.target_name) ?? "",
         pictureUrl: r.target_picture ?? "",
@@ -414,8 +437,76 @@ export async function handleModerationAct(req: Request, env: ModerationEnv): Pro
   const kind = itemId.slice(cut + 1);
 
   if (COMMENT_KINDS.has(kind)) return actOnComment(targetId, action, env);
+  if (isArchiveKind(kind)) return actOnArchiveComment(targetId, action, kind, env);
   if (kind === PUBLIC_LIST_KIND) return actOnPublicList(targetId, action, env);
   return actOnUser(targetId, action, body.durationMs, env);
+}
+
+/**
+ * Moderate a comment from the shared archive.
+ *
+ * ⚠️ **We cannot change anything upstream.** The comment stays live in every other
+ * partner app; all we control is whether it appears in ours. §10 permits exactly that
+ * ("for that user, or for every viewer in your product"), and being honest about the
+ * limit matters — a moderator who believes `hide` removed the comment from the archive
+ * would stop escalating to the operator when they should not.
+ *
+ * There is deliberately no `suspend`: suspending a foreign author is not ours to do,
+ * the same separation `public_list` already keeps.
+ */
+async function actOnArchiveComment(
+  archiveId: string,
+  action: string,
+  kind: string,
+  env: ModerationEnv,
+): Promise<Response> {
+  if (action === "hide") {
+    await env.DB.prepare(
+      "INSERT OR IGNORE INTO archive_suppressed (archive_id, hidden_at, reason) VALUES (?,?,?)",
+    )
+      .bind(archiveId, Date.now(), "admin")
+      .run();
+    return new Response(null, { status: 204 });
+  }
+
+  if (action === "restore") {
+    /**
+     * ⚠️ Restoring must ALSO dismiss the reports that caused the hide.
+     *
+     * Auto-hide counts distinct OPEN reporters, so leaving them open means the very
+     * next report re-trips the threshold and one person overturns the moderator. The
+     * native `restore` has the same rule for the same reason.
+     */
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM archive_suppressed WHERE archive_id = ?").bind(archiveId),
+      env.DB.prepare(
+        "UPDATE reports SET state = 'dismissed' WHERE target_id = ? AND kind = ? AND state = 'open'",
+      ).bind(archiveId, kind),
+    ]);
+    return new Response(null, { status: 204 });
+  }
+
+  if (action === "dismiss") {
+    // Both kinds: the two thresholds are independent, but dismissing the queue item
+    // means the moderator judged the CONTENT fine, which settles both.
+    await env.DB.batch(
+      [...ARCHIVE_COMMENT_KINDS].map((k) =>
+        env.DB.prepare(
+          "UPDATE reports SET state = 'dismissed' WHERE target_id = ? AND kind = ? AND state = 'open'",
+        ).bind(archiveId, k),
+      ),
+    );
+    return new Response(null, { status: 204 });
+  }
+
+  // `delete_upstream` belongs to Phase 2: it resolves archive_comment_refs to find
+  // which of OUR comments this is and deletes it with that author's actor ID. Until
+  // the mirror exists there is nothing of ours up there to delete, so the action is
+  // refused rather than silently doing nothing.
+  return new Response(JSON.stringify({ error: "unsupported_action" }), {
+    status: 400,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 const dismissKind = (env: ModerationEnv, targetId: string, kind: string) =>

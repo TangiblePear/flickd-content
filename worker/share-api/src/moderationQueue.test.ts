@@ -22,6 +22,8 @@ class FakeD1 {
   users: any[] = [];
   /** Declared here because `setHidden` writes it via `countStatement` in the act tests. */
   comment_counts: any[] = [];
+  /** Archive ids hidden product-wide — see archive_suppressed (migration 0047). */
+  archive_suppressed: any[] = [];
   prepare(sql: string) {
     const self = this;
     const s = sql.replace(/\s+/g, " ").trim();
@@ -291,6 +293,15 @@ class ActFakeD1 extends FakeD1 {
         return (read as any).all<T>();
       },
       async run() {
+        // ── archive moderation (0047) ──
+        if (s.startsWith("INSERT OR IGNORE INTO archive_suppressed")) {
+          if (!self.archive_suppressed.includes(args[0])) self.archive_suppressed.push(args[0]);
+          return { success: true, meta: { changes: 1 } };
+        }
+        if (s.startsWith("DELETE FROM archive_suppressed")) {
+          self.archive_suppressed = self.archive_suppressed.filter((x: any) => x !== args[0]);
+          return { success: true, meta: { changes: 1 } };
+        }
         self.batched.push(s);
         if (s.startsWith("UPDATE users SET posting_suspended_until = ?")) {
           const u = self.users.find((x) => x.id === args[1]);
@@ -651,5 +662,73 @@ describe("public list reports", () => {
     const db = await seeded();
     const res = await act(realEnv(db), { itemId: `${OWNER}:public_list`, source: "d1", action: "hide" });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("archive comment reports", () => {
+  const UUID = "882d7d45-795e-467b-be85-b88bb3ffc7bc";
+
+  const seed = (db: FakeD1 | ActFakeD1, kind: string, reporters: string[]) => {
+    reporters.forEach((r, i) =>
+      db.reports.push({
+        id: `rep-${kind}-${i}`,
+        reporter_id: r,
+        target_id: UUID,
+        kind,
+        context: "abuse [tvtime]",
+        state: "open",
+        created_at: 1000 + i,
+        body_snapshot: "the reported text",
+      }),
+    );
+  };
+
+  it("hides product-wide, because we cannot hide anything upstream", async () => {
+    const db = new ActFakeD1();
+    seed(db, "archive_comment", ["a"]);
+    const res = await act(env(db), { itemId: `${UUID}:archive_comment`, action: "hide" });
+    expect(res.status).toBe(204);
+    // The comment stays live in every other partner app; ours is all we control.
+    expect(db.archive_suppressed).toEqual([UUID]);
+  });
+
+  it("⚠️ restore also DISMISSES the reports that caused the hide", async () => {
+    const db = new ActFakeD1();
+    seed(db, "archive_comment", ["a", "b", "c"]);
+    db.archive_suppressed.push(UUID);
+
+    await act(env(db), { itemId: `${UUID}:archive_comment`, action: "restore" });
+
+    expect(db.archive_suppressed).toEqual([]);
+    // Auto-hide counts distinct OPEN reporters, so leaving them open means the very
+    // next report re-trips the threshold and one person overturns the moderator.
+    expect(db.reports.every((r: any) => r.state === "dismissed")).toBe(true);
+  });
+
+  it("dismiss clears BOTH kinds, since the judgement is about the content", async () => {
+    const db = new ActFakeD1();
+    seed(db, "archive_comment", ["a"]);
+    seed(db, "archive_comment_spoiler", ["b"]);
+    await act(env(db), { itemId: `${UUID}:archive_comment`, action: "dismiss" });
+    expect(db.reports.every((r: any) => r.state === "dismissed")).toBe(true);
+  });
+
+  it("⚠️ refuses delete_upstream — there is nothing of OURS up there yet", async () => {
+    const db = new FakeD1();
+    seed(db, "archive_comment", ["a"]);
+    // Phase 2 resolves archive_comment_refs to delete our own mirrored copy. Until the
+    // mirror exists this must fail loudly rather than appear to succeed.
+    const res = await act(env(db), { itemId: `${UUID}:archive_comment`, action: "delete_upstream" });
+    expect(res.status).toBe(400);
+  });
+
+  it("gives an archive report its own target type, not \"comment\"", async () => {
+    const db = new FakeD1();
+    seed(db, "archive_comment", ["a"]);
+    const body = await (await get(env(db))).json();
+    const row = body.items.find((i: any) => i.target.id === UUID);
+    // `LEFT JOIN comments c ON c.id = r.target_id` matches nothing for a UUID, and the
+    // panel must not offer actions we cannot perform on content we do not own.
+    expect(row.target.type).toBe("archive_comment");
   });
 });
