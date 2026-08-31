@@ -251,7 +251,16 @@ export interface CommsuniSource {
 }
 
 const SOURCES_KV_KEY = "commsuni:sources:v1";
-const SOURCES_TTL_S = 86_400;
+/**
+ * One hour, per §"GET /v1/sources": "Cache the catalog for about an hour".
+ *
+ * ⚠️ The plan said 24h. The spec is the operator's own guidance and the cost of
+ * following it is trivial — 24 `read_unit` a day against a 5000/day allowance — while
+ * the staleness it avoids is not: a **newly registered partner** is absent from the
+ * source filter until the catalog refreshes, so for that whole window we silently do
+ * not read their comments at all. An hour of that is a gap; a day of it is a bug.
+ */
+const SOURCES_TTL_S = 3_600;
 
 /**
  * In-isolate memory cache in front of KV.
