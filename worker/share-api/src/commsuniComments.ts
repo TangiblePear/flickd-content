@@ -198,7 +198,7 @@ export async function loadArchivePage(
   });
   if (cursor) params.set("cursor", cursor);
 
-  const res = await commsuniCall<{ comments?: unknown[]; cursor?: string | null; complete?: boolean }>(
+  const res = await commsuniCall<{ comments?: unknown[]; nextCursor?: string | null; complete?: boolean }>(
     env,
     // ⚠️ Both segments, each encoded separately — encoding the joined path would turn
     // the `/` between type and id into `%2F` and 404 just as surely as omitting it.
@@ -220,6 +220,8 @@ export async function loadArchivePage(
       status: res.status ?? null,
       code: res.code ?? null,
       comments: Array.isArray(res.data?.comments) ? res.data!.comments!.length : null,
+      // Whether a next page exists — the question a bare count cannot answer.
+      hasCursor: !!res.data?.nextCursor,
     }),
   );
 
@@ -242,7 +244,16 @@ export async function loadArchivePage(
   );
   return {
     comments,
-    cursor: res.data?.cursor ?? null,
+    // ⚠️ **`nextCursor`, not `cursor`.** The request parameter is called `cursor` and
+    // the RESPONSE field is called `nextCursor` — the spec spells this out ("`cursor`:
+    // from the previous page's `nextCursor`"), and reading the wrong one is silent:
+    // the cursor is simply always undefined, so `hasMore` is always false and the
+    // "load more" control never appears. Measured on House of the Dragon, which
+    // returned a full page of 20 with no way to reach page two.
+    //
+    // The identical trap is annotated in `loadArchiveReplies`; it was written there
+    // first and not applied back to here.
+    cursor: res.data?.nextCursor ?? null,
     complete: res.data?.complete ?? comments.length < ARCHIVE_PAGE_LIMIT,
     sources: sources.filter((s) => present.has(s.slug)),
   };

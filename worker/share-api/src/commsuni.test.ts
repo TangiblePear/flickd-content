@@ -266,6 +266,29 @@ describe("negative cache — the biggest cost lever", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("⚠️ reads the next cursor from `nextCursor`, not `cursor`", async () => {
+    // The REQUEST parameter is `cursor`; the RESPONSE field is `nextCursor`. Reading
+    // the wrong one is silent — the cursor is simply always undefined, so hasMore is
+    // always false and "load more" never appears. Measured on House of the Dragon,
+    // which returned a full page of 20 with no way to reach page two.
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "a" }], nextCursor: "eyJjMi...", complete: false }),
+    );
+    const page = await load(env());
+    expect(page?.cursor).toBe("eyJjMi...");
+    expect(page?.complete).toBe(false);
+  });
+
+  it("reports no next page when upstream sends no cursor", async () => {
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "a" }], complete: true }),
+    );
+    const page = await load(env());
+    expect(page?.cursor).toBeNull();
+  });
+
   it("carries the actor header, so the page comes back viewer-aware", async () => {
     stubFetch(ok([{ slug: "tvtime", status: "active" }]), ok({ comments: [] }));
     await load(env());
