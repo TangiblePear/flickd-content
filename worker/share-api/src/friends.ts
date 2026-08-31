@@ -738,6 +738,56 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     .bind(id, id, MAX_ERASURE_RECOMPUTE)
     .all<{ owner_id: string; list_id: string }>();
 
+  // ⚠️ **Retract what this account published upstream, BEFORE the batch drops the refs.**
+  //
+  // `archive_comment_refs` is the only record of which commsuni.tv rows are ours; once
+  // it is gone the published text is live in every partner app with nothing left that
+  // can name it. So the teardown is queued first, keyed by the archive id it carries in
+  // its own payload rather than by a lookup that will no longer resolve.
+  //
+  // Throttled by the outbox's own bounded drain — this enqueues rows, it does not make
+  // calls, so a prolific account does not turn one deletion into hundreds of subrequests
+  // on this request.
+  //
+  // ⚠️ Pending PUBLISH work is deleted while pending DELETE work is kept. They look like
+  // the same table but mean opposite things: an unsent `comment` row still holds this
+  // person's text and must never go out after they asked to be erased, whereas the
+  // `delete` rows ARE the erasure. Dropping the lot would leave their published comments
+  // live for ever.
+  const published = await env.DB
+    .prepare("SELECT archive_id FROM archive_comment_refs WHERE author_id = ?")
+    .bind(id)
+    .all<{ archive_id: string }>()
+    .catch(() => ({ results: [] as { archive_id: string }[] }));
+
+  if ((published.results ?? []).length > 0) {
+    await env.DB
+      .batch(
+        (published.results ?? []).map((r) =>
+          env.DB
+            .prepare(
+              `INSERT INTO archive_outbox (id, kind, idempotency_key, actor_user_id, payload, attempts, next_at, created_at)
+               VALUES (?, 'delete', ?, ?, ?, 0, ?, ?)`,
+            )
+            .bind(
+              crypto.randomUUID(),
+              `erase:${r.archive_id}`,
+              id,
+              JSON.stringify({ archiveId: r.archive_id }),
+              Date.now(),
+              Date.now(),
+            ),
+        ),
+      )
+      .catch(() => {});
+  }
+
+  await env.DB
+    .prepare("DELETE FROM archive_outbox WHERE actor_user_id = ? AND kind IN ('comment','reply')")
+    .bind(id)
+    .run()
+    .catch(() => {});
+
   await env.DB.batch([
     // Sealed match payloads first: they are children of match_requests, and a blob
     // outliving the handshake that addressed it is unreachable data nobody can delete.
@@ -799,6 +849,20 @@ export async function eraseAccount(env: FriendsEnv, id: string): Promise<void> {
     env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(id),
     env.DB.prepare("DELETE FROM blocks WHERE blocker_id = ? OR blocked_id = ?").bind(id, id),
     env.DB.prepare("DELETE FROM friendships WHERE user_a = ? OR user_b = ?").bind(id, id),
+    // The commsuni.tv layer, in BOTH id directions.
+    //
+    // ⚠️ `archive_blocks` is deleted as blocker AND as the blocked author. Our own
+    // users can be mirrored upstream, so this account's id can appear in `author_id`
+    // as somebody else's block — leaving that behind keeps a record of a deleted
+    // account in another user's row.
+    //
+    // ⚠️ The upstream teardown is enqueued BEFORE the refs are dropped, in the block
+    // just above this batch: once `archive_comment_refs` is gone nothing can name the
+    // published rows and they are unretractable for ever. Order is the whole game
+    // here — the same reason comment children are deleted before `comments`.
+    env.DB.prepare("DELETE FROM archive_comment_refs WHERE author_id = ?").bind(id),
+    env.DB.prepare("DELETE FROM archive_blocks WHERE blocker_id = ? OR author_id = ?").bind(id, id),
+    env.DB.prepare("DELETE FROM archive_identity WHERE user_id = ?").bind(id),
     // ⚠️ `reports` is NOT deleted here, in EITHER direction, and both halves are
     // deliberate.
     //

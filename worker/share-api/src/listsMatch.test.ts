@@ -267,6 +267,12 @@ class FakeStmt {
       ["DELETE FROM user_settings", "user_settings", "user_id"],
       ["DELETE FROM user_achievements", "user_achievements", "user_id"],
       ["DELETE FROM feedback", "feedback", "user_id"],
+      // commsuni.tv (0048, 0049). Asserted for real in friends.test.ts; must merely
+      // not throw here, since the batch runs as one unit.
+      ["DELETE FROM archive_comment_refs", "archive_comment_refs", null],
+      ["DELETE FROM archive_blocks", "archive_blocks", null],
+      ["DELETE FROM archive_identity", "archive_identity", null],
+      ["DELETE FROM archive_outbox", "archive_outbox", null],
       // Migration 0032, One Take. See the note in friends.test.ts.
       ["DELETE FROM daily_game_results", "daily_game_results", "user_id"],
       ["DELETE FROM daily_game_stats", "daily_game_stats", "user_id"],

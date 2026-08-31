@@ -39,6 +39,8 @@ import { appVersion } from "./profiles";
 import { evaluateAppCheck, logAppCheck, type AppCheckEnv } from "./appcheck";
 import { recordAdminAction } from "./adminAudit";
 import { loadArchivePage } from "./commsuniComments";
+import { drainArchiveOutbox, queueMirror, queueUnmirror } from "./commsuniMirror";
+import { resolveReference, refPath } from "./commsuniEntities";
 
 export interface CommentsEnv extends AppCheckEnv {
   DB: D1Database;
@@ -1001,6 +1003,18 @@ export async function handleGetFriendComments(
     url.searchParams.get("archiveCursor"),
   ).catch(() => null);
 
+  // The outbox drains on somebody else's request — the account is at its 5-cron limit,
+  // which is why the orphan reaper is triggered this way too. Bounded to 5 items: each
+  // is an outbound subrequest and an unbounded drain would blow the 50-subrequest cap
+  // and take down whatever request happened to trigger it.
+  {
+    const drain = drainArchiveOutbox(env as any).catch(() => 0);
+    if (ctx) ctx.waitUntil(drain);
+    // No `await` fallback: without a ctx this is a test or a synchronous path, and
+    // making a read wait on outbound writes would be the one thing the drain must
+    // never do.
+  }
+
   const { accepted } = await loadFriendships(env as any, session.userId);
   const authors = [session.userId, ...accepted];
   const placeholders = authors.map(() => "?").join(",");
@@ -1680,6 +1694,45 @@ export async function handlePostComment(
     else await p;
   }
 
+  // ⚠️ **Queued, never sent inline.** The drain runs later, re-reads the row and
+  // re-checks `mayMirror`, so an auto-hide, a suspension or a fast delete lands BEFORE
+  // anything leaves. Posting stays optimistic from Room either way, so nothing about
+  // the user's own view depends on this.
+  //
+  // Nothing happens at all unless COMMSUNI_MIRROR is "1" and the comment is public;
+  // both are checked inside queueMirror, and both fail closed.
+  {
+    const mirror = (async () => {
+      const ref = await resolveReference(
+        env as any,
+        subject.mediaType as any,
+        subject.tmdbId,
+        subject.season,
+        subject.episode,
+        Number(new URL(req.url).searchParams.get("tvdbId")) || null,
+      );
+      if (!ref) return; // No TVDB id ⇒ no addressable conversation. Not an error.
+      await queueMirror(
+        env as any,
+        {
+          id: existing?.id ?? id,
+          author_id: session.userId,
+          visibility,
+          body,
+          lang,
+          spoiler: spoiler ? 1 : 0,
+          updated_at: now,
+        },
+        refPath(ref),
+      );
+    })().catch(() => {});
+    // ⚠️ `const p = f(); ctx.waitUntil(p)`, never `ctx?.waitUntil(f())` — optional
+    // chaining short-circuits the whole expression INCLUDING its argument, so the
+    // function is never called at all.
+    if (ctx) ctx.waitUntil(mirror);
+    else await mirror;
+  }
+
   return json({
     id: existing?.id ?? id,
     createdAt: existing?.created_at ?? now,
@@ -1808,6 +1861,17 @@ export async function handleDeleteComment(
   // to draw a tombstone rather than omit the row entirely.
 
   await env.DB.batch(statements);
+
+  // ⚠️ **Delete must propagate.** Without this the user deletes in Flickto and the text
+  // stays live in every other partner app for ever — a policy failure, not a bug. Runs
+  // even when the mirror is switched OFF: rows published while it was on must still be
+  // retractable afterwards.
+  {
+    const teardown = queueUnmirror(env as any, id).catch(() => {});
+    if (ctx) ctx.waitUntil(teardown);
+    else await teardown;
+  }
+
   return noContent();
 }
 

@@ -58,7 +58,12 @@ export interface ReportItem {
   source: "d1" | "r2";
   kind: string;
   target: {
-    type: "user" | "comment" | "share" | "public_list";
+    // ⚠️ `archive_comment` belongs here: Phase 3 started emitting it below while this
+    // union still said "share", so the panel's own contract disagreed with what it
+    // sends. `tsc` is permanently red in this worker, which is exactly how a type
+    // error survives a deploy — the runtime never checks, so the wrong `type` reached
+    // the admin UI and only its own switch saved it.
+    type: "user" | "comment" | "archive_comment" | "share" | "public_list";
     id: string;
     displayName: string;
     pictureUrl: string;

@@ -375,6 +375,20 @@ COMMENTS_PER_SUBJECT_PER_HOUR = "5"
 # server-side rather than fetched and discarded. A wrong value here does not fail — it
 # silently reads our own comments back and renders them twice.
 COMMSUNI_SLUG = "flickto"
+# ── The write mirror's kill switch ───────────────────────────────────────────────
+#
+# ⚠️ **"1" publishes our users' public comments to commsuni.tv, where every other
+# partner app reads them.** Anything else — including absence, "0", "true" and "yes" —
+# leaves the mirror off. It fails CLOSED on purpose: a typo must not start publishing.
+#
+# ⚠️ **Do not set this to "1" until the privacy-policy update is PUBLISHED**, not merely
+# written. Mirroring sends user content to a third party; doing that before the policy
+# discloses it is a compliance failure, not a sequencing preference. It also needs the
+# `archive:write` scope on COMMSUNI_KEY and the media hosts allowlisted.
+#
+# Turning it back off stops publishing but NOT retraction: deletes and reports keep
+# draining, because rows published while it was on must stay retractable afterwards.
+COMMSUNI_MIRROR = "0"
 # Rate-limit strikes within one hour that trigger an automatic posting suspension,
 # and how long that suspension lasts (default 24h). A limiter only refuses the
 # current request; a script retries at one request per window forever, so without

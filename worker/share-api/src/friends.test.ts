@@ -272,6 +272,15 @@ class FakeStmt {
       ["DELETE FROM public_list_tags", "public_list_tags", null],
       ["DELETE FROM list_follows", "list_follows", null],
       ["DELETE FROM public_list_likes", "public_list_likes", null],
+      // commsuni.tv (0048, 0049). `archive_comment_refs` must go in the same batch it
+      // is READ from just before — the upstream teardown is enqueued from those rows,
+      // and once they are gone the published comments are unretractable for ever.
+      // `archive_blocks` is deleted in BOTH directions: our own users can be mirrored,
+      // so this id can appear as somebody else's blocked author.
+      ["DELETE FROM archive_comment_refs", "archive_comment_refs", "author_id"],
+      ["DELETE FROM archive_blocks", "archive_blocks", null],
+      ["DELETE FROM archive_identity", "archive_identity", "user_id"],
+      ["DELETE FROM archive_outbox", "archive_outbox", null],
       ["DELETE FROM sessions", "sessions", null],
       ["DELETE FROM reports", "reports", "reporter_id"],
       ["DELETE FROM profile_stats", "profile_stats", "user_id"],
