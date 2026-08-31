@@ -117,6 +117,7 @@ import {
   handleReportComment,
   parseSubject,
 } from "./comments";
+import { loadArchiveReplies } from "./commsuniComments";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
