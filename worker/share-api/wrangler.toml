@@ -97,6 +97,16 @@ routes = [
   { pattern = "flickto.app/api/titles/*", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/comments", zone_name = "flickto.app" },
   { pattern = "flickto.app/api/comments/*", zone_name = "flickto.app" },
+  # commsuni.tv archive routes (src/commsuniComments.ts). The BARE `*` form, which
+  # matches `/api/archive`, `/api/archive/comments/{uuid}/replies` and anything with a
+  # query string — `*` matches any string INCLUDING `/`.
+  #
+  # ⚠️ NOT `/api/archive/*`: that does not match a bare `/api/archive`, which is the
+  # trap this table already records for /api/friends, /api/match, /api/feed and
+  # /api/sync. Neither the vitest suite nor `wrangler deploy --dry-run` can see it —
+  # the suite calls handlers directly and the dry-run never contacts the zone. Verify
+  # with a live curl; 405 means the Worker was never reached, 401 is the target.
+  { pattern = "flickto.app/api/archive*", zone_name = "flickto.app" },
   # Comment moderation, called by the /admin Pages functions with X-Admin-Key.
   # Not user-facing; gated by the ADMIN_KEY secret, which when unset closes these
   # routes rather than opening them.

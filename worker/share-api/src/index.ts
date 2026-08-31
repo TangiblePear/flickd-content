@@ -751,6 +751,32 @@ export default {
     const commentTarget = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})$/);
     if (commentTarget && req.method === "DELETE") return handleDeleteComment(commentTarget[1], req, env, ctx);
 
+    /**
+     * Archive replies. A SEPARATE route, not a widened one: archive ids are UUIDs and
+     * match neither COMMENT_ID_RE nor anything in our comments table.
+     *
+     * ⚠️ Needs the `flickto.app/api/archive*` pattern in wrangler.toml — the BARE form.
+     * `/api/archive/*` does not match `/api/archive`, the trap that table records six
+     * times over. Verify with a live curl: 405 means the Worker was never reached.
+     */
+    const archiveReplies = p.match(/^\/api\/archive\/comments\/([0-9a-fA-F-]{36})\/replies$/);
+    if (archiveReplies && req.method === "GET") {
+      const session = await resolveSession(req, env as any, ctx);
+      // ⚠️ `{ status: 401 }`, NOT `401`. This file's `json` helper takes a
+      // **ResponseInit**, unlike the one in comments.ts which takes a status number.
+      // Passing the bare number spreads to nothing and the response goes out as
+      // **200 OK with an error body** — which a client checking `response.ok` reads as
+      // success. Caught by a live curl; tsc is permanently red here so it did not.
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+      const page = await loadArchiveReplies(
+        env as any,
+        archiveReplies[1],
+        session.userId,
+        new URL(req.url).searchParams.get("cursor"),
+      );
+      return json(page ?? { comments: [], cursor: null, complete: true });
+    }
+
     // Lazy, on expand only — never while rendering a list. The inline preview the
     // parent carries is what keeps short threads from reaching this at all.
     const commentReplies = p.match(/^\/api\/comments\/([0-9A-Z:]{8,80})\/replies$/);

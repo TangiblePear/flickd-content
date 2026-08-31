@@ -24,6 +24,16 @@ const MISS_TTL_MS = 6 * 60 * 60 * 1000;
 const ARCHIVE_PAGE_LIMIT = 20;
 
 /**
+ * One page of archive replies.
+ *
+ * Larger than the native REPLY_PAGE_LIMIT of 10 because archive replies are **not
+ * translated** (see Phase 1), so a page costs no AI calls — only the single subrequest
+ * it takes to fetch. The native limit is small precisely because a fully untranslated
+ * page there spends one model call per reply.
+ */
+const ARCHIVE_REPLY_LIMIT = 25;
+
+/**
  * The archive half of a comments response, or null.
  *
  * ⚠️ **null is a first-class answer, not an error.** It means "no archive section" —
@@ -85,6 +95,58 @@ async function rememberMiss(env: CommsuniEnv, ref: string): Promise<void> {
  */
 export async function clearMiss(env: CommsuniEnv, ref: string): Promise<void> {
   await env.DB.prepare("DELETE FROM archive_misses WHERE entity_ref = ?").bind(ref).run().catch(() => {});
+}
+
+/**
+ * One page of replies under an archive comment.
+ *
+ * ⚠️ **A separate route from the native one, not a widened one.** Archive ids are
+ * UUIDs and match neither `COMMENT_ID_RE` (`[0-9A-Z:]{8,80}`) nor anything in our
+ * `comments` table, so `/api/comments/{id}/replies` cannot serve them — it looks the
+ * parent up locally and finds nothing. That is exactly what made expanding an archive
+ * thread do nothing at all.
+ *
+ * Session-gated like every other archive read (§1), which is also what makes the actor
+ * header available so the page comes back viewer-aware.
+ */
+export async function loadArchiveReplies(
+  env: CommsuniEnv,
+  commentId: string,
+  userId: string,
+  cursor?: string | null,
+): Promise<{ comments: unknown[]; cursor: string | null; complete: boolean } | null> {
+  if (!commsuniEnabled(env)) return null;
+
+  const actor = await actorId(env, userId);
+  const params = new URLSearchParams({ limit: String(ARCHIVE_REPLY_LIMIT) });
+  if (cursor) params.set("cursor", cursor);
+
+  const res = await commsuniCall<{
+    replies?: unknown[];
+    nextCursor?: string | null;
+    complete?: boolean;
+  }>(env, `/comments/${encodeURIComponent(commentId)}/replies?${params.toString()}`, { actor });
+
+  console.log(
+    JSON.stringify({
+      msg: "commsuni archive replies",
+      id: commentId,
+      ok: res.ok,
+      status: res.status ?? null,
+      code: res.code ?? null,
+      replies: Array.isArray(res.data?.replies) ? res.data!.replies!.length : null,
+    }),
+  );
+
+  if (!res.ok) return null;
+  const replies = Array.isArray(res.data?.replies) ? res.data!.replies! : [];
+  return {
+    comments: replies,
+    // ⚠️ `nextCursor`, not `cursor` — the reply payload names it differently from the
+    // comment list, and reading the wrong field silently ends pagination at page one.
+    cursor: res.data?.nextCursor ?? null,
+    complete: res.data?.complete ?? true,
+  };
 }
 
 // ── Read ────────────────────────────────────────────────────────────────────
