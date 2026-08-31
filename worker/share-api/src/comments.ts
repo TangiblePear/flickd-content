@@ -892,6 +892,12 @@ async function languageBreakdown(env: CommentsEnv, s: Subject): Promise<Array<{ 
  * caching around an endpoint's contract later is worse than writing it now.
  */
 export async function handleGetComments(req: Request, env: CommentsEnv, s: Subject, ctx?: ExecutionContext) {
+  // The second drain trigger. Hanging the only one off the friends path made the
+  // outbox depend on a signed-in reader opening a sheet — a comment posted and not
+  // followed by one sat queued indefinitely, which is exactly what happened on the
+  // first live mirror. Both read paths now drain; neither waits for it.
+  if (ctx) ctx.waitUntil(drainArchiveOutbox(env as any).catch(() => 0));
+
   const url = new URL(req.url);
   /**
    * The reader's language, used ONLY as the translation target.
@@ -1867,7 +1873,17 @@ export async function handleDeleteComment(
   // even when the mirror is switched OFF: rows published while it was on must still be
   // retractable afterwards.
   {
-    const teardown = queueUnmirror(env as any, id).catch(() => {});
+    // ⚠️ Drained in THIS request, not left for the next reader. The published policy
+    // says a deleted comment is retracted upstream "usually within minutes", and the
+    // read-path drain alone cannot promise that: on a quiet app nobody opens a sheet
+    // and the retraction sits queued indefinitely. Publishing may wait; removal may not.
+    //
+    // Draining here is safe in a way draining on POST would not be. The delay before a
+    // publish exists so an auto-hide, a suspension or a fast delete can land first;
+    // there is no equivalent concern for taking something down.
+    const teardown = queueUnmirror(env as any, id)
+      .then(() => drainArchiveOutbox(env as any))
+      .catch(() => 0);
     if (ctx) ctx.waitUntil(teardown);
     else await teardown;
   }
