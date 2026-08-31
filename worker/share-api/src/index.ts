@@ -124,7 +124,7 @@ import {
   loadArchiveReplies,
   removeArchiveBlock,
 } from "./commsuniComments";
-import { identityChoice, setIdentityChoice } from "./commsuniMirror";
+import { drainArchiveOutbox, identityChoice, setIdentityChoice } from "./commsuniMirror";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
@@ -978,6 +978,31 @@ export default {
     if (p === "/api/social/delete-request" && req.method === "POST") return handleDeleteRequest(req, env);
 
     return notFound();
+  },
+
+  /**
+   * Drain the archive outbox on a schedule.
+   *
+   * ⚠️ **This exists because the "no cron budget" comment above was WRONG.** The account
+   * had 4 of its 5 cron triggers used, not 5, so the opportunistic drain was designed
+   * around a constraint that did not exist. Verified by counting `crons` across every
+   * wrangler config on the account: cloudflare-backend 1, cloudflare-proxy 2, daily-ai 1.
+   *
+   * An opportunistic drain is fundamentally traffic-dependent, and the traffic it needed
+   * never came: the natural flow is post-then-look, the client renders the new comment
+   * optimistically from Room, so no read request follows a post. Comments sat queued and
+   * due with `attempts = 0` twice in a row, and the second time was after a fix that
+   * only widened which READS drain — still the wrong axis.
+   *
+   * The read-path drains stay. They make publishing near-instant while someone is
+   * browsing; this makes it happen at all when nobody is.
+   *
+   * Bound is higher than the request-borne drain's 5 because nothing is waiting on this
+   * response, but still well inside the 50-subrequest cap: each item is one upstream
+   * call, times up to 3 retry attempts.
+   */
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(drainArchiveOutbox(env as any, 10).catch(() => 0));
   },
 };
 

@@ -389,6 +389,7 @@ COMMSUNI_SLUG = "flickto"
 # Turning it back off stops publishing but NOT retraction: deletes and reports keep
 # draining, because rows published while it was on must stay retractable afterwards.
 COMMSUNI_MIRROR = "1"
+
 # Rate-limit strikes within one hour that trigger an automatic posting suspension,
 # and how long that suspension lasts (default 24h). A limiter only refuses the
 # current request; a script retries at one request per window forever, so without
@@ -499,3 +500,22 @@ enabled = true
 [observability.logs]
 enabled = true
 invocation_logs = true
+
+# ── The archive outbox drain ────────────────────────────────────────────────────
+#
+# ⚠️ Added after discovering the "this account is at its 5-cron limit" comment in
+# index.ts was WRONG: 4 were in use (cloudflare-backend 1, cloudflare-proxy 2,
+# daily-ai 1), leaving one free. The opportunistic drain was built around a limit
+# that did not exist, and it does not work on its own — the natural flow is
+# post-then-look, and the client renders the new comment from Room without a read,
+# so nothing triggers it. Comments sat queued and due, twice.
+#
+# Every 5 minutes: publishing a comment is not urgent, and retracting one is bounded
+# by this too, against a policy that promises deletion propagates "within minutes".
+#
+# ⚠️ MUST stay at the end of the file. TOML sections run until the next header, so
+# putting this mid-file swallowed every `[vars]` entry below it into the triggers
+# table — including APPCHECK_MODE and MIN_SOCIAL_VERSION. `wrangler deploy --dry-run`
+# caught it ("Unexpected fields found in triggers field"); nothing else would have.
+[triggers]
+crons = ["*/5 * * * *"]
