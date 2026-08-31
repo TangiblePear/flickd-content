@@ -355,6 +355,16 @@ RATE_LIMIT_PER_HOUR = "10"
 # stops one author absorbing the whole of it in a single title's sheet.
 COMMENTS_PER_HOUR = "30"
 COMMENTS_PER_SUBJECT_PER_HOUR = "5"
+# Our own source slug in the commsuni.tv catalogue.
+#
+# NOT a secret — it appears in every comment's `origin.slug`, so it is public by
+# construction. It lives here rather than beside COMMSUNI_KEY for exactly that reason.
+#
+# ⚠️ This is the primary dedup control. Phase 1 reads the source catalogue and passes
+# every active slug EXCEPT this one, so that our own mirrored comments are filtered
+# server-side rather than fetched and discarded. A wrong value here does not fail — it
+# silently reads our own comments back and renders them twice.
+COMMSUNI_SLUG = "flickto"
 # Rate-limit strikes within one hour that trigger an automatic posting suspension,
 # and how long that suspension lasts (default 24h). A limiter only refuses the
 # current request; a script retries at one request per window forever, so without
