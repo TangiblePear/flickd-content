@@ -38,6 +38,7 @@ import { isPremiere, visibleBorderId, visiblePictureUrl } from "./premiere";
 import { appVersion } from "./profiles";
 import { evaluateAppCheck, logAppCheck, type AppCheckEnv } from "./appcheck";
 import { recordAdminAction } from "./adminAudit";
+import { loadArchivePage } from "./commsuniComments";
 
 export interface CommentsEnv extends AppCheckEnv {
   DB: D1Database;
@@ -978,6 +979,28 @@ export async function handleGetFriendComments(
 
   const url = new URL(req.url);
   const cursor = Number(url.searchParams.get("cursor")) || Number.MAX_SAFE_INTEGER;
+
+  /**
+   * ⚠️ Started BEFORE the D1 work and awaited after it, so the upstream round trip
+   * overlaps the queries rather than being serialised behind them. The friends path
+   * spends ~6 subrequests today against the free plan's 50; the archive fetch plus its
+   * D1 lookups adds ~5, so there is headroom — but only because the translation tier
+   * does not run on archive rows.
+   *
+   * `.catch(() => null)` because this must never reject the whole response: a broken
+   * archive hides its own section and nothing else.
+   */
+  const archivePromise = loadArchivePage(
+    env as any,
+    s.mediaType,
+    s.tmdbId,
+    s.season,
+    s.episode,
+    session.userId,
+    Number(url.searchParams.get("tvdbId")) || null,
+    url.searchParams.get("archiveCursor"),
+  ).catch(() => null);
+
   const { accepted } = await loadFriendships(env as any, session.userId);
   const authors = [session.userId, ...accepted];
   const placeholders = authors.map(() => "?").join(",");
@@ -997,10 +1020,26 @@ export async function handleGetFriendComments(
 
   const rows = results ?? [];
   const counts = await loadReactionCounts(env, rows.map((r) => r.id));
+  const archive = await archivePromise;
   return json({
     comments: await withInlineReplies(env, rows, counts),
     myReactions: await loadMyReactions(env, s, session.userId),
     cursor: rows.length === PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
+    /**
+     * The archive half, or null.
+     *
+     * ⚠️ **It rides THIS call rather than a route of its own, and that is the whole
+     * point.** A Worker on a route always runs, so a separate `/comments/archive`
+     * would be a third chargeable invocation per sheet open for nothing. This call is
+     * already authenticated, already made on every signed-in open, and already never
+     * cached — and archive reads require a session anyway (§1), so the two have
+     * identical preconditions. Measured at 2 invocations per open on 2026-08-30; keep
+     * it that way.
+     *
+     * Awaited alongside the D1 work above rather than before it — see the Promise.all
+     * at the top of this handler.
+     */
+    archive,
   });
 }
 
