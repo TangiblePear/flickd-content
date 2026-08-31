@@ -13,6 +13,7 @@ import {
   foreignSlugs,
   loadSources,
   type CommsuniEnv,
+  type CommsuniSource,
 } from "./commsuni";
 import { resolveReference, type MediaType } from "./commsuniEntities";
 
@@ -34,6 +35,18 @@ export interface ArchivePage {
   comments: unknown[];
   cursor: string | null;
   complete: boolean;
+  /**
+   * Branding for the slugs on this page, so the client can render a source badge.
+   *
+   * ⚠️ Supplied by the server because **the client has no API key** and must never
+   * have one — it cannot call `GET /v1/sources` itself. Sending it per response also
+   * means a partner that rebrands is reflected within our catalog TTL, which is the
+   * whole reason §5 forbids hard-coding icons.
+   *
+   * Filtered to the slugs actually present, not the whole catalogue: 13 partners and
+   * growing, and a page typically carries two or three.
+   */
+  sources: CommsuniSource[];
 }
 
 // ── Negative cache ──────────────────────────────────────────────────────────
@@ -137,9 +150,17 @@ export async function loadArchivePage(
   }
 
   const comments = Array.isArray(res.data?.comments) ? res.data!.comments! : [];
+
+  // Only the slugs on this page. `origin` is the archive's own field name.
+  const present = new Set(
+    comments
+      .map((c) => (c as { origin?: { slug?: string } })?.origin?.slug)
+      .filter((x): x is string => !!x),
+  );
   return {
     comments,
     cursor: res.data?.cursor ?? null,
     complete: res.data?.complete ?? comments.length < ARCHIVE_PAGE_LIMIT,
+    sources: sources.filter((s) => present.has(s.slug)),
   };
 }
