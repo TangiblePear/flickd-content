@@ -16,7 +16,13 @@ export interface AuthzEnv {
 export type Visibility = "private" | "friends" | "public";
 
 /** Lenient parse — an unrecognised stored value must never widen access. */
-export function parseVisibility(raw: string | null | undefined): Visibility {
+// ⚠️ Takes `unknown`, not `string | null | undefined`, and that is a WIDENING rather
+// than a loosening: the body already treats anything that is not exactly "public" or
+// "private" as "friends", so the narrower signature was under-claiming what the function
+// safely handles. D1 rows come back as `Record<string, unknown>`, so callers were forced
+// to cast — and a cast at the call site is the thing that would let a genuinely wrong
+// value through unnoticed, which this defends against by construction.
+export function parseVisibility(raw: unknown): Visibility {
   return raw === "public" || raw === "private" ? raw : "friends";
 }
 

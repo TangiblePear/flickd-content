@@ -2260,4 +2260,14 @@ export async function mayReadComment(env: CommentsEnv, viewerId: string, row: Co
   return areFriends(env as any, viewerId, row.author_id);
 }
 
-export { USER_ID_RE, COMMENT_ID_RE, countable, toWire };
+// ⚠️ `countable` was removed from this list, not restored. Commit 00bf213 ("derive
+// comment/reaction/poll counts on read, drop counter tables") deleted the function and
+// every call site but left it named here, so the module exported a binding that does
+// not exist. Nothing imports it.
+//
+// It survived because `tsc` is permanently red in this worker, so one more error read
+// as noise — the same way the moderationQueue target-union mismatch reached production.
+// esbuild does not resolve names at bundle time, so an unknown identifier becomes a
+// runtime global lookup rather than a build failure; that is exactly how the missing
+// `loadArchiveReplies` import threw in production earlier.
+export { USER_ID_RE, COMMENT_ID_RE, toWire };
