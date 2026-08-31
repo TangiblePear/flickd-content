@@ -26,6 +26,8 @@ class FakeD1 {
   misses: any[] = [];
   /** Archive ids hidden product-wide. Plain strings; see archive_suppressed. */
   suppressed: string[] = [];
+  /** Rows of archive_blocks for the one reader these tests use. */
+  blocks: any[] = [];
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
   }
@@ -53,6 +55,9 @@ class FakeStmt {
   }
   async all<T>(): Promise<{ results: T[] }> {
     // Product-wide hides. Empty by default: suppression is the exception.
+    if (this.sql.startsWith("SELECT source_slug, author_id, display_name")) {
+      return { results: this.db.blocks.filter((b: any) => b.blocker_id === this.a[0]) as T[] };
+    }
     if (this.sql.startsWith("SELECT archive_id FROM archive_suppressed")) {
       const ids = new Set(this.a);
       return { results: this.db.suppressed.filter((x: any) => ids.has(x)).map((archive_id: any) => ({ archive_id })) as T[] };
@@ -328,5 +333,77 @@ describe("negative cache — the biggest cost lever", () => {
     // …and the source filter excludes us.
     expect(read.url).toContain("source=tvtime");
     expect(read.url).not.toContain("flickto");
+  });
+});
+
+describe("cross-app blocking", () => {
+  const load = (e: any) => loadArchivePage(e, "show", 1399, 2, 5, "USER-A", 121361, null);
+  const withBlock = (e: any, slug: string, authorId: string) =>
+    e.DB.blocks.push({ blocker_id: "USER-A", source_slug: slug, author_id: authorId });
+
+  it("drops a blocked author's comments", async () => {
+    const e = env();
+    withBlock(e, "tvtime", "author-1");
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({
+        comments: [
+          { id: "a", origin: { slug: "tvtime" }, userId: "author-1" },
+          { id: "b", origin: { slug: "tvtime" }, userId: "author-2" },
+        ],
+      }),
+    );
+    expect((await load(e))!.comments.map((c: any) => c.id)).toEqual(["b"]);
+  });
+
+  it("⚠️ scopes the block to its SOURCE — the same id elsewhere is a different person", async () => {
+    const e = env();
+    withBlock(e, "tvtime", "author-1");
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }, { slug: "seenr", status: "active" }]),
+      ok({
+        comments: [
+          { id: "a", origin: { slug: "tvtime" }, userId: "author-1" },
+          // Archive author ids are opaque and scoped to their source. Matching on the
+          // id alone would block a stranger in another app.
+          { id: "b", origin: { slug: "seenr" }, userId: "author-1" },
+        ],
+      }),
+    );
+    expect((await load(e))!.comments.map((c: any) => c.id)).toEqual(["b"]);
+  });
+
+  it("⚠️ filters blocked authors out of REPLIES too", async () => {
+    const e = env();
+    withBlock(e, "tvtime", "author-1");
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({
+        comments: [
+          {
+            id: "parent",
+            origin: { slug: "tvtime" },
+            userId: "author-2",
+            replies: [
+              { id: "r1", origin: { slug: "tvtime" }, userId: "author-1" },
+              { id: "r2", origin: { slug: "tvtime" }, userId: "author-3" },
+            ],
+          },
+        ],
+      }),
+    );
+    // A blocked author still visible under someone else's comment is exactly the
+    // "I blocked them and they are still here" failure this exists to prevent.
+    const page = await load(e);
+    expect((page!.comments[0] as any).replies.map((r: any) => r.id)).toEqual(["r2"]);
+  });
+
+  it("leaves the page untouched when nothing is blocked", async () => {
+    const e = env();
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "a", origin: { slug: "tvtime" }, userId: "author-1" }] }),
+    );
+    expect((await load(e))!.comments).toHaveLength(1);
   });
 });

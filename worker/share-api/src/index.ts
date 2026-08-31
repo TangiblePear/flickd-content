@@ -117,7 +117,13 @@ import {
   handleReportComment,
   parseSubject,
 } from "./comments";
-import { handleReportArchiveComment, loadArchiveReplies } from "./commsuniComments";
+import {
+  addArchiveBlock,
+  handleReportArchiveComment,
+  loadArchiveBlocks,
+  loadArchiveReplies,
+  removeArchiveBlock,
+} from "./commsuniComments";
 import { handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
@@ -776,6 +782,60 @@ export default {
         new URL(req.url).searchParams.get("cursor"),
       );
       return json(page ?? { comments: [], cursor: null, complete: true });
+    }
+
+    /**
+     * Cross-app blocking (requirement 2).
+     *
+     * ⚠️ FOREIGN authors only. One of our own users is blocked through the friend graph
+     * so that blocking them in Flickto also hides their mirrored comments everywhere —
+     * one block store per person. The client routes by source; this route does not
+     * accept our own slug.
+     */
+    if (p === "/api/archive/blocks" && req.method === "GET") {
+      const session = await resolveSession(req, env as any, ctx);
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+      return json({ blocks: await loadArchiveBlocks(env as any, session.userId) });
+    }
+
+    const archiveBlock = p.match(/^\/api\/archive\/blocks\/([A-Za-z0-9._-]{1,64})\/(.{1,128})$/);
+    if (archiveBlock && (req.method === "PUT" || req.method === "DELETE")) {
+      const session = await resolveSession(req, env as any, ctx);
+      if (!session) return json({ error: "unauthorized" }, { status: 401 });
+
+      const slug = archiveBlock[1];
+      const authorId = decodeURIComponent(archiveBlock[2]);
+
+      // ⚠️ Refuse our own slug. Routing one of our users here would create a second
+      // block store for the same person: they would stay blocked in comments while
+      // remaining a friend everywhere else, and the user would have to block them twice.
+      if (slug === (env as any).COMMSUNI_SLUG) {
+        return json({ error: "use_account_block" }, { status: 400 });
+      }
+
+      if (req.method === "DELETE") {
+        await removeArchiveBlock(env as any, session.userId, slug, authorId);
+        return new Response(null, { status: 204, headers: CORS });
+      }
+
+      // The snapshot: there is no profile route for a foreign author, so a block that
+      // cannot name itself is one the user cannot recognise or lift.
+      let body: Record<string, unknown> = {};
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        // A block with no snapshot is still a block. Losing the name is worse than
+        // losing the block, but refusing the block outright is worse than both.
+      }
+      await addArchiveBlock(
+        env as any,
+        session.userId,
+        slug,
+        authorId,
+        typeof body.displayName === "string" ? body.displayName.slice(0, 128) : null,
+        typeof body.authorColor === "string" ? body.authorColor.slice(0, 16) : null,
+      );
+      return new Response(null, { status: 204, headers: CORS });
     }
 
     /**

@@ -373,6 +373,97 @@ async function forwardReport(
     .catch(() => {});
 }
 
+// ── Cross-app blocking (requirement 2) ──────────────────────────────────────
+
+export interface ArchiveBlock {
+  source_slug: string;
+  author_id: string;
+  display_name: string | null;
+  author_color: string | null;
+  created_at: number;
+}
+
+/**
+ * One reader's blocked foreign authors.
+ *
+ * Loaded **once per request** and applied in memory. Bounded by how many people one
+ * user has blocked, and indexed on `blocker_id`, so this is a single indexed read
+ * rather than a per-row check.
+ */
+export async function loadArchiveBlocks(env: CommsuniEnv, userId: string): Promise<ArchiveBlock[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT source_slug, author_id, display_name, author_color, created_at
+       FROM archive_blocks WHERE blocker_id = ?`,
+  )
+    .bind(userId)
+    .all<ArchiveBlock>()
+    .catch(() => ({ results: [] as ArchiveBlock[] }));
+  return results ?? [];
+}
+
+/** `{slug}\u0000{authorId}` — the key a comment is matched on. */
+const blockKey = (slug: string, authorId: string): string => `${slug}\u0000${authorId}`;
+
+/**
+ * Drop comments (and their inline replies) written by a blocked author.
+ *
+ * ⚠️ Matched on `(origin.slug, userId)`, never on `userId` alone. The archive's author
+ * ids are opaque and scoped to their source — the same string from two partners is two
+ * different people — so an unscoped match would block a stranger in another app.
+ *
+ * ⚠️ Replies are filtered too. A blocked author whose top-level comment vanished while
+ * their replies stayed visible under someone else's is exactly the "I blocked them and
+ * they are still here" failure the feature exists to prevent.
+ */
+export function filterBlocked<T>(comments: T[], blocks: ArchiveBlock[]): T[] {
+  if (blocks.length === 0) return comments;
+  const blocked = new Set(blocks.map((b) => blockKey(b.source_slug, b.author_id)));
+
+  const isBlocked = (c: unknown): boolean => {
+    const row = c as { origin?: { slug?: string }; userId?: string };
+    return blocked.has(blockKey(row?.origin?.slug ?? "", row?.userId ?? ""));
+  };
+
+  return comments
+    .filter((c) => !isBlocked(c))
+    .map((c) => {
+      const row = c as { replies?: unknown[] };
+      if (!Array.isArray(row.replies) || row.replies.length === 0) return c;
+      return { ...(c as object), replies: row.replies.filter((r) => !isBlocked(r)) } as T;
+    });
+}
+
+/** Block a foreign author, snapshotting how they appeared at the time. */
+export async function addArchiveBlock(
+  env: CommsuniEnv,
+  userId: string,
+  slug: string,
+  authorId: string,
+  displayName: string | null,
+  authorColor: string | null,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT OR REPLACE INTO archive_blocks
+       (blocker_id, source_slug, author_id, display_name, author_color, created_at)
+     VALUES (?,?,?,?,?,?)`,
+  )
+    .bind(userId, slug, authorId, displayName, authorColor, Date.now())
+    .run();
+}
+
+export async function removeArchiveBlock(
+  env: CommsuniEnv,
+  userId: string,
+  slug: string,
+  authorId: string,
+): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM archive_blocks WHERE blocker_id = ? AND source_slug = ? AND author_id = ?",
+  )
+    .bind(userId, slug, authorId)
+    .run();
+}
+
 // ── Read ────────────────────────────────────────────────────────────────────
 
 /**
@@ -469,9 +560,14 @@ export async function loadArchivePage(
    * list; the cursor is still valid, so the next page simply arrives on demand.
    */
   const suppressed = await loadSuppressed(env, raw.map((c) => (c as { id?: string })?.id ?? ""));
-  const comments = suppressed.size === 0
+  const visible = suppressed.size === 0
     ? raw
     : raw.filter((c) => !suppressed.has((c as { id?: string })?.id ?? ""));
+
+  // ⚠️ Per-READER, so it must run after the shared cache is read, never before — baking
+  // one reader's block list into a cached page is precisely the cross-account leak
+  // `comments.ts` documents at the top of the file.
+  const comments = filterBlocked(visible, await loadArchiveBlocks(env, userId));
 
   // Only the slugs on this page. `origin` is the archive's own field name.
   const present = new Set(
