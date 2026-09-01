@@ -110,6 +110,16 @@ const USER_ID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
  */
 const COMMENT_ID_RE = /^[0-9A-Z:]{8,80}$/;
 
+/**
+ * An archive comment id: a bare partner UUID.
+ *
+ * ⚠️ Deliberately NOT [COMMENT_ID_RE], which is uppercase-only and would reject the
+ * lowercase hex a UUID normally arrives in. The route patterns in `index.ts` already
+ * spell this shape out for the archive report and reply reads; this is the same shape
+ * in the one place a request BODY carries it.
+ */
+const ARCHIVE_ID_RE = /^[0-9a-fA-F-]{36}$/;
+
 export const MAX_BODY = 500;
 const MAX_REACTION = 32;
 const MAX_MEDIA_URL = 512;
@@ -480,7 +490,15 @@ const RENDERABLE = `c.hidden_at IS NULL AND c.deleted_at IS NULL AND (c.body <> 
  * list, in `created_at` order, detached from what they answer — and the page limit
  * of 20 would be spent on them.
  */
-const TOP_LEVEL = `c.parent_id IS NULL`;
+/**
+ * ⚠️ `parent_archive_id` too, for exactly the same reason. A reply to another app's
+ * comment has no NATIVE parent — `parent_id` is null because the thing it answers has
+ * never been in this table — so `parent_id IS NULL` alone would file it in the main
+ * list as though it were a fresh top-level comment, detached from the conversation it
+ * belongs to and spending one of the 20 page slots. It is a reply; it just belongs to
+ * a thread we do not own.
+ */
+const TOP_LEVEL = `c.parent_id IS NULL AND c.parent_archive_id IS NULL`;
 
 /**
  * What a **top-level** list read may return: anything renderable, plus a deleted
@@ -1040,7 +1058,13 @@ export async function handleGetFriendComments(
 
   const rows = results ?? [];
   const counts = await loadReactionCounts(env, rows.map((r) => r.id));
-  const archive = await archivePromise;
+  const archivePage = await archivePromise;
+  // ⚠️ Our replies are counted onto the partner's rows before they go out. The archive
+  // cannot know about a reply living in our database, so without this the expander is
+  // missing on exactly the thread someone just replied to.
+  const archive = archivePage
+    ? { ...archivePage, comments: await addNativeReplyCounts(env, archivePage.comments) }
+    : archivePage;
   return json({
     comments: await withInlineReplies(env, rows, counts),
     myReactions: await loadMyReactions(env, s, session.userId),
@@ -1148,6 +1172,78 @@ export async function handleGetReplies(
   return json({
     comments: rows.map((r) => toWire(r, counts[r.id], translations[r.id])),
     cursor: rows.length === REPLY_PAGE_LIMIT ? rows[rows.length - 1].created_at : null,
+  });
+}
+
+/**
+ * Our own replies sitting under an archive comment.
+ *
+ * ⚠️ Returned in the NATIVE wire shape and kept in a separate field, never merged into
+ * the partner's own reply array. A row shaped like an archive comment renders with the
+ * partner's source badge and `isActionable = false` — so our author would lose the
+ * edit and delete on their own words, and gain a report button pointed at themselves.
+ * Two shapes, one thread, merged by `createdAt` on the client.
+ */
+export async function loadNativeArchiveReplies(
+  env: CommentsEnv,
+  archiveId: string,
+  lang: string,
+  ctx?: ExecutionContext,
+): Promise<Array<ReturnType<typeof toWire>>> {
+  const { results } = await env.DB.prepare(
+    `SELECT ${SELECT_COLUMNS}
+       FROM comments c LEFT JOIN profiles p ON p.user_id = c.author_id
+                       LEFT JOIN users u ON u.id = c.author_id
+      WHERE c.parent_archive_id = ? AND ${RENDERABLE}
+      ORDER BY c.created_at ASC
+      LIMIT ?`,
+  )
+    .bind(archiveId, REPLY_PAGE_LIMIT)
+    .all<CommentRow>();
+
+  const rows = results ?? [];
+  if (rows.length === 0) return [];
+  const counts = await loadReactionCounts(env, rows.map((r) => r.id));
+  const translations = lang ? await translateRows(env, rows, lang, ctx) : {};
+  return rows.map((r) => toWire(r, counts[r.id], translations[r.id]));
+}
+
+/**
+ * Add our replies to each archive row's `replyCount`.
+ *
+ * ⚠️ Without this the expander never appears on the one row that needs it. The count
+ * on an archive comment is the PARTNER's, and it cannot know about a reply that lives
+ * in our database — so the first person to answer an otherwise unanswered archive
+ * comment would post into a thread with no affordance to open it, and never see their
+ * own reply again.
+ *
+ * One query for the page, keyed by parent, exactly as the native inline preview does.
+ */
+export async function addNativeReplyCounts(
+  env: CommentsEnv,
+  comments: unknown[],
+): Promise<unknown[]> {
+  const ids = comments.map((c) => (c as { id?: string })?.id ?? "").filter(Boolean);
+  if (ids.length === 0) return comments;
+
+  const placeholders = ids.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT c.parent_archive_id AS pid, COUNT(*) AS n
+       FROM comments c
+      WHERE c.parent_archive_id IN (${placeholders}) AND ${RENDERABLE}
+      GROUP BY c.parent_archive_id`,
+  )
+    .bind(...ids)
+    .all<{ pid: string; n: number }>()
+    .catch(() => ({ results: [] as Array<{ pid: string; n: number }> }));
+
+  const extra = new Map((results ?? []).map((r) => [r.pid, Number(r.n) || 0]));
+  if (extra.size === 0) return comments;
+
+  return comments.map((c) => {
+    const row = c as { id?: string; replyCount?: number };
+    const n = extra.get(row?.id ?? "") ?? 0;
+    return n === 0 ? c : { ...row, replyCount: (row.replyCount ?? 0) + n };
   });
 }
 
@@ -1506,9 +1602,34 @@ export async function handlePostComment(
   // before 0044 and most written after it.
   const parentIdRaw = typeof payload.parentId === "string" ? payload.parentId : "";
   const inReplyToRaw = typeof payload.inReplyToId === "string" ? payload.inReplyToId : "";
+  /**
+   * Replying into ANOTHER APP's thread.
+   *
+   * ⚠️ A separate field, never `parentId` widened to accept a UUID. `parentId` is
+   * resolved against this table and drives the depth/flatten walk; letting a partner
+   * id through it would send every one of those lookups after a row that cannot
+   * exist. The two are mutually exclusive and a request carrying both is rejected
+   * rather than silently resolved in one direction.
+   *
+   * ⚠️ BARE uuid — the client's `slug:` prefix is a rendering key and must be
+   * stripped before it gets here. The mirror publishes to
+   * `/comments/{parentArchiveId}/replies`, where a prefixed value is a 404.
+   */
+  const parentArchiveRaw = typeof payload.parentArchiveId === "string" ? payload.parentArchiveId : "";
   const mentions = parseMentionsInput(payload.mentions);
   if (parentIdRaw && !COMMENT_ID_RE.test(parentIdRaw)) return json({ error: "invalid_payload" }, 400);
   if (inReplyToRaw && !COMMENT_ID_RE.test(inReplyToRaw)) return json({ error: "invalid_payload" }, 400);
+  if (parentArchiveRaw && !ARCHIVE_ID_RE.test(parentArchiveRaw)) return json({ error: "invalid_payload" }, 400);
+  if (parentArchiveRaw && parentIdRaw) return json({ error: "invalid_payload" }, 400);
+  /**
+   * ⚠️ **Public only, and enforced HERE rather than trusted from the client.**
+   *
+   * This reply is published to a third party the moment the mirror drains it, and
+   * `mayMirror` only ever publishes public rows — so a friends-only one would be
+   * accepted, stored, and then silently never reach the person it answers. The app
+   * withholds the toggle; this is what makes it true.
+   */
+  if (parentArchiveRaw && visibility !== "public") return json({ error: "visibility_required" }, 400);
 
   // ⚠️ **Looked up by ID, not by (author, subject).** A user may now hold many
   // comments on one subject, so the subject no longer identifies a row — and a
@@ -1657,8 +1778,8 @@ export async function handlePostComment(
                                reaction, visibility, spoiler, lang, media_kind, media_provider,
                                media_id, media_url, media_w, media_h,
                                parent_id, in_reply_to_id, root_id, depth, mentions_json,
-                               created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+                               parent_archive_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).bind(
         id,
         subject.tmdbId,
@@ -1684,6 +1805,9 @@ export async function handlePostComment(
         rootId ?? id,
         depth,
         mentions.length ? JSON.stringify(mentions) : null,
+        // Null for everything that is not a reply into another app's thread, which is
+        // every comment this product wrote before now.
+        parentArchiveRaw || null,
         now,
         now,
       ),
@@ -1747,6 +1871,12 @@ export async function handlePostComment(
           updated_at: now,
         },
         refPath(ref),
+        // ⚠️ This is what makes the reply publisher reachable. `queueMirror` has always
+        // chosen `kind = "reply"` when handed a parent archive id, and `publishComment`
+        // has always posted those to `/comments/{parentArchiveId}/replies` — but the one
+        // call site never passed it, so both were unreachable from the moment they were
+        // written. Nothing else changes: a top-level comment still queues as "comment".
+        parentArchiveRaw ? { parentArchiveId: parentArchiveRaw } : {},
       );
     })().catch(() => {});
     // ⚠️ `const p = f(); ctx.waitUntil(p)`, never `ctx?.waitUntil(f())` — optional

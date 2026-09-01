@@ -112,6 +112,7 @@ import {
   handleGetReplies,
   handleGetComments,
   handleGetFriendComments,
+  loadNativeArchiveReplies,
   handlePostComment,
   handleReactToComment,
   handleReportComment,
@@ -776,13 +777,32 @@ export default {
       // **200 OK with an error body** — which a client checking `response.ok` reads as
       // success. Caught by a live curl; tsc is permanently red here so it did not.
       if (!session) return json({ error: "unauthorized" }, { status: 401 });
-      const page = await loadArchiveReplies(
-        env as any,
-        archiveReplies[1],
-        session.userId,
-        new URL(req.url).searchParams.get("cursor"),
-      );
-      return json(page ?? { comments: [], cursor: null, complete: true });
+      const url = new URL(req.url);
+      /**
+       * Two shapes in one thread.
+       *
+       * `comments` is the partner's own replies, in the archive shape. `native` is
+       * OURS — replies we hold against this archive parent, in the native wire shape,
+       * kept separate so they keep their source badge, their edit and their delete.
+       * Merging them into the array above would render an author's own words as a
+       * foreign row they could only report.
+       *
+       * ⚠️ Loaded even when the archive half returns null. Upstream being down must
+       * not hide a reply that lives in our own database.
+       */
+      const [page, native] = await Promise.all([
+        loadArchiveReplies(env as any, archiveReplies[1], session.userId, url.searchParams.get("cursor")),
+        loadNativeArchiveReplies(
+          env as any,
+          archiveReplies[1],
+          (url.searchParams.get("lang") ?? "").slice(0, 8),
+          ctx,
+        ).catch(() => []),
+      ]);
+      return json({
+        ...(page ?? { comments: [], cursor: null, complete: true }),
+        native,
+      });
     }
 
     /**

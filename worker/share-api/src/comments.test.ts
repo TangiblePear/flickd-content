@@ -258,6 +258,9 @@ class FakeStmt {
         // "replies stay out of the list" test pass with the predicate removed from
         // the real query — a test that cannot fail is not a test.
         .filter((c) => (s.includes("c.parent_id IS NULL") ? c.parent_id == null : true))
+        // Same rule, same reason: conditional on the SQL saying so, so removing the
+        // predicate from the real query fails the test rather than passing it.
+        .filter((c) => (s.includes("c.parent_archive_id IS NULL") ? c.parent_archive_id == null : true))
         .filter((c) => (lang ? c.lang == null || c.lang === lang : true))
         .sort((x, y) => y.created_at - x.created_at)
         .slice(0, PAGE_LIMIT)
@@ -300,8 +303,12 @@ class FakeStmt {
         media_w: a[15], media_h: a[16],
         parent_id: a[17], in_reply_to_id: a[18], root_id: a[19], depth: a[20],
         mentions_json: a[21], reply_count: 0,
+        // ⚠️ Positional. Adding parent_archive_id shifted the timestamps by one, and
+        // a fake that kept reading a[22] would store the created_at into it and a
+        // `null` into created_at — every ordering assertion silently meaningless.
+        parent_archive_id: a[22] ?? null,
         hidden_at: null, deleted_at: null,
-        created_at: a[22], updated_at: a[23],
+        created_at: a[23], updated_at: a[24],
       });
       return { success: true, meta: { changes: 1 } };
     }
@@ -1068,6 +1075,102 @@ describe("replies", () => {
     // A stranger is still refused - relaxing the deleted check must not relax this one.
     const stranger = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies", "tok-c"), e, ctx);
     expect(stranger.status).toBe(404);
+  });
+
+  // ── Replying into another app's thread ──────────────────────────────────
+
+  it("stores a reply to an ARCHIVE comment against the partner id, not parent_id", async () => {
+    const e = await withSessions(env());
+    const archiveId = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+    const res = await handlePostComment(
+      post("/api/comments", body({ id: "REPLY0000001", parentArchiveId: archiveId, visibility: "public" }), "tok-a"),
+      e,
+      ctx,
+    );
+    expect(res.status).toBe(200);
+
+    const row = e.DB.comments.find((c: any) => c.id === "REPLY0000001");
+    // ⚠️ parent_id stays NULL: the thing this answers has never been in our table, and
+    // the depth/flatten walk would chase a row that cannot exist.
+    expect(row.parent_id).toBeNull();
+    expect(row.parent_archive_id).toBe(archiveId);
+    // The timestamps must survive the column being added in the middle of the insert.
+    expect(typeof row.created_at).toBe("number");
+    expect(row.created_at).toBeGreaterThan(0);
+  });
+
+  it("keeps an archive reply OUT of the top-level list", async () => {
+    const e = await withSessions(env());
+    const archiveId = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+    await write(e, "TOPLEVEL0001", { visibility: "public" });
+    await handlePostComment(
+      post("/api/comments", body({ id: "REPLY0000001", parentArchiveId: archiveId, visibility: "public" }), "tok-a"),
+      e,
+      ctx,
+    );
+
+    // It is a reply — it just belongs to a thread we do not own. Listing it beside the
+    // top-level rows would detach it from its conversation and spend a page slot.
+    const out = await (await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx)).json();
+    expect(out.comments.map((c: any) => c.id)).toEqual(["TOPLEVEL0001"]);
+  });
+
+  it("refuses a friends-only reply into another app's thread", async () => {
+    const e = await withSessions(env());
+    const res = await handlePostComment(
+      post(
+        "/api/comments",
+        body({ id: "REPLY0000001", parentArchiveId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301", visibility: "friends" }),
+        "tok-a",
+      ),
+      e,
+      ctx,
+    );
+    // The mirror only ever publishes public rows, so a friends-only reply would be
+    // accepted and then never reach the person it answers.
+    expect(res.status).toBe(400);
+    expect(e.DB.comments).toHaveLength(0);
+  });
+
+  it("refuses a request carrying BOTH parent kinds, rather than picking one", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    const res = await handlePostComment(
+      post(
+        "/api/comments",
+        body({
+          id: "REPLY0000001",
+          parentId: "TOPLEVEL0001",
+          parentArchiveId: "3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+          visibility: "public",
+        }),
+        "tok-a",
+      ),
+      e,
+      ctx,
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a PREFIXED archive id — the slug is a rendering key, not an id", async () => {
+    const e = await withSessions(env());
+    const res = await handlePostComment(
+      post(
+        "/api/comments",
+        body({
+          id: "REPLY0000001",
+          parentArchiveId: "showrss:3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+          visibility: "public",
+        }),
+        "tok-a",
+      ),
+      e,
+      ctx,
+    );
+    // The mirror posts to /comments/{parentArchiveId}/replies, where a prefixed value
+    // is a 404 — so it must never reach storage in the first place.
+    expect(res.status).toBe(400);
   });
 
   it("notifies the person ANSWERED, not the author's friend list", async () => {
