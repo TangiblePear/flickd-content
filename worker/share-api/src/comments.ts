@@ -1074,9 +1074,19 @@ export async function handleGetFriendComments(
  * Oldest first, unlike the top-level list: a thread reads in the order it was
  * written. The cursor is therefore a `created_at` FLOOR, not a ceiling.
  *
- * ⚠️ **A hidden or deleted parent returns nothing.** Moderation must not be
- * escapable by addressing the subtree directly — hiding a parent that still has
- * replies would otherwise leave every reply readable through this route.
+ * ⚠️ **A HIDDEN parent returns nothing** — moderation must not be escapable by
+ * addressing the subtree directly, or hiding a parent that still has replies would
+ * leave every reply readable through this route.
+ *
+ * ⚠️ **A DELETED parent does not.** These two were one guard, and collapsing them
+ * truncated every tombstoned thread past the inline preview: the list attaches the
+ * first [INLINE_REPLY_PREVIEW] replies to a tombstone (that is the whole point of
+ * keeping the row — see `LISTABLE`), the client expands only when it holds fewer
+ * than `replyCount`, and that expand landed here and 404'd. A thread with three
+ * replies therefore advertised three, showed two, and the client swallowed the
+ * failure — no error, just a thread stopping short of its own badge. An author
+ * deleting their own words is the case the tombstone EXISTS to keep reachable; only
+ * a moderator's hide is meant to take the subtree with it.
  */
 export async function handleGetReplies(
   parentId: string,
@@ -1102,7 +1112,7 @@ export async function handleGetReplies(
       deleted_at: number | null;
     }>();
   if (!parent) return notFound();
-  if (parent.hidden_at != null || parent.deleted_at != null) return notFound();
+  if (parent.hidden_at != null) return notFound();
 
   // A friends-only thread is readable by exactly the people who may read its
   // parent, so the check is the parent's, not a second rule. `mayReadComment`
@@ -1110,7 +1120,14 @@ export async function handleGetReplies(
   if (parent.visibility !== "public") {
     const session = await resolveSession(req, env as any, ctx);
     if (!session) return json({ error: "unauthorized" }, 401);
-    const allowed = await mayReadComment(env, session.userId, parent as CommentRow);
+    // ⚠️ `deleted_at` blanked on purpose. `mayReadComment` refuses a deleted row
+    // outright, which is right for the permalink and notification paths it also
+    // serves — there the comment ITSELF is what is being opened. Here the parent is
+    // only the access rule for its replies, and those are not deleted, so the
+    // question is who was allowed to read this thread, not whether the parent still
+    // renders. Without this a friends-only tombstone stays truncated even after the
+    // hidden/deleted split above.
+    const allowed = await mayReadComment(env, session.userId, { ...parent, deleted_at: null } as CommentRow);
     if (!allowed) return notFound();
   }
 

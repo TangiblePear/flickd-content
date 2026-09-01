@@ -1015,6 +1015,61 @@ describe("replies", () => {
     expect(e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").reply_count).toBe(1);
   });
 
+  it("serves the replies under a DELETED parent, past the inline preview", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001", { body: "the original" });
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", body: "reply one" }, "tok-b");
+    await write(e, "REPLY0000002", { parentId: "TOPLEVEL0001", body: "reply two" }, "tok-b");
+    await write(e, "REPLY0000003", { parentId: "TOPLEVEL0001", body: "reply three" }, "tok-c");
+    await del(e, "TOPLEVEL0001", "tok-a");
+
+    // The tombstone advertises three but carries only the two-reply preview, so the
+    // client MUST be able to expand for the rest. This route used to 404 on any
+    // deleted parent, which truncated every tombstoned thread at two replies with no
+    // error - the client swallows the failure and the badge silently overpromises.
+    const list = await (await handleGetComments(get("/api/titles/movie/603/comments"), e, MOVIE, ctx)).json();
+    expect(list.comments[0].replyCount).toBe(3);
+    expect(list.comments[0].replies).toHaveLength(2);
+
+    const res = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies"), e, ctx);
+    expect(res.status).toBe(200);
+    expect((await res.json()).comments.map((c: any) => c.body)).toEqual([
+      "reply one",
+      "reply two",
+      "reply three",
+    ]);
+  });
+
+  it("still refuses the subtree of a HIDDEN parent", async () => {
+    const e = await withSessions(env());
+    await write(e, "TOPLEVEL0001");
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001" }, "tok-b");
+    e.DB.comments.find((c: any) => c.id === "TOPLEVEL0001").hidden_at = Date.now();
+
+    // The half of the old guard that must NOT relax: moderation is escapable if the
+    // subtree can be addressed directly.
+    const res = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies"), e, ctx);
+    expect(res.status).toBe(404);
+  });
+
+  it("serves a FRIENDS-ONLY deleted parent's replies to a friend, and nobody else", async () => {
+    const e = await withSessions(env());
+    e.DB.friendships.push({ user_a: A, user_b: B, state: "accepted", requested_by: A, updated_at: 0 });
+    await write(e, "TOPLEVEL0001", { visibility: "friends" });
+    await write(e, "REPLY0000001", { parentId: "TOPLEVEL0001", visibility: "friends" }, "tok-b");
+    await del(e, "TOPLEVEL0001", "tok-a");
+
+    // `mayReadComment` refuses a deleted row outright, so the visibility branch had
+    // to be told the parent is only the ACCESS RULE here, not the thing being read.
+    const friend = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies", "tok-b"), e, ctx);
+    expect(friend.status).toBe(200);
+    expect((await friend.json()).comments).toHaveLength(1);
+
+    // A stranger is still refused - relaxing the deleted check must not relax this one.
+    const stranger = await handleGetReplies("TOPLEVEL0001", get("/api/comments/TOPLEVEL0001/replies", "tok-c"), e, ctx);
+    expect(stranger.status).toBe(404);
+  });
+
   it("notifies the person ANSWERED, not the author's friend list", async () => {
     const e = await withSessions(env());
     e.DB.friendships.push({ user_a: A, user_b: C, state: "accepted", requested_by: A, updated_at: 0 });
