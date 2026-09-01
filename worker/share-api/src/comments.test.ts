@@ -171,6 +171,9 @@ class FakeStmt {
     if (s.startsWith("SELECT id, tmdb_id, media_type, season, episode, author_id, body")) {
       return (this.db.comments.find((c) => c.id === a[0]) as T) ?? null;
     }
+    if (s.startsWith("SELECT 1 AS n FROM reports WHERE target_id = ?")) {
+      return (this.db.reports.some((r: any) => r.target_id === a[0]) ? { n: 1 } : null) as T | null;
+    }
     if (s.startsWith("SELECT id FROM reports")) {
       const r = this.db.reports.find(
         (x) => x.reporter_id === a[0] && x.target_id === a[1] && x.kind === a[2] && x.state === "open",
@@ -311,6 +314,23 @@ class FakeStmt {
         created_at: a[23], updated_at: a[24],
       });
       return { success: true, meta: { changes: 1 } };
+    }
+    if (s.startsWith("DELETE FROM comments WHERE id = ?")) {
+      const before = this.db.comments.length;
+      this.db.comments = this.db.comments.filter((c) => !(c.id === a[0] && c.author_id === a[1]));
+      return { success: true, meta: { changes: before - this.db.comments.length } };
+    }
+    // The unreported-with-replies shape: tombstoned AND stripped in one statement.
+    if (s.startsWith("UPDATE comments SET deleted_at = ?, updated_at = ?, body = ''")) {
+      const r = this.db.comments.find((c) => c.id === a[2] && c.author_id === a[3]);
+      if (r) {
+        Object.assign(r, {
+          deleted_at: a[0], updated_at: a[1], body: "", reaction: null,
+          media_kind: null, media_provider: null, media_id: null, media_url: null,
+          media_w: null, media_h: null, mentions_json: null, lang: null,
+        });
+      }
+      return { success: true, meta: { changes: r ? 1 : 0 } };
     }
     if (s.startsWith("UPDATE comments SET body =")) {
       const r = this.db.comments.find((c) => c.id === a[13] && c.author_id === a[14]);
@@ -1538,12 +1558,58 @@ describe("reporting", () => {
 });
 
 describe("deleting", () => {
-  it("tombstones rather than removing, so moderation history survives", async () => {
+  it("tombstones rather than removing a REPORTED comment, so moderation history survives", async () => {
     const e = await withSessions(env());
     seed(e.DB, { id: "C1", author_id: A, body: "the reported text" });
+    // ⚠️ The report is the whole point of this test and it used to be missing: the
+    // comment was deleted with nothing filed against it and the retained body was
+    // asserted anyway, so the test passed for a reason its own name does not give.
+    e.DB.reports.push({ id: "R1", reporter_id: B, target_id: "C1", kind: "comment", state: "open" });
+
     await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+
     expect(e.DB.comments[0].deleted_at).toBeGreaterThan(0);
     expect(e.DB.comments[0].body).toBe("the reported text");
+  });
+
+  it("keeps a DISMISSED report's comment too — it is still a decision that was made", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, body: "the reported text" });
+    e.DB.reports.push({ id: "R1", reporter_id: B, target_id: "C1", kind: "comment", state: "dismissed" });
+
+    await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+
+    expect(e.DB.comments[0].body).toBe("the reported text");
+  });
+
+  it("REMOVES an unreported comment outright rather than keeping the text", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, body: "just a comment" });
+
+    await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+
+    // Nothing reports it, nothing hangs off it, and the two moderation surfaces that
+    // read `comments.body` are both driven by a join on `reports` — so the retained
+    // text was read by nothing and simply outlived the author's request to remove it.
+    expect(e.DB.comments).toHaveLength(0);
+  });
+
+  it("keeps an unreported PARENT as a bare anchor, with its text stripped", async () => {
+    const e = await withSessions(env());
+    seed(e.DB, { id: "C1", author_id: A, body: "the original", reply_count: 1 });
+    seed(e.DB, { id: "C2", author_id: B, body: "a reply", parent_id: "C1" });
+
+    await handleDeleteComment("C1", get("/api/comments/C1", "tok-a"), e, ctx);
+
+    // The row has to survive — it is what stops the reply being orphaned — but a
+    // tombstone renders none of its content, so none of it is kept.
+    const row = e.DB.comments.find((c: any) => c.id === "C1");
+    expect(row.deleted_at).toBeGreaterThan(0);
+    expect(row.body).toBe("");
+    expect(row.media_id).toBeNull();
+    expect(row.reply_count).toBe(1);
+    // And the reply itself is untouched: other people's words are never cascaded.
+    expect(e.DB.comments.find((c: any) => c.id === "C2").body).toBe("a reply");
   });
 
   it("removes the comment from the public count and drops its reactions", async () => {

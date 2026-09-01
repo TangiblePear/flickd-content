@@ -1946,12 +1946,30 @@ async function notifyFriendsOfComment(
 }
 
 /**
- * `DELETE /api/comments/{id}` — tombstone the caller's own comment.
+ * `DELETE /api/comments/{id}` — remove the caller's own comment.
  *
- * **The row is retained**, body included, so moderation history survives an author
- * deleting something after it was reported. The comment vanishes from every read
- * path (see `RENDERABLE`) with no "[deleted]" placeholder — that is only needed
- * when replies would be orphaned, and there are no replies.
+ * **Retention is now conditional on there being something to retain it FOR.**
+ *
+ * The body used to be kept on every delete, for moderation history. That is only
+ * load-bearing when the comment was reported: `handleReportComment` snapshots the text
+ * into `reports.body_snapshot` at report time, and the two moderation surfaces that
+ * read `comments.body` (the queue and the admin panel) are both driven by a join on
+ * `reports`. With no report row, the retained text was read by nothing and simply sat
+ * there — an author asked for it to be gone and it was not.
+ *
+ * So:
+ *
+ *  - **reported** — unchanged. The row and its body stay, and the admin panel keeps
+ *    rendering the snapshot beside the current text, whose divergence is its own
+ *    signal.
+ *  - **not reported, no replies** — the row is DELETED. Nothing anchors to it and
+ *    nothing may read it.
+ *  - **not reported, with replies** — the row survives as the thread's anchor, with
+ *    body, media and reaction stripped. A tombstone renders none of it anyway
+ *    (`toWire`), so this only removes what was invisible and unread.
+ *
+ * ⚠️ Any report state counts, not just `open`. A dismissed report is a decision that
+ * was made about this text, and the panel still shows it.
  *
  * Reaction rows and their counts go for real: they are other people's rows about a
  * comment that no longer renders, so keeping them would leak the comment's
@@ -1984,15 +2002,45 @@ export async function handleDeleteComment(
   // 204 even for an unknown id, so this cannot be used to probe which ids exist.
   if (!row) return noContent();
 
-  const statements: D1PreparedStatement[] = [
-    env.DB.prepare("UPDATE comments SET deleted_at = ?, updated_at = ? WHERE id = ? AND author_id = ?").bind(
-      Date.now(),
-      Date.now(),
-      id,
-      session.userId,
-    ),
-    env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ?").bind(id),
-  ];
+  // Is there a moderation record that the text belongs to? Any state — see above.
+  const reported = await env.DB
+    .prepare("SELECT 1 AS n FROM reports WHERE target_id = ? LIMIT 1")
+    .bind(id)
+    .first<{ n: number }>()
+    .catch(() => ({ n: 1 })); // On a read failure, keep it. Losing evidence is worse.
+
+  const keepsThread = (row.reply_count ?? 0) > 0;
+  const statements: D1PreparedStatement[] = [];
+
+  if (reported) {
+    statements.push(
+      env.DB.prepare("UPDATE comments SET deleted_at = ?, updated_at = ? WHERE id = ? AND author_id = ?").bind(
+        Date.now(),
+        Date.now(),
+        id,
+        session.userId,
+      ),
+    );
+  } else if (keepsThread) {
+    // The row is the thread's anchor and has to survive; its content does not.
+    statements.push(
+      env.DB
+        .prepare(
+          `UPDATE comments
+              SET deleted_at = ?, updated_at = ?, body = '', reaction = NULL,
+                  media_kind = NULL, media_provider = NULL, media_id = NULL, media_url = NULL,
+                  media_w = NULL, media_h = NULL, mentions_json = NULL, lang = NULL
+            WHERE id = ? AND author_id = ?`,
+        )
+        .bind(Date.now(), Date.now(), id, session.userId),
+    );
+  } else {
+    statements.push(
+      env.DB.prepare("DELETE FROM comments WHERE id = ? AND author_id = ?").bind(id, session.userId),
+    );
+  }
+
+  statements.push(env.DB.prepare("DELETE FROM comment_reactions WHERE comment_id = ?").bind(id));
 
   // ⚠️ Deleting a REPLY decrements its parent's maintained count. Without this the
   // parent advertises replies that no longer render, and the badge stops matching
@@ -2012,6 +2060,10 @@ export async function handleDeleteComment(
   // render the minimal tombstone the archive uses: no old text, no media, no author
   // actions. `reply_count` is deliberately left alone; it is what tells the client
   // to draw a tombstone rather than omit the row entirely.
+  //
+  // ⚠️ This is why `keepsThread` above chooses UPDATE over DELETE, and it is the one
+  // case where an unreported comment leaves anything behind at all. What survives is
+  // the anchor, not the comment: the body and media are blanked in the same statement.
 
   await env.DB.batch(statements);
 
