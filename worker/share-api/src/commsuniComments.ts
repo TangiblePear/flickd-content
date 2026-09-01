@@ -169,12 +169,46 @@ export async function loadArchiveReplies(
   if (!res.ok) return null;
   const replies = Array.isArray(res.data?.replies) ? res.data!.replies! : [];
   return {
-    comments: replies,
+    // ⚠️ **Our own mirrored replies stripped.** The page read excludes our slug upstream
+    // (`source=` on the entity call) precisely so a mirrored row does not come back and
+    // render twice; this call has no such filter, and until replies could be mirrored
+    // there was nothing for it to catch. The moment one was published, the author saw
+    // their reply twice — once as the native row they can edit and delete, and once as
+    // a foreign row under the PARTNER's badge that they could only report.
+    //
+    // Filtered here against our own ledger rather than by asking upstream, because
+    // `archive_comment_refs` is authoritative about what we published and needs no
+    // support from the partner's reply endpoint.
+    comments: await withoutOurs(env, replies),
     // ⚠️ `nextCursor`, not `cursor` — the reply payload names it differently from the
     // comment list, and reading the wrong field silently ends pagination at page one.
     cursor: res.data?.nextCursor ?? null,
     complete: res.data?.complete ?? true,
   };
+}
+
+/**
+ * Drop rows we published ourselves.
+ *
+ * `archive_comment_refs` maps our comment id to the archive id it was mirrored as, with
+ * a unique index on the archive id — so this is one indexed lookup for the page. An
+ * empty ledger (mirror never enabled) short-circuits to no query at all.
+ */
+async function withoutOurs(env: CommsuniEnv, rows: unknown[]): Promise<unknown[]> {
+  const ids = rows.map((r) => (r as { id?: string })?.id ?? "").filter(Boolean);
+  if (ids.length === 0) return rows;
+
+  const placeholders = ids.map(() => "?").join(",");
+  const { results } = await env.DB.prepare(
+    `SELECT archive_id FROM archive_comment_refs WHERE archive_id IN (${placeholders})`,
+  )
+    .bind(...ids)
+    .all<{ archive_id: string }>()
+    .catch(() => ({ results: [] as Array<{ archive_id: string }> }));
+
+  const ours = new Set((results ?? []).map((r) => r.archive_id));
+  if (ours.size === 0) return rows;
+  return rows.filter((r) => !ours.has((r as { id?: string })?.id ?? ""));
 }
 
 // ── Reporting ───────────────────────────────────────────────────────────────

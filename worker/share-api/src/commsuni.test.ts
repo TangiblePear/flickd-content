@@ -16,7 +16,7 @@ import {
   __resetBreaker,
   __resetSources,
 } from "./commsuni";
-import { clearMiss, loadArchivePage, platformSources } from "./commsuniComments";
+import { clearMiss, loadArchiveReplies, loadArchivePage, platformSources } from "./commsuniComments";
 
 const KEY = "tvta_live_abc_secret";
 
@@ -28,6 +28,8 @@ class FakeD1 {
   suppressed: string[] = [];
   /** Rows of archive_blocks for the one reader these tests use. */
   blocks: any[] = [];
+  /** archive_comment_refs: archive ids WE published, i.e. our own mirrored rows. */
+  refs: string[] = [];
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
   }
@@ -57,6 +59,10 @@ class FakeStmt {
     // Product-wide hides. Empty by default: suppression is the exception.
     if (this.sql.startsWith("SELECT source_slug, author_id, display_name")) {
       return { results: this.db.blocks.filter((b: any) => b.blocker_id === this.a[0]) as T[] };
+    }
+    if (this.sql.startsWith("SELECT archive_id FROM archive_comment_refs")) {
+      const ids = new Set(this.a);
+      return { results: this.db.refs.filter((x: any) => ids.has(x)).map((archive_id: any) => ({ archive_id })) as T[] };
     }
     if (this.sql.startsWith("SELECT archive_id FROM archive_suppressed")) {
       const ids = new Set(this.a);
@@ -234,6 +240,35 @@ describe("source filter — the primary dedup", () => {
     await loadSources(e);
     await loadSources(e);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("archive replies — the dedup the page read gets for free", () => {
+  /**
+   * ⚠️ The replies endpoint takes NO source filter, unlike the entity read which
+   * excludes our slug upstream. That was harmless while only top-level comments were
+   * mirrored — we never had a row in anyone's reply list. The first mirrored REPLY made
+   * it visible: the author saw their own words twice, once as the native row they can
+   * edit and delete and once as a foreign row under the partner's badge that they could
+   * only report. Device-found 2026-09-01.
+   */
+  it("strips replies we published ourselves", async () => {
+    const e = env();
+    e.DB.refs.push("OURS-1111");
+    stubFetch(ok({ replies: [{ id: "THEIRS-1" }, { id: "OURS-1111" }, { id: "THEIRS-2" }] }));
+
+    const page = await loadArchiveReplies(e, "PARENT-1", "USER-A", null);
+
+    expect((page!.comments as Array<{ id: string }>).map((c) => c.id)).toEqual(["THEIRS-1", "THEIRS-2"]);
+  });
+
+  it("leaves a thread alone when nothing in it is ours", async () => {
+    const e = env();
+    stubFetch(ok({ replies: [{ id: "THEIRS-1" }, { id: "THEIRS-2" }] }));
+
+    const page = await loadArchiveReplies(e, "PARENT-1", "USER-A", null);
+
+    expect((page!.comments as Array<{ id: string }>).map((c) => c.id)).toEqual(["THEIRS-1", "THEIRS-2"]);
   });
 });
 
