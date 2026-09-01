@@ -30,6 +30,8 @@ class FakeD1 {
   blocks: any[] = [];
   /** archive_comment_refs: archive ids WE published, i.e. our own mirrored rows. */
   refs: string[] = [];
+  /** archive_counts rows, keyed by entity_ref — what a read last saw. */
+  counts = new Map<string, { count: number; complete: number; seen_at: number }>();
   prepare(sql: string) {
     return new FakeStmt(this, sql.replace(/\s+/g, " ").trim());
   }
@@ -71,6 +73,15 @@ class FakeStmt {
     throw new Error("unhandled SQL: " + this.sql);
   }
   async run() {
+    if (this.sql.startsWith("INSERT INTO archive_counts")) {
+      const [ref, count, complete, seen] = this.a as [string, number, number, number];
+      const prev = this.db.counts.get(ref);
+      // Mirrors the conditional upsert: unchanged means no write at all.
+      if (!prev || prev.count !== count || prev.complete !== complete) {
+        this.db.counts.set(ref, { count, complete, seen_at: seen });
+      }
+      return { success: true, meta: { changes: 1 } };
+    }
     if (this.sql.startsWith("INSERT OR IGNORE INTO tvdb_map")) {
       if (!this.db.map.some((x) => x.media_type === this.a[0] && x.tmdb_id === this.a[1])) {
         this.db.map.push({ media_type: this.a[0], tmdb_id: this.a[1], tvdb_id: this.a[2] });
@@ -240,6 +251,71 @@ describe("source filter — the primary dedup", () => {
     await loadSources(e);
     await loadSources(e);
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("archive counts — the signal a collapsed header can afford", () => {
+  /**
+   * ⚠️ The point is that this costs NOTHING extra: the page was already fetched and the
+   * count thrown away. Recording it is what lets a header say a conversation exists
+   * without spending a `read_unit` per detail view — there is no bulk or counts
+   * endpoint upstream, so the alternative is one fetch per title.
+   */
+  it("records what the read already found", async () => {
+    const e = env();
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "A" }, { id: "B" }], complete: true }),
+    );
+
+    await loadArchivePage(e, "show", 1399, 2, 5, "USER-A", 121361, null);
+
+    const row = [...e.DB.counts.values()][0];
+    expect(row.count).toBe(2);
+    expect(row.complete).toBe(1);
+  });
+
+  it("stores the SUPPRESSED-adjusted count, not the raw page", async () => {
+    const e = env();
+    e.DB.suppressed.push("B");
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "A" }, { id: "B" }], complete: true }),
+    );
+
+    await loadArchivePage(e, "show", 1399, 2, 5, "USER-A", 121361, null);
+
+    // A row hidden product-wide is not part of the conversation for anyone.
+    expect([...e.DB.counts.values()][0].count).toBe(1);
+  });
+
+  it("does not let one reader's BLOCKS set the shared count", async () => {
+    const e = env();
+    e.DB.blocks.push({ blocker_id: "USER-A", source_slug: "tvtime", author_id: "BAD", display_name: "" });
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "A", origin: { slug: "tvtime" }, userId: "BAD" }, { id: "B" }], complete: true }),
+    );
+
+    await loadArchivePage(e, "show", 1399, 2, 5, "USER-A", 121361, null);
+
+    // The row is shared by every reader — baking A's block list into it is the
+    // cross-account leak the ordering in loadArchivePage exists to prevent.
+    expect([...e.DB.counts.values()][0].count).toBe(2);
+  });
+
+  it("does not overwrite the total with a PAGE when paging", async () => {
+    const e = env();
+    stubFetch(
+      ok([{ slug: "tvtime", status: "active" }]),
+      ok({ comments: [{ id: "C" }], complete: true }),
+    );
+
+    await loadArchivePage(e, "show", 1399, 2, 5, "USER-A", 121361, "cursor-2");
+
+    // Page 2 is a fragment. Recording its length would report a long conversation as
+    // one comment.
+    expect(e.DB.counts.size).toBe(0);
   });
 });
 

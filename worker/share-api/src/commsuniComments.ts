@@ -211,6 +211,34 @@ async function withoutOurs(env: CommsuniEnv, rows: unknown[]): Promise<unknown[]
   return rows.filter((r) => !ours.has((r as { id?: string })?.id ?? ""));
 }
 
+/**
+ * Remember how many comments an entity had, for the collapsed-header signal.
+ *
+ * ⚠️ `DO UPDATE ... WHERE count IS DISTINCT` — the write is skipped when nothing
+ * changed. Every sheet open reaches this, and the value is stable for most entities, so
+ * an unconditional upsert would bill a row written per open to store what was already
+ * there. `seen_at` moves only when the count does; it records when the value last
+ * CHANGED, which is the more useful fact and the reason this is not `DO UPDATE SET
+ * seen_at = ...` unconditionally.
+ */
+async function rememberCount(
+  env: CommsuniEnv,
+  entityRef: string,
+  count: number,
+  complete: boolean,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO archive_counts (entity_ref, count, complete, seen_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(entity_ref) DO UPDATE
+       SET count = excluded.count, complete = excluded.complete, seen_at = excluded.seen_at
+     WHERE archive_counts.count <> excluded.count OR archive_counts.complete <> excluded.complete`,
+  )
+    .bind(entityRef, count, complete ? 1 : 0, Date.now())
+    .run()
+    .catch(() => {});
+}
+
 // ── Reporting ───────────────────────────────────────────────────────────────
 
 /** Our reasons. Kept verbatim in `reports.context` so the admin sees what was picked. */
@@ -625,6 +653,24 @@ export async function loadArchivePage(
   const visible = suppressed.size === 0
     ? raw
     : raw.filter((c) => !suppressed.has((c as { id?: string })?.id ?? ""));
+
+  /**
+   * Record what this read found, so a collapsed header elsewhere can say a
+   * conversation exists without anyone paying a `read_unit` for it.
+   *
+   * ⚠️ From `visible` — after product-wide suppression, BEFORE the per-reader block
+   * filter below. The row is shared by every reader, and baking one reader's block list
+   * into it is exactly the cross-account leak the ordering here exists to prevent.
+   *
+   * ⚠️ First page only. A cursored read is page 2+, and writing its length would
+   * overwrite the total with a fragment.
+   *
+   * Best effort, like everything else in this file: a failed write costs a signal on a
+   * header, and must never take down the read it rode in on.
+   */
+  if (!cursor) {
+    await rememberCount(env, path, visible.length, res.data?.complete ?? false);
+  }
 
   // ⚠️ Per-READER, so it must run after the shared cache is read, never before — baking
   // one reader's block list into a cached page is precisely the cross-account leak
