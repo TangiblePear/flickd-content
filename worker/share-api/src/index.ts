@@ -897,11 +897,9 @@ export default {
       const session = await resolveSession(req, env as any, ctx);
       if (!session) return json({ error: "unauthorized" }, { status: 401 });
 
-      // ⚠️ Suspension check, same as the native path. Leaving reporting open to a
-      // suspended user makes suspension a promotion: they lose their voice but keep
-      // the censorship lever.
-      const until = await postingSuspendedUntil(env.DB, session.userId);
-      if (until > 0) return json(suspendedBody(until), { status: 403 });
+      // ⚠️ **No suspension gate — a suspended user may still report.** See the note on
+      // handleReportComment: §10 requires that anyone who can still see a comment can
+      // still report it, because reporting is not publishing.
 
       let payload: Record<string, unknown>;
       try {

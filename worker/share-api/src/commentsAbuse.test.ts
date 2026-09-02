@@ -324,7 +324,22 @@ describe("suspension reach", () => {
     expect(db.count("comment_reactions")).toBe(0);
   });
 
-  it("refuses a REPORT from a suspended user, so suspension is not a censorship promotion", async () => {
+  /**
+   * ⚠️ **This test asserted the OPPOSITE until §10 of the partner guide overruled it.**
+   *
+   * It used to expect 403, on the reasoning that leaving reporting open made suspension
+   * "a promotion" — you lose your voice but keep the censorship lever. The guide is
+   * explicit the other way: "Do not disable Report merely because posting is suspended:
+   * if that user can still view comments, they must still be able to report abuse."
+   *
+   * Reporting is not publishing. Someone who can see abuse and cannot flag it is a
+   * safety hole, and suspension already stops them writing. The brigading worry is
+   * answered elsewhere: auto-hide needs DISTINCT reporters, one report per reporter per
+   * target is enforced, and an auto-hide is provisional and moderator-reversible.
+   *
+   * Kept rather than deleted, so the reversal is visible to whoever reads this next.
+   */
+  it("ACCEPTS a report from a suspended user — reporting is not publishing", async () => {
     const db = new TestD1();
     const author = await seedAuthed(db, B);
     const env = testEnv(db);
@@ -341,8 +356,10 @@ describe("suspension reach", () => {
       env,
     );
 
-    expect(res.status).toBe(403);
-    expect(db.count("reports")).toBe(0);
+    // 204, the native report route's own success code. The upstream archive route is
+    // the one that answers 202; these are different endpoints.
+    expect(res.status).toBe(204);
+    expect(db.count("reports")).toBe(1);
   });
 });
 

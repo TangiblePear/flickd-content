@@ -2357,11 +2357,16 @@ export async function handleReportComment(
   const session = await resolveSession(req, env as any, ctx);
   if (!session) return json({ error: "unauthorized" }, 401);
 
-  // A report is the one write that acts on someone ELSE's content: REPORT_AUTOHIDE
-  // distinct reporters hide a comment outright. Leaving it open to a suspended user
-  // makes suspension a promotion — you lose your voice but keep the censorship lever.
-  const suspendedUntil = await postingSuspendedUntil(env.DB, session.userId);
-  if (suspendedUntil > 0) return json(suspendedBody(suspendedUntil), 403);
+  // ⚠️ **A suspended user may still REPORT.** This used to return 403, reasoning that
+  // leaving reporting open made suspension "a promotion" — you lose your voice but keep
+  // the censorship lever. §10 of the partner guide overrules that, and its reasoning is
+  // the better one: "if that user can still view comments, they must still be able to
+  // report abuse". Reporting is not publishing. Someone who can see abuse and is barred
+  // from flagging it is a safety hole, and the suspension already stops them writing.
+  //
+  // The brigading worry the old code had is answered elsewhere: REPORT_AUTOHIDE needs
+  // distinct reporters, one report per reporter per target is enforced below, and an
+  // auto-hide is provisional and reversible by a moderator.
 
   let payload: Record<string, unknown>;
   try {
