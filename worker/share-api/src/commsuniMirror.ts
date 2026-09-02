@@ -53,6 +53,8 @@ export interface MirrorableComment {
   body?: string | null;
   lang?: string | null;
   spoiler?: number | null;
+  /** OUR server's clock when the post arrived — never a device clock. */
+  created_at?: number | null;
 }
 
 /**
@@ -83,6 +85,51 @@ export function mayMirror(c: MirrorableComment | null | undefined): boolean {
  * billed on the request and not the outcome.
  */
 export const mirrorKey = (commentId: string, updatedAt: number): string => `${commentId}:${updatedAt}`;
+
+/** Epoch millis in the archive's accepted shape: ISO 8601 with an explicit `Z`. */
+const ARCHIVE_EPOCH_MS = Date.UTC(2010, 0, 1);
+
+/**
+ * Format a comment's true creation time for the archive, or null if it cannot be sent.
+ *
+ * ⚠️ **Naive datetimes are rejected**, so the `Z` is mandatory, not cosmetic.
+ *
+ * ⚠️ Two bounds, and both are the archive's: on or after 2010-01-01, and no more than
+ * five minutes in the future. Ours is a server clock so neither should ever trip, which
+ * is exactly why they are checked — an out-of-range value is a `400`, a `400` is not
+ * retryable, and the outbox would drop the row silently rather than retry it.
+ * Returning null means "omit the field", which is always legal.
+ */
+export function archiveCreatedAt(ms: number | null | undefined, now = Date.now()): string | null {
+  if (typeof ms !== "number" || !Number.isFinite(ms)) return null;
+  if (ms < ARCHIVE_EPOCH_MS) return null;
+  if (ms > now + 5 * 60_000) return null;
+  return new Date(ms).toISOString();
+}
+
+/**
+ * May this reply carry its own `createdAt`?
+ *
+ * ⚠️ **Only when the parent carries one too.** The archive refuses a reply timestamped
+ * before its parent, and a parent we mirrored without `createdAt` is stamped with its
+ * DRAIN time — later than when it was written. A reply sent with its true time would
+ * then look earlier than the comment it answers and come back `400 invalid_created_at`,
+ * which is a 4xx, so the outbox settles it and the reply is lost with nothing logged.
+ *
+ * A parent with no ref row at all is a foreign or archived comment. Those are TV Time
+ * history or another partner's row, already stored with their own real timestamps, so a
+ * reply written today is safely after them.
+ */
+async function parentAcceptsCreatedAt(env: MirrorEnv, parentArchiveId: string | undefined): Promise<boolean> {
+  if (!parentArchiveId) return true; // Top-level: no parent to be earlier than.
+  const ref = await env.DB
+    .prepare("SELECT sent_created_at FROM archive_comment_refs WHERE archive_id = ?")
+    .bind(parentArchiveId)
+    .first<{ sent_created_at: number }>()
+    .catch(() => null);
+  if (!ref) return true; // Not ours ⇒ archived/foreign ⇒ genuinely older.
+  return ref.sent_created_at === 1;
+}
 
 interface OutboxRow {
   id: string;
@@ -136,7 +183,7 @@ async function publishComment(env: MirrorEnv, row: OutboxRow): Promise<boolean> 
   // suspended in the window between queueing and draining — which is the entire reason
   // the mirror runs here rather than inline with the post.
   const live = await env.DB
-    .prepare("SELECT id, author_id, visibility, hidden_at, deleted_at, body, lang, spoiler FROM comments WHERE id = ?")
+    .prepare("SELECT id, author_id, visibility, hidden_at, deleted_at, body, lang, spoiler, created_at FROM comments WHERE id = ?")
     .bind(p.commentId)
     .first<MirrorableComment>()
     .catch(() => null);
@@ -151,6 +198,12 @@ async function publishComment(env: MirrorEnv, row: OutboxRow): Promise<boolean> 
     ? `/comments/${p.parentArchiveId}/replies`
     : `/entities/${p.refPath}/comments`;
 
+  // The true post time, not the time this drain happens to run. Omitted rather than
+  // guessed whenever it cannot be sent safely — see the two helpers above.
+  const createdAt = (await parentAcceptsCreatedAt(env, p.parentArchiveId))
+    ? archiveCreatedAt(live!.created_at)
+    : null;
+
   const res = await commsuniCall<{ comment?: { id?: string } }>(env, path, {
     method: "POST",
     actor,
@@ -162,6 +215,7 @@ async function publishComment(env: MirrorEnv, row: OutboxRow): Promise<boolean> 
       // ⚠️ `attachments`. `media`, `gif` and `imageUrl` are all 400.
       ...(p.attachments?.length ? { attachments: p.attachments } : {}),
       ...(p.entity ? { entity: p.entity } : {}),
+      ...(createdAt ? { createdAt } : {}),
     },
   });
 
@@ -172,11 +226,14 @@ async function publishComment(env: MirrorEnv, row: OutboxRow): Promise<boolean> 
 
   await env.DB
     .prepare(
-      `INSERT INTO archive_comment_refs (comment_id, archive_id, author_id, edits, shared, mirrored_at)
-       VALUES (?, ?, ?, 0, 1, ?)
-       ON CONFLICT(comment_id) DO UPDATE SET archive_id = excluded.archive_id, shared = 1`,
+      `INSERT INTO archive_comment_refs (comment_id, archive_id, author_id, edits, shared, mirrored_at, sent_created_at)
+       VALUES (?, ?, ?, 0, 1, ?, ?)
+       ON CONFLICT(comment_id) DO UPDATE SET archive_id = excluded.archive_id, shared = 1,
+                                             sent_created_at = excluded.sent_created_at`,
     )
-    .bind(p.commentId, archiveId, row.actor_user_id, Date.now())
+    // ⚠️ Recorded so a future REPLY to this comment knows whether it may carry its own
+    // timestamp. Without it every reply would have to assume the worst and omit one.
+    .bind(p.commentId, archiveId, row.actor_user_id, Date.now(), createdAt ? 1 : 0)
     .run();
   return true;
 }

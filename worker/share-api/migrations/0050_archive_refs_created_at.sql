@@ -1,0 +1,18 @@
+-- Did we send `createdAt` when we mirrored this comment?
+--
+-- ⚠️ This exists to avoid a `400 invalid_created_at` that would SILENTLY drop replies.
+--
+-- The archive rejects a reply whose `createdAt` is before its parent's stored time. Rows
+-- we mirrored before this column existed went up WITHOUT `createdAt`, so upstream stamped
+-- them with the time the outbox happened to drain — which is LATER than when the user
+-- actually wrote them. Send a reply's true timestamp under such a parent and the reply
+-- looks like it predates the comment it answers, even though the user genuinely replied
+-- afterwards.
+--
+-- A 400 is a 4xx, so the outbox treats it as settled and deletes the row. The reply would
+-- never reach the archive and nothing would be logged. Hence: only send `createdAt` on a
+-- reply when its parent also carries one.
+--
+-- Defaults to 0, which is correct for every row already in the table: none of them were
+-- written with a timestamp.
+ALTER TABLE archive_comment_refs ADD COLUMN sent_created_at INTEGER NOT NULL DEFAULT 0;

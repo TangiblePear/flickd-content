@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { DRAIN_LIMIT, identityChoice, mayMirror, mirrorEnabled, mirrorKey } from "./commsuniMirror";
+import { DRAIN_LIMIT, archiveCreatedAt, identityChoice, mayMirror, mirrorEnabled, mirrorKey } from "./commsuniMirror";
 
 /**
  * The write mirror is the only code here that makes a user's words leave our systems.
@@ -118,5 +118,37 @@ describe("author identity", () => {
   it("treats a database failure as never-asked rather than as consent", async () => {
     const env = { DB: { prepare: () => ({ bind: () => ({ first: async () => { throw new Error("d1 down"); } }) }) } } as any;
     expect(await identityChoice(env, "u1")).toBe(null);
+  });
+});
+
+describe("archiveCreatedAt", () => {
+  const now = Date.UTC(2026, 8, 2, 12, 0, 0);
+
+  it("formats as ISO 8601 with an explicit Z", () => {
+    // ⚠️ Naive datetimes are REJECTED by the archive, so the trailing Z is load-bearing.
+    const out = archiveCreatedAt(Date.UTC(2020, 4, 18, 21, 4, 11), now);
+    expect(out).toBe("2020-05-18T21:04:11.000Z");
+    expect(out!.endsWith("Z")).toBe(true);
+  });
+
+  it("⚠️ omits rather than sends anything outside the accepted window", () => {
+    // Both bounds are the archive's. Ours is a server clock so neither should ever
+    // trip — which is why they are checked: an out-of-range value is a 400, a 400 is
+    // not retryable, and the outbox would drop the comment silently instead of
+    // retrying it. Omitting the field is always legal; guessing is not.
+    expect(archiveCreatedAt(Date.UTC(2009, 11, 31), now)).toBe(null);
+    expect(archiveCreatedAt(now + 6 * 60_000, now)).toBe(null);
+    // Just inside each bound still sends.
+    expect(archiveCreatedAt(Date.UTC(2010, 0, 1), now)).not.toBe(null);
+    expect(archiveCreatedAt(now + 60_000, now)).not.toBe(null);
+  });
+
+  it("omits for a missing or nonsense value rather than sending an epoch date", () => {
+    // A null created_at must not become 1970-01-01, which would be a plausible-looking
+    // lie about when someone wrote something.
+    expect(archiveCreatedAt(null, now)).toBe(null);
+    expect(archiveCreatedAt(undefined, now)).toBe(null);
+    expect(archiveCreatedAt(NaN, now)).toBe(null);
+    expect(archiveCreatedAt(0, now)).toBe(null);
   });
 });
