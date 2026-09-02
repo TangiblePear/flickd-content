@@ -6,7 +6,8 @@
 // from episode_votes now, so these assert the derivation, not a counter table.
 
 import { describe, it, expect } from "vitest";
-import { handleGetPoll, handlePutVote, parseVote } from "./poll";
+import { handleGetMyEpisodeRatings, handleGetPoll, handlePutVote, parseVote } from "./poll";
+import { TestD1, seedSession, seedUser, testEnv, uid } from "./testD1";
 
 const A = "AAAAH73X7P55T48R4CFHDED9CW";
 const B = "BBBBJ84Y8Q66V59S5DGJEFEAX0";
@@ -348,5 +349,96 @@ describe("parseVote", () => {
 
     expect(option(e, "person", "TVMAZE:c101").n).toBe(1);
     expect(option(e, "person", "TVMAZE:c102").n).toBe(1);
+  });
+});
+
+
+// ── GET /api/me/episode-ratings ─────────────────────────────────────────────
+//
+// `episode_votes` has always been write-only from the client's point of view: a vote
+// is cast and never read back, which is why lib/poll.ts on the web has to remember
+// the user's own vote in localStorage and why a vote cast on the phone does not
+// pre-fill anywhere else. This is the read.
+//
+// Run against real SQLite built from the real migrations (testD1), not a
+// string-matching double: the whole risk here is the SQL, and a double that answers
+// "no rows" to an unrecognised query would pass on a broken WHERE.
+describe("my episode ratings", () => {
+  const req = (token?: string, qs = "") =>
+    new Request(`https://flickto.app/api/me/episode-ratings${qs}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+
+  async function sha256Hex(input: string): Promise<string> {
+    const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function signedIn(db: TestD1, n: number) {
+    const id = uid(n);
+    seedUser(db, { id });
+    const token = `token-${n}`;
+    seedSession(db, id, await sha256Hex(token));
+    return { id, token };
+  }
+
+  const vote = (db: TestD1, userId: string, o: { tmdbId?: number; season: number; episode: number; rating: number | null; at: number }) =>
+    db.prepare(
+      `INSERT INTO episode_votes (user_id, tmdb_id, media_type, season, episode, rating, emotions, updated_at)
+       VALUES (?, ?, 'show', ?, ?, ?, '', ?)`,
+    ).bind(userId, o.tmdbId ?? 1396, o.season, o.episode, o.rating, o.at).run();
+
+  it("refuses without a session", async () => {
+    const db = new TestD1();
+    expect((await handleGetMyEpisodeRatings(req(), testEnv(db))).status).toBe(401);
+  });
+
+  it("returns the caller's rated episodes, most recently rated first", async () => {
+    const db = new TestD1();
+    const me = await signedIn(db, 1);
+    vote(db, me.id, { season: 2, episode: 5, rating: 8, at: 1000 });
+    vote(db, me.id, { season: 2, episode: 6, rating: 10, at: 3000 });
+
+    const body: any = await (await handleGetMyEpisodeRatings(req(me.token), testEnv(db))).json();
+    expect(body.ratings).toEqual([
+      { tmdbId: 1396, mediaType: "show", season: 2, episode: 6, rating: 10, updatedAt: 3000 },
+      { tmdbId: 1396, mediaType: "show", season: 2, episode: 5, rating: 8, updatedAt: 1000 },
+    ]);
+  });
+
+  // Someone else's ratings are not the caller's business, and `user_id` is the only
+  // thing separating them in this table.
+  it("never returns another account's rows", async () => {
+    const db = new TestD1();
+    const me = await signedIn(db, 1);
+    const them = await signedIn(db, 2);
+    vote(db, them.id, { season: 1, episode: 1, rating: 9, at: 5000 });
+
+    const body: any = await (await handleGetMyEpisodeRatings(req(me.token), testEnv(db))).json();
+    expect(body.ratings).toEqual([]);
+  });
+
+  // A vote can be emotions-only. Those rows are votes, not ratings, and a "you rated"
+  // list that included them would show an entry with no score against it.
+  it("skips a vote that carries no score", async () => {
+    const db = new TestD1();
+    const me = await signedIn(db, 1);
+    vote(db, me.id, { season: 1, episode: 1, rating: null, at: 5000 });
+    vote(db, me.id, { season: 1, episode: 2, rating: 6, at: 4000 });
+
+    const body: any = await (await handleGetMyEpisodeRatings(req(me.token), testEnv(db))).json();
+    expect(body.ratings.map((r: any) => r.episode)).toEqual([2]);
+  });
+
+  it("honours a limit and caps it", async () => {
+    const db = new TestD1();
+    const me = await signedIn(db, 1);
+    for (let e = 1; e <= 5; e++) vote(db, me.id, { season: 1, episode: e, rating: 7, at: e * 100 });
+
+    const two: any = await (await handleGetMyEpisodeRatings(req(me.token, "?limit=2"), testEnv(db))).json();
+    expect(two.ratings.map((r: any) => r.episode)).toEqual([5, 4]);
+
+    const silly: any = await (await handleGetMyEpisodeRatings(req(me.token, "?limit=99999"), testEnv(db))).json();
+    expect(silly.ratings).toHaveLength(5);
   });
 });

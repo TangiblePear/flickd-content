@@ -37,6 +37,7 @@ import {
   parseDoc,
   parseEventId,
   recentEvents,
+  titleRatings,
   serialiseDoc,
   statsFor,
   type HistoryDoc,
@@ -141,6 +142,14 @@ const DEFAULT_PAGE = 50;
  * sorts of the same data. The web walked exactly that loop on every signed-in page load.
  */
 const MAX_PAGE = 4000;
+
+/**
+ * A ceiling on the ratings returned with a list, not a page size — there is no cursor.
+ * One object per title the user has explicitly rated, statused or given feedback on;
+ * even a decade-old account is comfortably inside this, and the cap only exists so a
+ * pathological document cannot make the response unbounded.
+ */
+const MAX_RATINGS_RETURNED = 5000;
 
 /** A watch counts toward totals at this much progress. Below it, it is an abandon. */
 const WATCHED_THRESHOLD_PCT = 80;
@@ -723,6 +732,12 @@ export async function handleGetHistory(req: Request, env: HistoryEnv, ctx?: Exec
     events: page,
     total: all.length,
     nextOffset: offset + page.length < all.length ? offset + page.length : null,
+    // Deliberately NOT narrowed by `type` and NOT paged. These are the account's
+    // explicit ratings, statuses and feedback — one small object per rated title, not a
+    // log — and a client showing "what you just rated" needs the whole set whatever
+    // list it happens to be reading. They are absent from the `upToDate` answer above
+    // for the same reason the events are: a current client already holds them.
+    ratings: titleRatings(doc, MAX_RATINGS_RETURNED),
     // What the caller must send back as `since`. From the DOCUMENT, never `readMeta` —
     // the R2 CAS serialises writers, so the version carried by the stored document is
     // the only one that cannot label two different states (see mergeAndStore).

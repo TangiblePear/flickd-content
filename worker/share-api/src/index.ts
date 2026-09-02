@@ -126,7 +126,7 @@ import {
   removeArchiveBlock,
 } from "./commsuniComments";
 import { drainArchiveOutbox, identityChoice, setIdentityChoice } from "./commsuniMirror";
-import { handleGetPoll, handlePutVote } from "./poll";
+import { handleGetMyEpisodeRatings, handleGetPoll, handlePutVote } from "./poll";
 import {
   handleGetDistribution,
   handleGetFriendsDay,
@@ -730,6 +730,11 @@ export default {
       if (pollSubject[3] === "poll" && req.method === "GET") return handleGetPoll(req, env, subject, ctx);
       if (pollSubject[3] === "vote" && req.method === "PUT") return handlePutVote(req, env, subject, ctx);
     }
+
+    // The per-reader half of the poll. It cannot ride the `/api/titles/…` shape above:
+    // that read is unauthenticated and edge-cached precisely because one response is
+    // correct for every reader, and this one is correct for exactly one.
+    if (p === "/api/me/episode-ratings" && req.method === "GET") return handleGetMyEpisodeRatings(req, env, ctx);
 
     // ── One Take, the daily puzzle ──
     //

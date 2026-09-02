@@ -9,7 +9,7 @@
 // rather than a fake of them.
 
 import { describe, it, expect } from "vitest";
-import { applyToDoc, emptyDoc, parseDoc, recentEvents, serialiseDoc, statsFor, type IncomingEvent, TOMBSTONE_TTL_MS, MAX_TOMBSTONES, dailyActivity } from "./historyDoc";
+import { applyToDoc, emptyDoc, parseDoc, recentEvents, serialiseDoc, statsFor, titleRatings, type IncomingEvent, type IncomingRating, TOMBSTONE_TTL_MS, MAX_TOMBSTONES, dailyActivity } from "./historyDoc";
 
 const SEC = 1_700_000_000;
 const ms = (s: number) => s * 1000;
@@ -479,5 +479,57 @@ describe("dailyActivity", () => {
 
   it("is empty for an empty document", () => {
     expect(dailyActivity(emptyDoc(), 0)).toEqual({});
+  });
+});
+
+// ── Reading ratings back out ────────────────────────────────────────────────
+//
+// `applyToDoc` has folded ratings into the document since the feature shipped, and
+// nothing has ever read them out again — so a rating made on the phone was invisible
+// to every other client. These pin the reader.
+describe("titleRatings", () => {
+  const rating = (tmdbId: number, value: number, at: number, over: Partial<IncomingRating> = {}): IncomingRating => ({
+    mediaType: "SHOW",
+    tmdbId,
+    rating: value,
+    watchStatus: null,
+    feedback: null,
+    updatedAt: at,
+    ...over,
+  });
+
+  it("returns one entry per rated title, newest first", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [], [rating(1396, 9, 3000), rating(1399, 7, 5000)], 5000);
+
+    expect(titleRatings(doc, 10).map((r) => [r.tmdbId, r.rating])).toEqual([
+      [1399, 7],
+      [1396, 9],
+    ]);
+  });
+
+  it("carries the status and the feedback alongside the score", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [], [rating(550, 8, 1000, { mediaType: "MOVIE", watchStatus: "COMPLETED", feedback: "LIKED" })], 1000);
+
+    expect(titleRatings(doc, 10)).toEqual([
+      { mediaType: "MOVIE", tmdbId: 550, rating: 8, status: "COMPLETED", feedback: "LIKED", updatedAt: 1000 },
+    ]);
+  });
+
+  // A title carries `rAt` only once something explicit was written to it. Watching an
+  // episode must not put the show in this list — that is what the events are for.
+  it("ignores titles that were only ever watched", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [ep(1396, 2, 5, SEC)], [], ms(SEC));
+
+    expect(titleRatings(doc, 10)).toEqual([]);
+  });
+
+  it("honours the limit", () => {
+    const doc = emptyDoc();
+    applyToDoc(doc, [], [rating(1, 5, 1000), rating(2, 6, 2000), rating(3, 7, 3000)], 3000);
+
+    expect(titleRatings(doc, 2).map((r) => r.tmdbId)).toEqual([3, 2]);
   });
 });

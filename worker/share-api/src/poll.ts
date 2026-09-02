@@ -331,3 +331,59 @@ export async function handlePutVote(
   const { totals, options } = await loadPoll(env, s);
   return json(pollBody(totals, options));
 }
+
+// ── GET /api/me/episode-ratings ─────────────────────────────────────────────
+
+/** The most this endpoint will ever return, whatever `limit` asks for. */
+const MAX_MY_RATINGS = 500;
+const DEFAULT_MY_RATINGS = 100;
+
+/**
+ * The caller's own episode ratings, most recently rated first.
+ *
+ * `episode_votes` was write-only from the client's side: the poll read returns
+ * aggregates, deliberately, because that is what makes it cacheable at the edge for
+ * every reader at once. So a vote went in and nothing could ever show it back — which
+ * is why the web remembers the user's own vote in localStorage, and why a vote cast on
+ * the phone does not pre-fill anywhere else.
+ *
+ * This is the per-user read, and it is a different shape of request: authenticated,
+ * uncacheable, and keyed on `user_id` — the PRIMARY KEY's leading column, so it is an
+ * index seek rather than a scan.
+ *
+ * ⚠️ `rating IS NOT NULL` is load-bearing. A vote can be emotions-only, and those rows
+ * are votes rather than ratings; including them would put entries with no score into a
+ * list whose entire subject is the score.
+ */
+export async function handleGetMyEpisodeRatings(
+  req: Request,
+  env: PollEnv,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const session = await resolveSession(req, env as never, ctx);
+  if (!session) return json({ error: "unauthorized" }, 401);
+
+  const raw = Number(new URL(req.url).searchParams.get("limit"));
+  const limit = Number.isFinite(raw) && raw > 0 ? Math.min(Math.floor(raw), MAX_MY_RATINGS) : DEFAULT_MY_RATINGS;
+
+  const { results } = await env.DB.prepare(
+    `SELECT tmdb_id, media_type, season, episode, rating, updated_at
+       FROM episode_votes
+      WHERE user_id = ? AND rating IS NOT NULL
+      ORDER BY updated_at DESC
+      LIMIT ?`,
+  )
+    .bind(session.userId, limit)
+    .all<{ tmdb_id: number; media_type: string; season: number; episode: number; rating: number; updated_at: number }>();
+
+  return json({
+    ratings: (results ?? []).map((r) => ({
+      tmdbId: r.tmdb_id,
+      mediaType: r.media_type,
+      season: r.season,
+      episode: r.episode,
+      rating: r.rating,
+      updatedAt: r.updated_at,
+    })),
+  });
+}

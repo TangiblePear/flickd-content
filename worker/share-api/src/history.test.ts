@@ -665,6 +665,45 @@ describe("history: paginated read", () => {
   });
 });
 
+describe("history: ratings come back", () => {
+  // The whole point. `POST /api/history/sync` has accepted `ratings[]` since the
+  // feature shipped and the read returned only watch events, so a rating made on the
+  // phone could never be shown anywhere else — it went in and stayed in.
+  const rate = (tmdbId: number, rating: number, at: number, over: Record<string, unknown> = {}) => ({
+    mediaType: "SHOW", tmdbId, rating, watchStatus: null, feedback: null, updatedAt: at, ...over,
+  });
+
+  it("returns what the user has rated, newest change first", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, ratings: [rate(1396, 9, 3000), rate(1399, 7, 5000)] }), env);
+
+    const body = await (await handleGetHistory(listReq("tok-a"), env)).json();
+    expect(body.ratings.map((r: any) => [r.tmdbId, r.rating])).toEqual([[1399, 7], [1396, 9]]);
+  });
+
+  // The list is filtered by media type; the ratings are the account's, and slicing them
+  // to the filter would make a films-only page unable to show a series rating it holds.
+  it("is not narrowed by the type filter", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, ratings: [rate(550, 8, 1000, { mediaType: "MOVIE" }), rate(1396, 9, 2000)] }), env);
+
+    const body = await (await handleGetHistory(listReq("tok-a", "?type=MOVIE"), env)).json();
+    expect(body.ratings).toHaveLength(2);
+  });
+
+  // A client that is already current is told so and sent nothing. Its cached ratings are
+  // as current as its cached events, so shipping them here would be pure waste.
+  it("sends none on the up-to-date short circuit", async () => {
+    const env = await env0();
+    await handleHistorySync(syncReq("tok-a", { ...base, ratings: [rate(1396, 9, 3000)] }), env);
+    const first = await (await handleGetHistory(listReq("tok-a"), env)).json();
+
+    const again = await (await handleGetHistory(listReq("tok-a", `?since=${first.version}`), env)).json();
+    expect(again.upToDate).toBe(true);
+    expect(again.ratings).toBeUndefined();
+  });
+});
+
 describe("history: revalidating a cached list", () => {
   // The web holds the list on disk and asks only whether it moved. The whole value of
   // that is what the server DOESN'T do on the common answer, so R2 access is the

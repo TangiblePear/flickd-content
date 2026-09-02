@@ -127,6 +127,11 @@ const ROUTES: Array<[string, string, unknown?]> = [
   // Episode poll. The GET is edge-cached and unauthenticated; the PUT is session-authed.
   ["GET", "/api/titles/show/1399/poll?season=2&episode=5"],
   ["PUT", "/api/titles/show/1399/vote?season=2&episode=5", { rating: 8, emotions: ["SAD"] }],
+  // The caller's own episode ratings. Sits under `/api/me/` rather than the subject
+  // shape above because it is keyed on the reader, not on an episode — and so it is
+  // authenticated and uncacheable where the poll read is neither.
+  ["GET", "/api/me/episode-ratings"],
+  ["GET", "/api/me/episode-ratings?limit=20"],
   ["POST", "/api/comments", { id: "AAAAAAAA", tmdbId: 603, mediaType: "movie", body: "hi" }],
   ["DELETE", "/api/comments/AAAAAAAA"],
   ["POST", "/api/comments/AAAAAAAA/reaction", { emoji: "🔥" }],
@@ -196,6 +201,9 @@ describe("route wiring", () => {
       // it answers 200 unauthenticated, which is the whole point of it.
       ["GET", "/api/titles/movie/603/comments/friends"],
       ["PUT", "/api/titles/show/1399/vote?season=2&episode=5"],
+      // The per-reader half of the poll: unlike the aggregate GET above it is the
+      // caller's own data, so it must refuse rather than answer for nobody.
+      ["GET", "/api/me/episode-ratings"],
       ["POST", "/api/comments"],
       ["DELETE", "/api/comments/AAAAAAAA"],
       ["POST", "/api/comments/AAAAAAAA/reaction"],

@@ -414,6 +414,45 @@ export function recentEvents(doc: HistoryDoc, limit: number): Array<{
   return out.slice(0, limit);
 }
 
+/** One title's explicit user state, as `titleRatings` hands it back. */
+export interface TitleRating {
+  mediaType: string;
+  tmdbId: number;
+  rating?: number;
+  status?: string;
+  feedback?: string;
+  /** `rAt` — when the user last changed any of the three. */
+  updatedAt: number;
+}
+
+/**
+ * The ratings, statuses and feedback the user has set, newest change first.
+ *
+ * The document has carried these since `applyToDoc` learned to fold them in, and
+ * nothing read them back — so a rating set on one device was invisible everywhere
+ * else. Keyed off `rAt`, which is written ONLY by an explicit user action: a title
+ * that was merely watched has no `rAt` and is not a rating.
+ */
+export function titleRatings(doc: HistoryDoc, limit: number): TitleRating[] {
+  const out: TitleRating[] = [];
+  for (const [key, title] of Object.entries(doc.titles)) {
+    if (title.rAt == null) continue;
+    const [mediaType, rawId] = key.split("|");
+    const tmdbId = Number(rawId);
+    if (!Number.isFinite(tmdbId)) continue;
+    out.push({
+      mediaType,
+      tmdbId,
+      rating: title.rating,
+      status: title.status,
+      feedback: title.feedback,
+      updatedAt: title.rAt,
+    });
+  }
+  out.sort((a, b) => b.updatedAt - a.updatedAt);
+  return out.slice(0, limit);
+}
+
 // ── Serialisation ───────────────────────────────────────────────────────────
 //
 // gzip is worth ~5.6x on this shape (measured: 99.5 KB -> 17.8 KB for 2,917 events),
