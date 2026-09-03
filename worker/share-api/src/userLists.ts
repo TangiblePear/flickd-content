@@ -53,7 +53,30 @@ const WATCHLIST_KIND = "BUILTIN_WATCHLIST";
 const now = () => Date.now();
 const str = (v: unknown, max: number): string | null =>
   typeof v === "string" && v.length ? v.slice(0, max) : null;
-const int = (v: unknown): number | null => (Number.isFinite(Number(v)) ? Math.trunc(Number(v)) : null);
+/**
+ * ⚠️ **`Number(null)` is 0, and 0 is finite.**
+ *
+ * Without the emptiness guard every null the client sends for a smart list's
+ * numeric bounds was stored as 0 — and a 0 read back is indistinguishable from
+ * a real bound, because the clients test `!= null`. A list saved with no
+ * rating or vote ceiling evaluated as `vote_average.lte=0` /
+ * `vote_count.lte=0`, which excludes every title that has any rating or any
+ * votes: the list came back empty while the same filters in Discover, which
+ * never round-trip through here, returned results.
+ *
+ * `undefined` was already safe by accident (`Number(undefined)` is NaN), so
+ * only an EXPLICIT null was affected — which is exactly what a client sending
+ * a complete filter set sends.
+ */
+const num = (v: unknown): number | null => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const int = (v: unknown): number | null => {
+  const n = num(v);
+  return n === null ? null : Math.trunc(n);
+};
 const bool = (v: unknown): number => (v === true || v === 1 || v === "1" ? 1 : 0);
 
 interface ListRow {
@@ -215,8 +238,8 @@ function filterStatement(env: UserListsEnv, userId: string, listId: string, f: R
     arr(f.excludeGenres),
     int(f.yearFrom),
     int(f.yearTo),
-    Number.isFinite(Number(f.ratingMin)) ? Number(f.ratingMin) : null,
-    Number.isFinite(Number(f.ratingMax)) ? Number(f.ratingMax) : null,
+    num(f.ratingMin),
+    num(f.ratingMax),
     int(f.voteCountMin),
     int(f.voteCountMax),
     str(f.language, 12),
