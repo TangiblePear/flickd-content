@@ -2,9 +2,9 @@ import { generateTitles } from "./gemini";
 import { pickPromptFor } from "./prompts";
 import { resolveTmdb } from "./tmdb";
 import { generateGameForDate } from "./game/generate";
-import { generateReelForDate } from "./game/generateReel";
-import { generateOrderForDate } from "./game/generateOrder";
-import { generateGridForDate } from "./game/generateGrid";
+import { generateFlickReelForDate } from "./game/generateFlickReel";
+import { generateFlickologyForDate } from "./game/generateFlickology";
+import { generateFlickGridForDate } from "./game/generateFlickGrid";
 import { generateLinkForDate } from "./game/generateLink";
 
 interface Env {
@@ -71,21 +71,21 @@ export default {
      * the day its Flickdl too.
      */
     try {
-      await generateReelForDate(at, env);
+      await generateFlickReelForDate(at, env);
     } catch (err) {
-      console.error("daily-ai: Reel generation failed", err);
+      console.error("daily-ai: FlickReel generation failed", err);
     }
 
     try {
-      await generateOrderForDate(at, env);
+      await generateFlickologyForDate(at, env);
     } catch (err) {
-      console.error("daily-ai: Chronology generation failed", err);
+      console.error("daily-ai: Flickology generation failed", err);
     }
 
     try {
-      await generateGridForDate(at, env);
+      await generateFlickGridForDate(at, env);
     } catch (err) {
-      console.error("daily-ai: Grid generation failed", err);
+      console.error("daily-ai: FlickGrid generation failed", err);
     }
 
     /*

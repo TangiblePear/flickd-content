@@ -1,5 +1,5 @@
 /**
- * Generates the day's Chronology puzzle and publishes it.
+ * Generates the day's Flickology puzzle and publishes it.
  *
  * Five titles, one true order, and no losing state -- an ordering is always some distance
  * from right, and that distance is the score. See inversions()/orderScore() in
@@ -13,8 +13,8 @@
  * candidates must be SPREAD along the axis -- see MIN_GAP. That check is most of this
  * file, and it is why it rejects far more sets than it publishes.
  *
- *   content/game/order/latest.json        public, TODAY only, values obfuscated
- *   game-state/answers/order/{date}.json  PRIVATE, carries the correct ORDER
+ *   content/game/flickology/latest.json        public, TODAY only, values obfuscated
+ *   game-state/answers/flickology/{date}.json  PRIVATE, carries the correct ORDER
  */
 import { POOL, type PoolEntry } from "./pool";
 import { obfuscatePayload, KEY_VERSION } from "./obfuscate";
@@ -23,9 +23,9 @@ export interface OrderEnv {
   CONTENT_BUCKET: R2Bucket;
 }
 
-const LATEST_KEY = "content/game/order/latest.json";
-const RECENT_KEY = "game-state/order-recent.json";
-const ANSWER_PREFIX = "game-state/answers/order/";
+const LATEST_KEY = "content/game/flickology/latest.json";
+const RECENT_KEY = "game-state/flickology-recent.json";
+const ANSWER_PREFIX = "game-state/answers/flickology/";
 
 /** Its own epoch, for the reason every game has one: see generateReel.ts. */
 const EPOCH_DATE = "2026-09-03";
@@ -164,13 +164,13 @@ async function pruneAnswers(bucket: R2Bucket, todayIso: string): Promise<number>
   return removed;
 }
 
-export async function generateOrderForDate(date: Date, env: OrderEnv): Promise<void> {
+export async function generateFlickologyForDate(date: Date, env: OrderEnv): Promise<void> {
   const iso = isoDate(date);
   const bucket = env.CONTENT_BUCKET;
 
   const existing = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (existing?.date === iso) {
-    console.log(`order: ${iso} already published, leaving it alone`);
+    console.log(`flickology: ${iso} already published, leaving it alone`);
     return;
   }
 
@@ -189,7 +189,7 @@ export async function generateOrderForDate(date: Date, env: OrderEnv): Promise<v
    */
   const known = POOL.filter((p) => p.band <= 3 && !recent.has(p.tmdbId) && valueOf(p, axis) > 0);
   if (known.length < CARDS * 4) {
-    console.error(`order: not enough usable titles for ${iso} on axis ${axis} (${known.length})`);
+    console.error(`flickology: not enough usable titles for ${iso} on axis ${axis} (${known.length})`);
     return;
   }
 
@@ -207,7 +207,7 @@ export async function generateOrderForDate(date: Date, env: OrderEnv): Promise<v
   }
 
   if (!chosen) {
-    console.error(`order: no spread set found for ${iso} on axis ${axis} after ${MAX_ATTEMPTS} attempts`);
+    console.error(`flickology: no spread set found for ${iso} on axis ${axis} after ${MAX_ATTEMPTS} attempts`);
     return;
   }
 
@@ -249,7 +249,7 @@ export async function generateOrderForDate(date: Date, env: OrderEnv): Promise<v
 
   const current = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (current?.date && current.date !== iso) {
-    await putJson(bucket, `content/game/order/${current.date}.json`, current);
+    await putJson(bucket, `content/game/flickology/${current.date}.json`, current);
   }
   await putJson(bucket, LATEST_KEY, envelope(puzzle));
 
@@ -258,7 +258,7 @@ export async function generateOrderForDate(date: Date, env: OrderEnv): Promise<v
 
   const pruned = await pruneAnswers(bucket, iso);
   console.log(
-    `order: ${iso} #${puzzleNumber} axis ${axis} -> ${chosen.map((c) => c.title).join(", ")} ` +
+    `flickology: ${iso} #${puzzleNumber} axis ${axis} -> ${chosen.map((c) => c.title).join(", ")} ` +
       `[${nextRecent.length} recent, ${pruned} answers pruned]`,
   );
 }

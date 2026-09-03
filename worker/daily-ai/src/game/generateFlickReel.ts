@@ -8,10 +8,10 @@
  *
  * ## What gets written where
  *
- *   content/game/reel/latest.json        public, TODAY only, answer obfuscated
- *   content/game/reel/{yesterday}.json   public archive, written as today's replaces it
- *   game-state/answers/reel/{date}.json  PRIVATE, plaintext, read by share-api to verify
- *   game-state/reel-recent.json          PRIVATE, the last year of answers, to avoid repeats
+ *   content/game/flickreel/latest.json        public, TODAY only, answer obfuscated
+ *   content/game/flickreel/{yesterday}.json   public archive, written as today's replaces it
+ *   game-state/answers/flickreel/{date}.json  PRIVATE, plaintext, read by share-api to verify
+ *   game-state/flickreel-recent.json          PRIVATE, the last year of answers, to avoid repeats
  *
  * The namespaced answer path is what dailyGame.ts's readAnswer expects for every game
  * except Flickdl, which keeps the flat key it has forty days of archives under.
@@ -28,9 +28,9 @@ export interface ReelEnv {
   TMDB_API_KEY: string;
 }
 
-const LATEST_KEY = "content/game/reel/latest.json";
-const RECENT_KEY = "game-state/reel-recent.json";
-const ANSWER_PREFIX = "game-state/answers/reel/";
+const LATEST_KEY = "content/game/flickreel/latest.json";
+const RECENT_KEY = "game-state/flickreel-recent.json";
+const ANSWER_PREFIX = "game-state/answers/flickreel/";
 const TITLE_INDEX = "titles.v2.json";
 
 /**
@@ -66,7 +66,7 @@ function daysBetween(fromIso: string, toIso: string): number {
 /**
  * Monday easiest, Sunday hardest — but only as far as band 4. Same rotation as Flickdl's.
  *
- * The pool still has seven bands and `band <= 3` still means what it means to Chronology
+ * The pool still has seven bands and `band <= 3` still means what it means to Flickology
  * and Flicklink, which is why this compresses the WEEKDAY MAPPING rather than the banding.
  * Changing BANDS in build-game-data.mjs would silently redefine that filter in two other
  * generators.
@@ -162,7 +162,7 @@ function envelope(puzzle: ReelPuzzle) {
 async function archiveCurrent(bucket: R2Bucket, todayIso: string): Promise<void> {
   const current = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (!current?.date || current.date === todayIso) return;
-  await putJson(bucket, `content/game/reel/${current.date}.json`, current);
+  await putJson(bucket, `content/game/flickreel/${current.date}.json`, current);
 }
 
 async function pruneAnswers(bucket: R2Bucket, todayIso: string): Promise<number> {
@@ -179,18 +179,18 @@ async function pruneAnswers(bucket: R2Bucket, todayIso: string): Promise<number>
   return removed;
 }
 
-export async function generateReelForDate(date: Date, env: ReelEnv): Promise<void> {
+export async function generateFlickReelForDate(date: Date, env: ReelEnv): Promise<void> {
   const iso = isoDate(date);
   const bucket = env.CONTENT_BUCKET;
 
   const existing = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (existing?.date === iso) {
-    console.log(`reel: ${iso} already published, leaving it alone`);
+    console.log(`flickreel: ${iso} already published, leaving it alone`);
     return;
   }
 
   if (!env.TMDB_API_KEY) {
-    console.error("reel: no TMDB_API_KEY, cannot source stills");
+    console.error("flickreel: no TMDB_API_KEY, cannot source stills");
     return;
   }
 
@@ -205,7 +205,7 @@ export async function generateReelForDate(date: Date, env: ReelEnv): Promise<voi
     rand,
   );
   if (candidates.length === 0) {
-    console.error(`reel: band ${band} is empty for ${iso} (pool exhausted?)`);
+    console.error(`flickreel: band ${band} is empty for ${iso} (pool exhausted?)`);
     return;
   }
 
@@ -223,7 +223,7 @@ export async function generateReelForDate(date: Date, env: ReelEnv): Promise<voi
   }
 
   if (!chosen || !stills) {
-    console.error(`reel: no candidate in band ${band} had ${STILLS_PER_PUZZLE} usable stills for ${iso} (${rejected} rejected)`);
+    console.error(`flickreel: no candidate in band ${band} had ${STILLS_PER_PUZZLE} usable stills for ${iso} (${rejected} rejected)`);
     return;
   }
 
@@ -264,7 +264,7 @@ export async function generateReelForDate(date: Date, env: ReelEnv): Promise<voi
   const pruned = await pruneAnswers(bucket, iso);
 
   console.log(
-    `reel: ${iso} #${puzzle.puzzleNumber} band ${band} -> ${chosen.title} (${chosen.year}) ` +
+    `flickreel: ${iso} #${puzzle.puzzleNumber} band ${band} -> ${chosen.title} (${chosen.year}) ` +
       `[${rejected} rejected, ${stills.length} stills, ${nextRecent.length} recent, ${pruned} answers pruned]`,
   );
 }

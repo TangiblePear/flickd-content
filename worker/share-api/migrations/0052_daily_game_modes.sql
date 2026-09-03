@@ -1,4 +1,4 @@
--- The daily game becomes a SUITE: Flickdl, Reel, Chronology, The Grid, Flicklink.
+-- The daily game becomes a SUITE: Flickdl, FlickReel, Flickology, FlickGrid, Flicklink.
 --
 -- Every table from 0032 was keyed as though there would only ever be one game. This adds
 -- the game dimension to all three and moves it into each primary key.

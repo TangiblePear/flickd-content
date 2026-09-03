@@ -6,20 +6,20 @@ import { inversions, orderScore } from "./dailyGame";
 /**
  * The shared contract, read by BOTH implementations.
  *
- * flickto-web/lib/games/order.ts has its own copy of this arithmetic so the board can
+ * flickto-web/lib/games/flickology.ts has its own copy of this arithmetic so the board can
  * show a score without a round trip, and flickto-web/test/gamesOrder.test.mjs pins it to
  * this same file. Drift between them is silent and the symptom is a score that changes on
  * reload, which is the cross-language failure mode the grading fixture already exists for.
  */
 const fixture = JSON.parse(
-  readFileSync(join(process.cwd(), "..", "..", "..", "docs", "game", "order-fixtures.json"), "utf8"),
+  readFileSync(join(process.cwd(), "..", "..", "..", "docs", "game", "flickology-fixtures.json"), "utf8"),
 ) as {
   penaltyPerInversion: number;
   maxScore: number;
   cases: Array<{ name: string; correct: number[]; submitted: number[]; inversions: number; score: number }>;
 };
 
-describe("the shared Chronology contract", () => {
+describe("the shared Flickology contract", () => {
   it("has cases", () => {
     expect(fixture.cases.length).toBeGreaterThanOrEqual(8);
   });
@@ -37,7 +37,7 @@ describe("the shared Chronology contract", () => {
 });
 
 /**
- * Chronology's scoring.
+ * Flickology's scoring.
  *
  * The measure has to have one property above all: a small mistake must cost a small
  * amount. That is why it counts INVERSIONS (pairs in the wrong order) rather than

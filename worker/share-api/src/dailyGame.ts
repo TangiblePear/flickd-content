@@ -88,7 +88,7 @@ const ANSWER_PREFIX = "game-state/answers/";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-import { fitsCell, type GridSpec } from "./gridRules";
+import { fitsCell, type GridSpec } from "./flickGridRules";
 import { titleIndex, titleKey } from "./titleIndex";
 
 /**
@@ -109,7 +109,7 @@ import { titleIndex, titleKey } from "./titleIndex";
  * lasts. The reverse order is safe: 0052 defaults the column to 'flickdl', so the CURRENT
  * worker keeps running unchanged against the migrated schema for as long as you like.
  */
-const GAMES = ["flickdl", "reel", "order", "grid", "link"] as const;
+const GAMES = ["flickdl", "flickreel", "flickology", "flickgrid", "link"] as const;
 export type GameId = (typeof GAMES)[number];
 
 /**
@@ -124,7 +124,7 @@ const DEFAULT_GAME: GameId = "flickdl";
 /**
  * How many picks one finished round may contain, per game.
  *
- * Not one shared cap: a Grid is nine cells and a Chronology is five slots, so a single
+ * Not one shared cap: a Grid is nine cells and a Flickology is five slots, so a single
  * bound would have to be the loosest of them and would stop bounding anything. Flickdl
  * uses the LEGACY six for the reason LEGACY_MAX_GUESSES gives -- a request is rejected
  * whole, so a tighter cap here throws away the other days in the same backfill.
@@ -187,7 +187,7 @@ type ArchivedAnswer = {
   puzzleNumber: number;
   tmdbId: number;
   title: string;
-  /** The Grid only: the day's six constraints. There is no single "answer" title. */
+  /** FlickGrid only: the day's six constraints. There is no single "answer" title. */
   grid?: GridSpec;
   /** Flicklink only: the endpoints the chain must run between, and the target length. */
   link?: {
@@ -197,7 +197,7 @@ type ArchivedAnswer = {
     moveLimit: number;
   };
   /**
-   * Chronology only: the correct order, as TMDB ids.
+   * Flickology only: the correct order, as TMDB ids.
    *
    * Optional because every other game's answer IS its `tmdbId`. A game whose answer is a
    * sequence rather than a single title cannot be checked by "did the last guess match",
@@ -326,8 +326,8 @@ async function verify(
 
   // A game whose answer is a SEQUENCE is checked differently, and checking it the normal
   // way would silently score it on whether its final card happened to be the right one.
-  if (game === "order") return verifyOrder(submitted, answer, guesses);
-  if (game === "grid") return verifyGrid(env, submitted, answer, guesses);
+  if (game === "flickology") return verifyOrder(submitted, answer, guesses);
+  if (game === "flickgrid") return verifyGrid(env, submitted, answer, guesses);
   if (game === "link") return verifyLink(submitted, answer, guesses);
 
   const last = guesses[guesses.length - 1];
@@ -427,7 +427,7 @@ export function linkScore(links: number, par: number): number {
 }
 
 /**
- * The Grid: nine picks, each checked against its own square.
+ * FlickGrid: nine picks, each checked against its own square.
  *
  * ## This is the first verifier that has to know what a title IS
  *
@@ -476,7 +476,7 @@ async function verifyGrid(
     /*
      * Squares filled correctly, so the histogram buckets by how well the board went.
      *
-     * ⚠️ Same caveat as Chronology's: bucketFor stores `solved ? guessCount : 0`, so only
+     * ⚠️ Same caveat as Flickology's: bucketFor stores `solved ? guessCount : 0`, so only
      * a perfect nine gets its own bucket and everything else collapses into zero. The
      * score carries the real spread and is what ranks.
      */
@@ -489,7 +489,7 @@ async function verifyGrid(
 }
 
 /**
- * Chronology: how many pairs are in the wrong order.
+ * Flickology: how many pairs are in the wrong order.
  *
  * The natural measure for "put these in order", and the reason the game has no losing
  * state -- an ordering is always some distance from right, and that distance is the
@@ -519,7 +519,7 @@ export function orderScore(inversionCount: number): number {
 }
 
 /**
- * Chronology's verifier.
+ * Flickology's verifier.
  *
  * ⚠️ Rejects a submission that is not a PERMUTATION of the day's five titles. Without
  * that check a client could send the same easy title five times, or four of the five and
@@ -545,7 +545,7 @@ function verifyOrder(
     /*
      * The whole board is one move, so "guesses spent" is the number of cards placed.
      *
-     * ⚠️ This makes Chronology's DISTRIBUTION degenerate: bucketFor stores
+     * ⚠️ This makes Flickology's DISTRIBUTION degenerate: bucketFor stores
      * `solved ? guessCount : 0`, so every result lands in bucket 5 or bucket 0 and the
      * "how everyone did" chart says only "perfect / not perfect". The SCORE is the
      * interesting spread and it is what the leaderboard ranks on, so nothing is
@@ -726,7 +726,7 @@ export async function handlePostResult(
     // has. Not stored — passed to the limiter and discarded.
     const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
     // Keyed per GAME as well as per IP: one limiter across the suite would mean finishing
-    // Flickdl could rate-limit the same person out of submitting The Grid a minute later.
+    // Flickdl could rate-limit the same person out of submitting FlickGrid a minute later.
     const limit = await env.ANON_RATE_LIMITER?.limit({ key: `dg:${game}:${ip}` });
     if (limit && !limit.success) return json({ error: "rate_limited" }, 429);
 
@@ -734,7 +734,7 @@ export async function handlePostResult(
     if (!verified) return json({ error: "unverified" }, 400);
 
     await bumpAnonDistribution(env, game, verified);
-    if (game === "grid") {
+    if (game === "flickgrid") {
       await bumpGridPicks(env, verified.date, verified.guesses, verified.types);
       return json({
         accepted: 1, anonymous: true,
@@ -768,7 +768,7 @@ export async function handlePostResult(
     ),
   );
 
-  if (game === "grid") {
+  if (game === "flickgrid") {
     for (const v of verified) await bumpGridPicks(env, v.date, v.guesses, v.types);
   }
 
@@ -799,7 +799,7 @@ export async function handlePostResult(
     game,
     stats,
     date: forDate,
-    ...(game === "grid"
+    ...(game === "flickgrid"
       ? { rarity: await readGridRarity(env, forDate, latest.guesses, latest.types) }
       : {}),
     ...(await readRoundState(env, session.userId, game, forDate)),
@@ -830,7 +830,7 @@ async function bumpGridPicks(
     if (!id || (type !== 0 && type !== 1)) continue;
     writes.push(
       env.DB.prepare(
-        `INSERT INTO daily_game_grid_picks (date, cell, tmdb_id, type, count)
+        `INSERT INTO daily_game_flickgrid_picks (date, cell, tmdb_id, type, count)
          VALUES (?1, ?2, ?3, ?4, 1)
          ON CONFLICT(date, cell, tmdb_id, type) DO UPDATE SET count = count + 1`,
       ).bind(date, cell, id, type),
@@ -856,7 +856,7 @@ export async function readGridRarity(
   types: number[],
 ): Promise<Array<{ cell: number; count: number; total: number } | null>> {
   const { results } = await env.DB.prepare(
-    `SELECT cell, tmdb_id, type, count FROM daily_game_grid_picks WHERE date = ?1`,
+    `SELECT cell, tmdb_id, type, count FROM daily_game_flickgrid_picks WHERE date = ?1`,
   ).bind(date).all<{ cell: number; tmdb_id: number; type: number; count: number }>();
 
   const rows = results ?? [];

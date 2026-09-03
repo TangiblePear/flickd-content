@@ -4,7 +4,7 @@
  * ## Why the worker needs this at all
  *
  * Every game so far could be verified from the answer's id alone: "was the last guess the
- * right title". The Grid cannot -- a pick is valid because of what the title IS (its
+ * right title". FlickGrid cannot -- a pick is valid because of what the title IS (its
  * decade, its genres, its rating), and until now the worker had no way to know that. It
  * held the answer's id and title and nothing else, which is also why an unsolved Flickdl
  * board cannot be scored for partial credit.

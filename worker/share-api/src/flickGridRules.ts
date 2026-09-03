@@ -1,7 +1,7 @@
 /**
- * The Grid's constraints, and whether a title meets one.
+ * FlickGrid's constraints, and whether a title meets one.
  *
- * ⚠️ MIRRORS flickto-web/lib/games/grid.ts. Two implementations, one contract, and the
+ * ⚠️ MIRRORS flickto-web/lib/games/flickgrid.ts. Two implementations, one contract, and the
  * failure mode is the one this repo already has a fixture file for: they disagree, the
  * client draws a cell green, the server rejects the pick, and the player's score changes
  * on reload with nothing in any log. docs/game/grid-fixtures.json pins both.

@@ -34,15 +34,15 @@ async function hash(token: string): Promise<string> {
  * The answer bucket, keyed by FULL R2 key rather than by date.
  *
  * dailyGame.test.ts's double strips the prefix and reads what is left as a date, which
- * cannot express the namespaced layout -- `game-state/answers/reel/2026-01-01.json` would
- * parse as a date of "reel/2026-01-01" and miss. Keying on the whole path is what lets this
+ * cannot express the namespaced layout -- `game-state/answers/flickreel/2026-01-01.json` would
+ * parse as a date of "flickreel/2026-01-01" and miss. Keying on the whole path is what lets this
  * suite assert that Flickdl reads the FLAT key and every other game reads its own.
  */
 function answerBucket() {
   const map: Record<string, { tmdbId: number; puzzleNumber: number }> = {};
   for (let i = 0; i < 45; i++) {
     map[`game-state/answers/${iso(-i)}.json`] = { tmdbId: ANSWER_TMDB, puzzleNumber: 1000 - i };
-    for (const game of ["reel", "order", "grid", "link"]) {
+    for (const game of ["flickreel", "flickology", "flickgrid", "link"]) {
       map[`game-state/answers/${game}/${iso(-i)}.json`] = { tmdbId: ANSWER_TMDB, puzzleNumber: 500 - i };
     }
   }
@@ -124,28 +124,28 @@ describe("games do not collide", () => {
     const me = await player(db, 1);
 
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));
 
     const rows = db.rows<{ game: string }>(
       "SELECT game FROM daily_game_results WHERE user_id = ? AND date = ? ORDER BY game",
       me.id, iso(),
     );
-    expect(rows.map((r) => r.game)).toEqual(["flickdl", "reel"]);
+    expect(rows.map((r) => r.game)).toEqual(["flickdl", "flickreel"]);
   });
 
   it("still lets the FIRST submission of one game and day win", async () => {
     const db = new TestD1();
     const me = await player(db, 1);
 
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));
     // A second, better attempt at the same game and day must not improve the score.
     await handlePostResult(
-      post({ game: "reel", results: [{ date: iso(), guesses: [ANSWER_TMDB], types: [0] }] }, me.token),
+      post({ game: "flickreel", results: [{ date: iso(), guesses: [ANSWER_TMDB], types: [0] }] }, me.token),
       env(db),
     );
 
     const row = db.one<{ score: number; guess_count: number }>(
-      "SELECT score, guess_count FROM daily_game_results WHERE user_id = ? AND game = 'reel'",
+      "SELECT score, guess_count FROM daily_game_results WHERE user_id = ? AND game = 'flickreel'",
       me.id,
     );
     expect(row).toEqual({ score: 60, guess_count: 3 });
@@ -157,19 +157,19 @@ describe("games do not collide", () => {
 
     // The puzzle numbers differ per namespace in the double, so the number that lands
     // says which file was actually read.
-    // `reel`, deliberately. Flickdl and Reel are the only games left on the default
-    // "the last guess is the answer" semantics -- Chronology, the Grid and Flicklink each
+    // `reel`, deliberately. Flickdl and FlickReel are the only games left on the default
+    // "the last guess is the answer" semantics -- Flickology, the Grid and Flicklink each
     // have their own verifier and their own answer shape, so none of them can stand in
     // for "a game that reads a namespaced answer file".
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));
 
     const rows = db.rows<{ game: string; puzzle_number: number }>(
       "SELECT game, puzzle_number FROM daily_game_results WHERE user_id = ? ORDER BY game", me.id,
     );
     expect(rows).toEqual([
       { game: "flickdl", puzzle_number: 1000 },
-      { game: "reel", puzzle_number: 500 },
+      { game: "flickreel", puzzle_number: 500 },
     ]);
   });
 });
@@ -184,7 +184,7 @@ describe("picks are bounded per game", () => {
     // parsing -- which is the distinction being pinned. A Flickdl round of the same
     // length never reaches the verifier at all; see the next test.
     const res = await handlePostResult(
-      post({ game: "grid", results: [{ date: iso(), guesses: nine }] }, me.token), env(db),
+      post({ game: "flickgrid", results: [{ date: iso(), guesses: nine }] }, me.token), env(db),
     );
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "unverified" });
@@ -218,11 +218,11 @@ describe("every read is scoped to one game", () => {
 
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));           // 60
     await handlePostResult(post(solvedInThree(iso(-1)), me.token), env(db));         // 60
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));   // 60
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));   // 60
 
     type Mine = { results: unknown[]; stats: { totalScore: number; played: number } };
     const flickdl = await (await handleGetMine(get("mine", me.token), env(db))).json() as Mine;
-    const reel = await (await handleGetMine(get("mine?game=reel", me.token), env(db))).json() as Mine;
+    const reel = await (await handleGetMine(get("mine?game=flickreel", me.token), env(db))).json() as Mine;
 
     expect(flickdl.results).toHaveLength(2);
     expect(flickdl.stats).toMatchObject({ totalScore: 120, played: 2 });
@@ -235,12 +235,12 @@ describe("every read is scoped to one game", () => {
     const me = await player(db, 1);
 
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "reel")), env(db));  // anonymous
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel")), env(db));  // anonymous
 
     type Dist = { buckets: number[]; total: number };
     const flickdl = await (await handleGetDistribution(get(`distribution?date=${iso()}`), env(db))).json() as Dist;
-    const reel = await (await handleGetDistribution(get(`distribution?date=${iso()}&game=reel`), env(db))).json() as Dist;
+    const reel = await (await handleGetDistribution(get(`distribution?date=${iso()}&game=flickreel`), env(db))).json() as Dist;
 
     expect(flickdl.total).toBe(1);
     expect(reel.total).toBe(2);
@@ -257,7 +257,7 @@ describe("every read is scoped to one game", () => {
 
     // I play Flickdl, they play Reel. Neither belongs on the other's board.
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "reel"), friend.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), friend.token), env(db));
 
     type Board = { entries: Array<{ userId: string }> };
     // `week` reads daily_game_results (the ?3 shape); `all` reads daily_game_stats (?2).
@@ -266,7 +266,7 @@ describe("every read is scoped to one game", () => {
       const flickdl = await (await handleGetLeaderboard(
         get(`leaderboard?window=${window}`, me.token), env(db))).json() as Board;
       const reel = await (await handleGetLeaderboard(
-        get(`leaderboard?window=${window}&game=reel`, me.token), env(db))).json() as Board;
+        get(`leaderboard?window=${window}&game=flickreel`, me.token), env(db))).json() as Board;
 
       expect(flickdl.entries.map((e) => e.userId), `flickdl/${window}`).toEqual([me.id]);
       expect(reel.entries.map((e) => e.userId), `reel/${window}`).toEqual([friend.id]);
@@ -279,13 +279,13 @@ describe("every read is scoped to one game", () => {
     const friend = await player(db, 2);
     befriend(db, me.id, friend.id);
 
-    await handlePostResult(post(solvedInThree(iso(), "reel"), friend.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), friend.token), env(db));
 
     type Day = { friends: unknown[] };
     const flickdl = await (await handleGetFriendsDay(
       get(`friends?date=${iso()}`, me.token), env(db))).json() as Day;
     const reel = await (await handleGetFriendsDay(
-      get(`friends?date=${iso()}&game=reel`, me.token), env(db))).json() as Day;
+      get(`friends?date=${iso()}&game=flickreel`, me.token), env(db))).json() as Day;
 
     expect(flickdl.friends).toHaveLength(0);
     expect(reel.friends).toHaveLength(1);
@@ -298,14 +298,14 @@ describe("every read is scoped to one game", () => {
     for (const d of [0, -1, -2]) {
       await handlePostResult(post(solvedInThree(iso(d)), me.token), env(db));
     }
-    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "flickreel"), me.token), env(db));
 
     const rows = db.rows<{ game: string; current_streak: number }>(
       "SELECT game, current_streak FROM daily_game_stats WHERE user_id = ? ORDER BY game", me.id,
     );
     expect(rows).toEqual([
       { game: "flickdl", current_streak: 3 },
-      { game: "reel", current_streak: 1 },
+      { game: "flickreel", current_streak: 1 },
     ]);
   });
 });

@@ -1,4 +1,4 @@
--- The Grid: what everyone picked, so a pick can be scored by how rare it was.
+-- FlickGrid: what everyone picked, so a pick can be scored by how rare it was.
 --
 -- ── Why a counter table here, when poll totals are derived on read ─────────────────────
 --
@@ -24,7 +24,7 @@
 -- `type` is in the key alongside `tmdb_id` because TMDB numbers films and shows
 -- separately, so an id alone is not a title.
 
-CREATE TABLE IF NOT EXISTS daily_game_grid_picks (
+CREATE TABLE IF NOT EXISTS daily_game_flickgrid_picks (
   date    TEXT    NOT NULL,   -- YYYY-MM-DD, UTC, matches the published puzzle
   cell    INTEGER NOT NULL,   -- 0..8, reading order
   tmdb_id INTEGER NOT NULL,
@@ -35,4 +35,4 @@ CREATE TABLE IF NOT EXISTS daily_game_grid_picks (
 
 -- Rarity is `this title's count / everything played in this cell today`, so every read
 -- starts from (date, cell) and sums. Without this it scans the whole table.
-CREATE INDEX IF NOT EXISTS idx_grid_picks_cell ON daily_game_grid_picks(date, cell);
+CREATE INDEX IF NOT EXISTS idx_flickgrid_picks_cell ON daily_game_flickgrid_picks(date, cell);

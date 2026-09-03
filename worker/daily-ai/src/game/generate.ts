@@ -106,7 +106,7 @@ function daysBetween(fromIso: string, toIso: string): number {
  * Easiest Monday, hardest Sunday — but only as far as band 4.
  * JS getUTCDay() is Sunday 0, so it is rotated rather than used directly.
  *
- * The pool still has seven bands and `band <= 3` still means what it means to Chronology
+ * The pool still has seven bands and `band <= 3` still means what it means to Flickology
  * and Flicklink, which is why this compresses the WEEKDAY MAPPING rather than the banding.
  * Changing BANDS in build-game-data.mjs would silently redefine that filter in two other
  * generators.

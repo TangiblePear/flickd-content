@@ -22,8 +22,8 @@
  * well-known answers has far more real ones, so the check errs towards "too easy to
  * verify" rather than towards a square nobody can fill.
  *
- *   content/game/grid/latest.json        public, TODAY only
- *   game-state/answers/grid/{date}.json  PRIVATE, carries the constraints for verifyGrid
+ *   content/game/flickgrid/latest.json        public, TODAY only
+ *   game-state/answers/flickgrid/{date}.json  PRIVATE, carries the constraints for verifyGrid
  */
 import { POOL, type PoolEntry } from "./pool";
 import { obfuscatePayload, KEY_VERSION } from "./obfuscate";
@@ -32,8 +32,8 @@ export interface GridEnv {
   CONTENT_BUCKET: R2Bucket;
 }
 
-const LATEST_KEY = "content/game/grid/latest.json";
-const ANSWER_PREFIX = "game-state/answers/grid/";
+const LATEST_KEY = "content/game/flickgrid/latest.json";
+const ANSWER_PREFIX = "game-state/answers/flickgrid/";
 const TITLE_INDEX = "titles.v2.json";
 const EPOCH_DATE = "2026-09-03";
 const ANSWER_RETENTION_DAYS = 40;
@@ -198,13 +198,13 @@ async function pruneAnswers(bucket: R2Bucket, todayIso: string): Promise<number>
   return removed;
 }
 
-export async function generateGridForDate(date: Date, env: GridEnv): Promise<void> {
+export async function generateFlickGridForDate(date: Date, env: GridEnv): Promise<void> {
   const iso = isoDate(date);
   const bucket = env.CONTENT_BUCKET;
 
   const existing = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (existing?.date === iso) {
-    console.log(`grid: ${iso} already published, leaving it alone`);
+    console.log(`flickgrid: ${iso} already published, leaving it alone`);
     return;
   }
 
@@ -232,7 +232,7 @@ export async function generateGridForDate(date: Date, env: GridEnv): Promise<voi
   }
 
   if (!rows || !cols || !counts) {
-    console.error(`grid: no fillable grid found for ${iso} after ${MAX_ATTEMPTS} attempts`);
+    console.error(`flickgrid: no fillable grid found for ${iso} after ${MAX_ATTEMPTS} attempts`);
     return;
   }
 
@@ -260,13 +260,13 @@ export async function generateGridForDate(date: Date, env: GridEnv): Promise<voi
 
   const current = await readJson<{ date?: string }>(bucket, LATEST_KEY);
   if (current?.date && current.date !== iso) {
-    await putJson(bucket, `content/game/grid/${current.date}.json`, current);
+    await putJson(bucket, `content/game/flickgrid/${current.date}.json`, current);
   }
   await putJson(bucket, LATEST_KEY, envelope(puzzle));
 
   const pruned = await pruneAnswers(bucket, iso);
   console.log(
-    `grid: ${iso} #${puzzle.puzzleNumber} after ${attempts} attempts -> ` +
+    `flickgrid: ${iso} #${puzzle.puzzleNumber} after ${attempts} attempts -> ` +
       `rows [${rows.map(keyOf).join(", ")}] cols [${cols.map(keyOf).join(", ")}] ` +
       `cells ${counts.join("/")} [${pruned} answers pruned]`,
   );

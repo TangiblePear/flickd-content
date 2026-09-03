@@ -4,7 +4,7 @@ import { handlePostResult } from "./dailyGame";
 import { __resetTitleIndexForTests } from "./titleIndex";
 
 /**
- * The Grid: nine picks, each checked against its own square, and rarity counted from
+ * FlickGrid: nine picks, each checked against its own square, and rarity counted from
  * everyone who played.
  *
  * This is the first verifier that has to know what a title IS rather than only its id, so
@@ -62,8 +62,8 @@ function bucket(spec: unknown = SPEC, rows = INDEX_ROWS) {
       if (key === "content/game/titles.v2.json") {
         return { async json() { return rows; } };
       }
-      if (key.startsWith("game-state/answers/grid/")) {
-        const date = key.slice("game-state/answers/grid/".length).replace(/\.json$/, "");
+      if (key.startsWith("game-state/answers/flickgrid/")) {
+        const date = key.slice("game-state/answers/flickgrid/".length).replace(/\.json$/, "");
         return {
           async json() {
             return { date, puzzleNumber: 7, tmdbId: 0, title: "", grid: spec };
@@ -93,7 +93,7 @@ async function player(db: TestD1, n: number) {
 }
 
 const board = (guesses: number[], types: number[]) => ({
-  game: "grid",
+  game: "flickgrid",
   results: [{ date: iso(), guesses, types }],
 });
 
@@ -122,7 +122,7 @@ describe("a pick is checked against its own square", () => {
     expect(res.status).toBe(200);
 
     const row = db.one<{ score: number; guess_count: number; solved: number }>(
-      "SELECT score, guess_count, solved FROM daily_game_results WHERE game = 'grid'",
+      "SELECT score, guess_count, solved FROM daily_game_results WHERE game = 'flickgrid'",
     );
     // Eight of nine, because cell 3 was deliberately left blank.
     expect(row).toEqual({ score: 89, guess_count: 8, solved: 0 });
@@ -175,7 +175,7 @@ describe("an unverifiable board is dropped, never trusted", () => {
     const db = new TestD1();
     const me = await player(db, 1);
     const res = await handlePostResult(
-      post({ game: "grid", results: [{ date: iso(), guesses: [157336], types: [0] }] }, me.token),
+      post({ game: "flickgrid", results: [{ date: iso(), guesses: [157336], types: [0] }] }, me.token),
       env(db),
     );
     // Short arrays are rejected rather than padded: six ids would otherwise be read as
@@ -205,7 +205,7 @@ describe("an unverifiable board is dropped, never trusted", () => {
     const me = await player(db, 1);
     const ids = new Array(9).fill(157336);
     const res = await handlePostResult(
-      post({ game: "grid", results: [{ date: iso(), guesses: ids }] }, me.token), env(db),
+      post({ game: "flickgrid", results: [{ date: iso(), guesses: ids }] }, me.token), env(db),
     );
     // No `types` at all: an id alone is not a title, because films and shows are
     // numbered separately.
@@ -242,12 +242,12 @@ describe("rarity counts everyone who played", () => {
     await handlePostResult(post(fill(76341)), e);              // anonymous, different pick
 
     const total = db.one<{ t: number }>(
-      "SELECT SUM(count) AS t FROM daily_game_grid_picks WHERE cell = 0",
+      "SELECT SUM(count) AS t FROM daily_game_flickgrid_picks WHERE cell = 0",
     );
     expect(total).toEqual({ t: 3 });
 
     const popular = db.one<{ count: number }>(
-      "SELECT count FROM daily_game_grid_picks WHERE cell = 0 AND tmdb_id = 157336",
+      "SELECT count FROM daily_game_flickgrid_picks WHERE cell = 0 AND tmdb_id = 157336",
     );
     expect(popular).toEqual({ count: 2 });
   });
@@ -259,7 +259,7 @@ describe("rarity counts everyone who played", () => {
     // Naming an obvious film for a hard square is not the same move as naming it for an
     // easy one, so the counts must not be pooled across cells.
     const rows = db.rows<{ cell: number }>(
-      "SELECT cell FROM daily_game_grid_picks WHERE tmdb_id = 157336 ORDER BY cell",
+      "SELECT cell FROM daily_game_flickgrid_picks WHERE tmdb_id = 157336 ORDER BY cell",
     );
     expect(rows.map((r) => r.cell)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
   });
@@ -270,12 +270,12 @@ describe("rarity counts everyone who played", () => {
     const ids = [157336, 0, 0, 0, 0, 0, 0, 0, 0];
     const types = new Array(9).fill(0);
     await handlePostResult(
-      post({ game: "grid", results: [{ date: iso(), guesses: ids, types }] }, me.token),
+      post({ game: "flickgrid", results: [{ date: iso(), guesses: ids, types }] }, me.token),
       env(db, bucket(FILM_EVERYWHERE)),
     );
     // A blank is not a pick. Counting it would make the per-cell total the number of
     // PLAYERS rather than the number of answers, which is not what rarity divides by.
-    expect(db.one<{ n: number }>("SELECT COUNT(*) AS n FROM daily_game_grid_picks"))
+    expect(db.one<{ n: number }>("SELECT COUNT(*) AS n FROM daily_game_flickgrid_picks"))
       .toEqual({ n: 1 });
   });
 });
