@@ -4,6 +4,7 @@ import { resolveTmdb } from "./tmdb";
 import { generateGameForDate } from "./game/generate";
 import { generateReelForDate } from "./game/generateReel";
 import { generateOrderForDate } from "./game/generateOrder";
+import { generateGridForDate } from "./game/generateGrid";
 
 interface Env {
   CONTENT_BUCKET: R2Bucket;
@@ -78,6 +79,12 @@ export default {
       await generateOrderForDate(at, env);
     } catch (err) {
       console.error("daily-ai: Chronology generation failed", err);
+    }
+
+    try {
+      await generateGridForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: Grid generation failed", err);
     }
   },
 };

@@ -157,15 +157,17 @@ describe("games do not collide", () => {
 
     // The puzzle numbers differ per namespace in the double, so the number that lands
     // says which file was actually read.
+    // `link`, not `grid`: the Grid has its own verifier and its own answer shape, so it
+    // cannot stand in for "a game that reads a namespaced answer file".
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "grid"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "link"), me.token), env(db));
 
     const rows = db.rows<{ game: string; puzzle_number: number }>(
       "SELECT game, puzzle_number FROM daily_game_results WHERE user_id = ? ORDER BY game", me.id,
     );
     expect(rows).toEqual([
       { game: "flickdl", puzzle_number: 1000 },
-      { game: "grid", puzzle_number: 500 },
+      { game: "link", puzzle_number: 500 },
     ]);
   });
 });
@@ -173,16 +175,17 @@ describe("games do not collide", () => {
 describe("picks are bounded per game", () => {
   const nine = [1, 2, 3, 4, 5, 6, 7, 8, ANSWER_TMDB];
 
-  it("takes the nine cells a Grid has", async () => {
+  it("lets nine picks through the payload bound for a Grid", async () => {
     const db = new TestD1();
     const me = await player(db, 1);
+    // Rejected at VERIFICATION (no grid spec in this suite's answer double), not at
+    // parsing -- which is the distinction being pinned. A Flickdl round of the same
+    // length never reaches the verifier at all; see the next test.
     const res = await handlePostResult(
       post({ game: "grid", results: [{ date: iso(), guesses: nine }] }, me.token), env(db),
     );
-    expect(res.status).toBe(200);
-    expect(db.one<{ guess_count: number }>(
-      "SELECT guess_count FROM daily_game_results WHERE game = 'grid'",
-    )).toEqual({ guess_count: 9 });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "unverified" });
   });
 
   it("refuses those same nine as a Flickdl round", async () => {

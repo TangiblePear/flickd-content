@@ -88,6 +88,9 @@ const ANSWER_PREFIX = "game-state/answers/";
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+import { fitsCell, type GridSpec } from "./gridRules";
+import { titleIndex, titleKey } from "./titleIndex";
+
 /**
  * The games in the suite.
  *
@@ -180,6 +183,8 @@ type ArchivedAnswer = {
   puzzleNumber: number;
   tmdbId: number;
   title: string;
+  /** The Grid only: the day's six constraints. There is no single "answer" title. */
+  grid?: GridSpec;
   /**
    * Chronology only: the correct order, as TMDB ids.
    *
@@ -311,6 +316,7 @@ async function verify(
   // A game whose answer is a SEQUENCE is checked differently, and checking it the normal
   // way would silently score it on whether its final card happened to be the right one.
   if (game === "order") return verifyOrder(submitted, answer, guesses);
+  if (game === "grid") return verifyGrid(env, submitted, answer, guesses);
 
   const last = guesses[guesses.length - 1];
   const solved = last === answer.tmdbId;
@@ -326,6 +332,68 @@ async function verify(
     guessCount,
     solved,
     score: scoreFor(guessCount, solved),
+    guesses,
+    types: submitted.types,
+  };
+}
+
+/**
+ * The Grid: nine picks, each checked against its own square.
+ *
+ * ## This is the first verifier that has to know what a title IS
+ *
+ * Every game before it could be checked from the answer's id alone. A grid pick is valid
+ * because of the title's decade, genres or rating, so the worker reads the published title
+ * index out of R2 and checks the claim itself rather than taking the client's word for it.
+ * See titleIndex.ts for why that read is affordable.
+ *
+ * ⚠️ Without the index this returns NULL rather than accepting the board. An unverifiable
+ * submission is dropped, never trusted: rarity is aggregated from these rows and a
+ * client-scored grid would let one person write whatever they liked into everyone else's
+ * "only 4% picked this".
+ *
+ * A cell may be left EMPTY, sent as id 0. Nine slots always, some possibly blank -- which
+ * is why a short array is rejected rather than padded: a client that sent six ids would
+ * otherwise have them silently read as the first six squares.
+ */
+async function verifyGrid(
+  env: DailyGameEnv,
+  submitted: SubmittedResult,
+  answer: ArchivedAnswer,
+  guesses: number[],
+): Promise<VerifiedResult | null> {
+  const spec = answer.grid;
+  if (!spec || spec.rows.length !== 3 || spec.cols.length !== 3) return null;
+  if (guesses.length !== 9) return null;
+
+  const index = await titleIndex(env.CONTENT_BUCKET);
+  if (!index) return null;
+
+  const types = submitted.types.length === guesses.length ? submitted.types : [];
+  let correct = 0;
+  for (let cell = 0; cell < 9; cell++) {
+    const id = guesses[cell];
+    if (id === 0) continue;                       // deliberately left blank
+    const type = types[cell];
+    if (type !== 0 && type !== 1) return null;    // an id without its namespace is not a title
+    const title = index.get(titleKey(type, id));
+    if (!title) continue;                         // not a title we publish; scores nothing
+    if (fitsCell(title, spec, cell)) correct++;
+  }
+
+  return {
+    date: submitted.date,
+    puzzleNumber: answer.puzzleNumber,
+    /*
+     * Squares filled correctly, so the histogram buckets by how well the board went.
+     *
+     * ⚠️ Same caveat as Chronology's: bucketFor stores `solved ? guessCount : 0`, so only
+     * a perfect nine gets its own bucket and everything else collapses into zero. The
+     * score carries the real spread and is what ranks.
+     */
+    guessCount: correct,
+    solved: correct === 9,
+    score: Math.round((correct / 9) * 100),
     guesses,
     types: submitted.types,
   };
@@ -577,6 +645,13 @@ export async function handlePostResult(
     if (!verified) return json({ error: "unverified" }, 400);
 
     await bumpAnonDistribution(env, game, verified);
+    if (game === "grid") {
+      await bumpGridPicks(env, verified.date, verified.guesses, verified.types);
+      return json({
+        accepted: 1, anonymous: true,
+        rarity: await readGridRarity(env, verified.date, verified.guesses, verified.types),
+      });
+    }
     return json({ accepted: 1, anonymous: true });
   }
 
@@ -604,6 +679,10 @@ export async function handlePostResult(
     ),
   );
 
+  if (game === "grid") {
+    for (const v of verified) await bumpGridPicks(env, v.date, v.guesses, v.types);
+  }
+
   const stats = await recomputeStats(env, session.userId, game);
 
   /*
@@ -625,13 +704,92 @@ export async function handlePostResult(
       ? asked
       : verified.reduce((latest, v) => (v.date > latest ? v.date : latest), verified[0].date);
 
+  const latest = verified.find((v) => v.date === forDate) ?? verified[0];
   return json({
     accepted: verified.length,
     game,
     stats,
     date: forDate,
+    ...(game === "grid"
+      ? { rarity: await readGridRarity(env, forDate, latest.guesses, latest.types) }
+      : {}),
     ...(await readRoundState(env, session.userId, game, forDate)),
   });
+}
+
+/**
+ * Record what was played in each square, for rarity.
+ *
+ * Counts EVERYONE, signed in or not. A "only 4% picked this" figure computed from the
+ * minority of players who happen to have accounts would be worse than not showing one --
+ * see the same argument for daily_game_anon_distribution in migration 0032.
+ *
+ * Empty squares are not recorded. A blank is not a pick, and counting it would make the
+ * per-cell total the number of PLAYERS rather than the number of answers, which is the
+ * denominator rarity is supposed to be a fraction of.
+ */
+async function bumpGridPicks(
+  env: DailyGameEnv,
+  date: string,
+  guesses: number[],
+  types: number[],
+): Promise<void> {
+  const writes = [];
+  for (let cell = 0; cell < guesses.length && cell < 9; cell++) {
+    const id = guesses[cell];
+    const type = types[cell];
+    if (!id || (type !== 0 && type !== 1)) continue;
+    writes.push(
+      env.DB.prepare(
+        `INSERT INTO daily_game_grid_picks (date, cell, tmdb_id, type, count)
+         VALUES (?1, ?2, ?3, ?4, 1)
+         ON CONFLICT(date, cell, tmdb_id, type) DO UPDATE SET count = count + 1`,
+      ).bind(date, cell, id, type),
+    );
+  }
+  if (writes.length === 0) return;
+  // One batch: nine separate round trips per submission is nine times the latency for a
+  // figure nobody sees until the board is already finished.
+  await env.DB.batch(writes);
+}
+
+/**
+ * How rare each of this board's picks was, per square.
+ *
+ * ⚠️ Read AFTER the bump, so the player's own answer is included in its own denominator.
+ * Reading first would report 0% for the first person to play a square, which is both wrong
+ * and the most memorable number the game can show.
+ */
+export async function readGridRarity(
+  env: DailyGameEnv,
+  date: string,
+  guesses: number[],
+  types: number[],
+): Promise<Array<{ cell: number; count: number; total: number } | null>> {
+  const { results } = await env.DB.prepare(
+    `SELECT cell, tmdb_id, type, count FROM daily_game_grid_picks WHERE date = ?1`,
+  ).bind(date).all<{ cell: number; tmdb_id: number; type: number; count: number }>();
+
+  const rows = results ?? [];
+  const totals = new Map<number, number>();
+  const mine = new Map<string, number>();
+  for (const r of rows) {
+    totals.set(r.cell, (totals.get(r.cell) ?? 0) + r.count);
+    mine.set(`${r.cell}:${r.type}:${r.tmdb_id}`, r.count);
+  }
+
+  const out: Array<{ cell: number; count: number; total: number } | null> = [];
+  for (let cell = 0; cell < 9; cell++) {
+    const id = guesses[cell];
+    const type = types[cell];
+    if (!id || (type !== 0 && type !== 1)) { out.push(null); continue; }
+    out.push({
+      cell,
+      count: mine.get(`${cell}:${type}:${id}`) ?? 0,
+      total: totals.get(cell) ?? 0,
+    });
+  }
+  return out;
 }
 
 async function bumpAnonDistribution(
