@@ -103,11 +103,27 @@ function daysBetween(fromIso: string, toIso: string): number {
 }
 
 /**
- * Monday 0 .. Sunday 6, matching the pool's bands — easiest Monday, hardest Sunday.
+ * Easiest Monday, hardest Sunday — but only as far as band 4.
  * JS getUTCDay() is Sunday 0, so it is rotated rather than used directly.
+ *
+ * The pool still has seven bands and `band <= 3` still means what it means to Chronology
+ * and Flicklink, which is why this compresses the WEEKDAY MAPPING rather than the banding.
+ * Changing BANDS in build-game-data.mjs would silently redefine that filter in two other
+ * generators.
+ *
+ * Bands 5 and 6 are the bottom two sevenths of the pool, and a Sunday answer nobody has
+ * heard of is not a hard puzzle, it is a guessing game. Round rather than truncate so the
+ * gradient stays monotonic: Mon 0, Tue 1, Wed 1, Thu 2, Fri 3, Sat 3, Sun 4.
+ *
+ * ⚠️ This one is LIVE. Flickdl has been published daily against the old 0..6 mapping, so
+ * Sundays get materially easier from the day this ships — deliberately, but it is a
+ * visible change to a running game rather than a new one.
  */
+const TOP_BAND = 4;
+
 function bandForDate(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
+  const weekday = (d.getUTCDay() + 6) % 7;
+  return Math.round((weekday * TOP_BAND) / 6);
 }
 
 function fnv1a(text: string): number {

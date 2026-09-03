@@ -54,9 +54,29 @@ const GENRE_SLUGS = [
   "donghua", "game-show", "holiday", "musical", "short", "special-interest", "superhero", "suspense",
 ];
 
-/** How many of each type may be an answer, taken most-voted first. */
-const POOL_MOVIES = 1800;
-const POOL_SHOWS = 700;
+/**
+ * How many of each type may be an answer, taken most-voted first.
+ *
+ * ## Why these numbers came down from 1800/700
+ *
+ * An answer nobody has heard of is not a hard puzzle, it is a guessing game. Measured
+ * against the catalogue, the old cuts landed in very different places: the 1,800th movie
+ * had 4,549 votes (Death of a Unicorn) while the 700th SHOW had 1,988 (Goliath), because
+ * only 310 shows clear the movie floor at all. Difficulty is normalised per type, so
+ * those thin shows sat in the same weekday bands as movies with two to three times their
+ * votes -- and every genuinely unfamiliar title in the hardest band was one of them:
+ * Goliath 1,988, Pantheon 2,049, Kaiju No. 8 2,202, Hell on Wheels 2,639, beside
+ * Chinatown 5,298 and Dumbo 5,326.
+ *
+ * At 1200/400 the tails are 6,683 (Anaconda) and 3,592 (Black Doves), and the hardest
+ * band's median rises from 4,787 votes to 6,989 -- Planet Earth, Cosmos, Platoon.
+ *
+ * ⚠️ The cost is content lifetime, and it is the reason not to go lower without meaning
+ * to. Each band is drawn from ONCE A WEEK, so a band of 229 is 4.4 years of that weekday;
+ * the old 357 was 6.9. Halving these again would put it under two.
+ */
+const POOL_MOVIES = 1200;
+const POOL_SHOWS = 400;
 
 /**
  * Movies shorter than this are shorts, and a short is an unfair answer — nobody has seen

@@ -63,9 +63,28 @@ function daysBetween(fromIso: string, toIso: string): number {
   );
 }
 
-/** Monday 0 .. Sunday 6, matching the pool's bands. Same rotation as Flickdl's. */
+/**
+ * Monday easiest, Sunday hardest — but only as far as band 4. Same rotation as Flickdl's.
+ *
+ * The pool still has seven bands and `band <= 3` still means what it means to Chronology
+ * and Flicklink, which is why this compresses the WEEKDAY MAPPING rather than the banding.
+ * Changing BANDS in build-game-data.mjs would silently redefine that filter in two other
+ * generators.
+ *
+ * Bands 5 and 6 are the bottom two sevenths of the pool, and a Sunday answer nobody has
+ * heard of is not a hard puzzle, it is a guessing game. Round rather than truncate so the
+ * gradient stays monotonic: Mon 0, Tue 1, Wed 1, Thu 2, Fri 3, Sat 3, Sun 4.
+ *
+ * Two weekdays share a band, so those bands are drawn twice a week and last about half as
+ * long before a title can recur. That is comfortably inside the budget: a band holds ~228
+ * titles and RECENT_LIMIT is 365 answers ACROSS all bands, so even a doubled band keeps
+ * well over a hundred candidates.
+ */
+const TOP_BAND = 4;
+
 function bandForDate(d: Date): number {
-  return (d.getUTCDay() + 6) % 7;
+  const weekday = (d.getUTCDay() + 6) % 7;
+  return Math.round((weekday * TOP_BAND) / 6);
 }
 
 function fnv1a(text: string): number {
