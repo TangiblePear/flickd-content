@@ -3,6 +3,7 @@ import { pickPromptFor } from "./prompts";
 import { resolveTmdb } from "./tmdb";
 import { generateGameForDate } from "./game/generate";
 import { generateReelForDate } from "./game/generateReel";
+import { generateOrderForDate } from "./game/generateOrder";
 
 interface Env {
   CONTENT_BUCKET: R2Bucket;
@@ -71,6 +72,12 @@ export default {
       await generateReelForDate(at, env);
     } catch (err) {
       console.error("daily-ai: Reel generation failed", err);
+    }
+
+    try {
+      await generateOrderForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: Chronology generation failed", err);
     }
   },
 };

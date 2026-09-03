@@ -175,7 +175,20 @@ function bucketFor(guessCount: number, solved: boolean): number {
   return solved ? guessCount : 0;
 }
 
-type ArchivedAnswer = { date: string; puzzleNumber: number; tmdbId: number; title: string };
+type ArchivedAnswer = {
+  date: string;
+  puzzleNumber: number;
+  tmdbId: number;
+  title: string;
+  /**
+   * Chronology only: the correct order, as TMDB ids.
+   *
+   * Optional because every other game's answer IS its `tmdbId`. A game whose answer is a
+   * sequence rather than a single title cannot be checked by "did the last guess match",
+   * so it carries the sequence and gets its own branch in verify().
+   */
+  order?: number[];
+};
 
 /**
  * The day's answer file for one game.
@@ -294,6 +307,11 @@ async function verify(
   }
 
   const guesses = submitted.guesses;
+
+  // A game whose answer is a SEQUENCE is checked differently, and checking it the normal
+  // way would silently score it on whether its final card happened to be the right one.
+  if (game === "order") return verifyOrder(submitted, answer, guesses);
+
   const last = guesses[guesses.length - 1];
   const solved = last === answer.tmdbId;
 
@@ -308,6 +326,79 @@ async function verify(
     guessCount,
     solved,
     score: scoreFor(guessCount, solved),
+    guesses,
+    types: submitted.types,
+  };
+}
+
+/**
+ * Chronology: how many pairs are in the wrong order.
+ *
+ * The natural measure for "put these in order", and the reason the game has no losing
+ * state -- an ordering is always some distance from right, and that distance is the
+ * score. A count of MISPLACED CARDS would not do: moving one card in a run of five
+ * displaces every card after it, so a near-perfect answer and a reversed one can both
+ * report "four wrong".
+ */
+export function inversions(submitted: number[], correct: number[]): number {
+  const rank = new Map(correct.map((id, i) => [id, i]));
+  let count = 0;
+  for (let i = 0; i < submitted.length; i++) {
+    for (let j = i + 1; j < submitted.length; j++) {
+      const a = rank.get(submitted[i]);
+      const b = rank.get(submitted[j]);
+      if (a === undefined || b === undefined) continue;
+      if (a > b) count++;
+    }
+  }
+  return count;
+}
+
+/** Per inversion, off a hundred. Eight or more wrong pairs out of ten scores nothing. */
+const ORDER_PENALTY = 12;
+
+export function orderScore(inversionCount: number): number {
+  return Math.max(0, 100 - inversionCount * ORDER_PENALTY);
+}
+
+/**
+ * Chronology's verifier.
+ *
+ * ⚠️ Rejects a submission that is not a PERMUTATION of the day's five titles. Without
+ * that check a client could send the same easy title five times, or four of the five and
+ * one ringer, and score whatever the inversion count of a malformed list happened to be.
+ * The set is fixed and published, so there is exactly one valid multiset to send.
+ */
+function verifyOrder(
+  submitted: SubmittedResult,
+  answer: ArchivedAnswer,
+  guesses: number[],
+): VerifiedResult | null {
+  const correct = answer.order;
+  if (!correct || correct.length === 0) return null;
+  if (guesses.length !== correct.length) return null;
+  const wanted = [...correct].sort().join(",");
+  const got = [...guesses].sort().join(",");
+  if (wanted !== got) return null;
+
+  const wrongPairs = inversions(guesses, correct);
+  return {
+    date: submitted.date,
+    puzzleNumber: answer.puzzleNumber,
+    /*
+     * The whole board is one move, so "guesses spent" is the number of cards placed.
+     *
+     * ⚠️ This makes Chronology's DISTRIBUTION degenerate: bucketFor stores
+     * `solved ? guessCount : 0`, so every result lands in bucket 5 or bucket 0 and the
+     * "how everyone did" chart says only "perfect / not perfect". The SCORE is the
+     * interesting spread and it is what the leaderboard ranks on, so nothing is
+     * mis-ranked -- but a per-game distribution shaped by score rather than guess count
+     * is owed before this game gets a chart of its own.
+     */
+    guessCount: guesses.length,
+    // Solved means perfectly ordered. Anything else still scores; see orderScore.
+    solved: wrongPairs === 0,
+    score: orderScore(wrongPairs),
     guesses,
     types: submitted.types,
   };
