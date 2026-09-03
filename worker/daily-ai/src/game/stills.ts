@@ -60,9 +60,16 @@ export async function stillsFor(
     return null;
   }
 
-  const usable = backdrops.filter(
-    (b) => typeof b.file_path === "string" && !b.iso_639_1 && (b.width ?? 0) >= MIN_WIDTH,
-  );
+  // Deduplicated on file_path. TMDB does occasionally list the same image twice, and a
+  // reel with a repeat is a turn that costs a guess and shows the player nothing new --
+  // which reads as a broken game rather than as a hard one.
+  const seen = new Set<string>();
+  const usable = backdrops.filter((b) => {
+    if (typeof b.file_path !== "string" || b.iso_639_1 || (b.width ?? 0) < MIN_WIDTH) return false;
+    if (seen.has(b.file_path)) return false;
+    seen.add(b.file_path);
+    return true;
+  });
   if (usable.length < STILLS_PER_PUZZLE) return null;
 
   // Ascending, so the most recognisable frame is revealed LAST. Ties break on vote_count
