@@ -134,7 +134,11 @@ const MAX_PICKS: Record<GameId, number> = {
   reel: 6,
   order: 5,
   grid: 9,
-  link: 8,
+  // The whole CHAIN, endpoints included: Flicklink's move limit is 8 and both the start
+  // and the finish travel in the same list. A cap of 8 would reject a full-length route
+  // for being exactly as long as it was allowed to be -- and parseBody rejects the whole
+  // request, so it would take the rest of a backfill with it.
+  link: 10,
 };
 
 /**
@@ -185,6 +189,13 @@ type ArchivedAnswer = {
   title: string;
   /** The Grid only: the day's six constraints. There is no single "answer" title. */
   grid?: GridSpec;
+  /** Flicklink only: the endpoints the chain must run between, and the target length. */
+  link?: {
+    start: { tmdbId: number; type: number };
+    end: { tmdbId: number; type: number };
+    par: number;
+    moveLimit: number;
+  };
   /**
    * Chronology only: the correct order, as TMDB ids.
    *
@@ -317,6 +328,7 @@ async function verify(
   // way would silently score it on whether its final card happened to be the right one.
   if (game === "order") return verifyOrder(submitted, answer, guesses);
   if (game === "grid") return verifyGrid(env, submitted, answer, guesses);
+  if (game === "link") return verifyLink(submitted, answer, guesses);
 
   const last = guesses[guesses.length - 1];
   const solved = last === answer.tmdbId;
@@ -335,6 +347,83 @@ async function verify(
     guesses,
     types: submitted.types,
   };
+}
+
+/**
+ * Flicklink: a chain from the day's start to the day's end.
+ *
+ * ## What this checks, and what it deliberately does not
+ *
+ * It checks the ENDPOINTS and the LENGTH: the chain must begin at the title the player was
+ * given, end at the one they were sent to, and be no longer than the move limit. Those are
+ * the things the score is derived from, and all three come from the archived answer.
+ *
+ * It does NOT re-check that each consecutive pair genuinely shares a person. Doing so means
+ * credits for every title in the chain, and the only source this worker can reach --
+ * data.flickto.app -- has payloads for roughly a third of the guess universe, so a real
+ * chain through a title without one would be REJECTED for being correct. Rejecting valid
+ * play to catch invalid play is the wrong trade for a daily game.
+ *
+ * ⚠️ So a crafted client can post a two-link chain it did not solve. That is the same
+ * exposure Flickdl already carries and documents in obfuscate.ts -- the client grades
+ * offline, and server-validated guessing is the only real fix. It is bounded here: you
+ * must still name the right endpoints, the score is capped by the move limit, and the
+ * leaderboard is friends-only. If Flicklink ever ranks globally, this is the thing to fix
+ * first, and the fix is a credits index in R2 rather than a change of shape here.
+ */
+function verifyLink(
+  submitted: SubmittedResult,
+  answer: ArchivedAnswer,
+  guesses: number[],
+): VerifiedResult | null {
+  const spec = answer.link;
+  if (!spec) return null;
+
+  const types = submitted.types.length === guesses.length ? submitted.types : [];
+  if (types.length !== guesses.length) return null;
+
+  // Start, at least one step, and the end. A two-entry chain is the endpoints touching,
+  // which the generator's par of two or more says cannot happen.
+  if (guesses.length < 3) return null;
+  if (guesses.length > spec.moveLimit + 2) return null;
+
+  const first = { tmdbId: guesses[0], type: types[0] };
+  const last = { tmdbId: guesses[guesses.length - 1], type: types[types.length - 1] };
+  if (first.tmdbId !== spec.start.tmdbId || first.type !== spec.start.type) return null;
+  if (last.tmdbId !== spec.end.tmdbId || last.type !== spec.end.type) return null;
+
+  // A chain that visits the same title twice is a loop, and a loop is never a shorter
+  // route -- it is a client that lost track of its own state.
+  const seen = new Set(guesses.map((id, i) => `${types[i]}:${id}`));
+  if (seen.size !== guesses.length) return null;
+
+  const links = guesses.length - 1;
+  return {
+    date: submitted.date,
+    puzzleNumber: answer.puzzleNumber,
+    // Links used, so the histogram buckets by route length -- which for this game is
+    // exactly the interesting number, and unlike the other two new games it is not
+    // degenerate: every finished chain is `solved`, and its bucket is its length.
+    guessCount: links,
+    solved: true,
+    score: linkScore(links, spec.par),
+    guesses,
+    types: submitted.types,
+  };
+}
+
+/**
+ * Par pays full marks, over par costs, under par earns a bonus.
+ *
+ * ⚠️ MUST match linkScore in flickto-web/lib/games/link.ts. The generator's par is a
+ * target found in a sample of the credits graph, not the shortest route through all of
+ * cinema, so beating it is a real achievement rather than an anomaly to clamp.
+ */
+export function linkScore(links: number, par: number): number {
+  if (links <= 0) return 0;
+  const over = links - par;
+  if (over <= 0) return 100 + Math.min(2, -over) * 15;
+  return Math.max(10, 100 - over * 20);
 }
 
 /**

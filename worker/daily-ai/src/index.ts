@@ -5,6 +5,7 @@ import { generateGameForDate } from "./game/generate";
 import { generateReelForDate } from "./game/generateReel";
 import { generateOrderForDate } from "./game/generateOrder";
 import { generateGridForDate } from "./game/generateGrid";
+import { generateLinkForDate } from "./game/generateLink";
 
 interface Env {
   CONTENT_BUCKET: R2Bucket;
@@ -85,6 +86,22 @@ export default {
       await generateGridForDate(at, env);
     } catch (err) {
       console.error("daily-ai: Grid generation failed", err);
+    }
+
+    /*
+     * ⚠️ Flicklink runs LAST, deliberately.
+     *
+     * It is the only generator that builds a graph: on a cold week it fetches ~120 detail
+     * payloads to invert credits into a person-to-titles map (measured ~11s; warm weeks
+     * are much faster because the sample is seeded by week and stays in the edge cache).
+     * That is comfortably the heaviest job here, so it goes after the three that are
+     * cheap -- if anything is going to run out of budget it should be the one that has
+     * already let the others publish.
+     */
+    try {
+      await generateLinkForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: Flicklink generation failed", err);
     }
   },
 };

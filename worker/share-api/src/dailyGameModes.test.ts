@@ -157,17 +157,19 @@ describe("games do not collide", () => {
 
     // The puzzle numbers differ per namespace in the double, so the number that lands
     // says which file was actually read.
-    // `link`, not `grid`: the Grid has its own verifier and its own answer shape, so it
-    // cannot stand in for "a game that reads a namespaced answer file".
+    // `reel`, deliberately. Flickdl and Reel are the only games left on the default
+    // "the last guess is the answer" semantics -- Chronology, the Grid and Flicklink each
+    // have their own verifier and their own answer shape, so none of them can stand in
+    // for "a game that reads a namespaced answer file".
     await handlePostResult(post(solvedInThree(iso()), me.token), env(db));
-    await handlePostResult(post(solvedInThree(iso(), "link"), me.token), env(db));
+    await handlePostResult(post(solvedInThree(iso(), "reel"), me.token), env(db));
 
     const rows = db.rows<{ game: string; puzzle_number: number }>(
       "SELECT game, puzzle_number FROM daily_game_results WHERE user_id = ? ORDER BY game", me.id,
     );
     expect(rows).toEqual([
       { game: "flickdl", puzzle_number: 1000 },
-      { game: "link", puzzle_number: 500 },
+      { game: "reel", puzzle_number: 500 },
     ]);
   });
 });
