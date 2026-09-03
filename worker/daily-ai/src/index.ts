@@ -2,6 +2,7 @@ import { generateTitles } from "./gemini";
 import { pickPromptFor } from "./prompts";
 import { resolveTmdb } from "./tmdb";
 import { generateGameForDate } from "./game/generate";
+import { generateReelForDate } from "./game/generateReel";
 
 interface Env {
   CONTENT_BUCKET: R2Bucket;
@@ -51,6 +52,25 @@ export default {
       await generateGameForDate(at, env);
     } catch (err) {
       console.error("daily-ai: One Take generation failed", err);
+    }
+
+    /*
+     * Every game in the suite rolls over on THIS trigger.
+     *
+     * Not because a cron slot could not be spared -- see wrangler.toml, where the
+     * "account is at the cap" claim is recorded as unverified -- but because they all
+     * roll over at the same instant by design, so a second trigger would buy nothing and
+     * add a way for the games to disagree about what day it is.
+     *
+     * Each generator gets its OWN try/catch and they run in sequence, so one game failing
+     * to publish cannot take the others down with it. That matters more as the list grows:
+     * a shared handler with one catch would let a TMDB outage during Reel silently cost
+     * the day its Flickdl too.
+     */
+    try {
+      await generateReelForDate(at, env);
+    } catch (err) {
+      console.error("daily-ai: Reel generation failed", err);
     }
   },
 };
