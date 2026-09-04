@@ -114,10 +114,13 @@ const GAMES = ["flickdl", "flickreel", "flickology", "flickgrid", "link"] as con
 /**
  * The highest histogram bucket any game produces.
  *
- * Flickology's is pairs out of place across five cards, which is 5*4/2 = 10 — the widest
- * of the five. FlickGrid reaches 9, the guessing games 6.
+ * Flickology's is PLACES OUT across five cards, which reaches 12 on the reverse — the
+ * widest of the five. FlickGrid reaches 9, the guessing games 6.
+ *
+ * ⚠️ Was 10 while Flickology scored on wrong pairs. A value too small does not error, it
+ * silently drops the tail of one game's chart on the way out.
  */
-const MAX_BUCKET = 10;
+const MAX_BUCKET = 12;
 export type GameId = (typeof GAMES)[number];
 
 /**
@@ -430,8 +433,8 @@ function verifyLink(
     date: submitted.date,
     puzzleNumber: answer.puzzleNumber,
     // Links used, so the histogram buckets by route length -- which for this game is
-    // exactly the interesting number, and unlike the other two new games it is not
-    // degenerate: every finished chain is `solved`, and its bucket is its length.
+    // exactly the interesting number, and needs no special case in bucketFor: every
+    // finished chain is `solved`, so its bucket is simply its length.
     guessCount: links,
     solved: true,
     score: linkScore(links, spec.par),
@@ -516,13 +519,10 @@ async function verifyGrid(
   return {
     date: submitted.date,
     puzzleNumber: answer.puzzleNumber,
-    /*
-     * Squares filled correctly, so the histogram buckets by how well the board went.
-     *
-     * ⚠️ Same caveat as Flickology's: bucketFor stores `solved ? guessCount : 0`, so only
-     * a perfect nine gets its own bucket and everything else collapses into zero. The
-     * score carries the real spread and is what ranks.
-     */
+    // Squares filled correctly, so the histogram buckets by how well the board went.
+    // bucketFor reads this straight through for FlickGrid rather than through the
+    // guessing games' `solved ? guessCount : 0`, which would have given a bucket only to
+    // a perfect nine and collapsed every other board into zero.
     guessCount: correct,
     solved: correct === 9,
     score: Math.round((correct / 9) * 100),
@@ -532,33 +532,60 @@ async function verifyGrid(
 }
 
 /**
- * Flickology: how many pairs are in the wrong order.
+ * How far the board is from the true order: for each card, how many places it sits from
+ * where it belongs, summed.
  *
- * The natural measure for "put these in order", and the reason the game has no losing
- * state -- an ordering is always some distance from right, and that distance is the
- * score. A count of MISPLACED CARDS would not do: moving one card in a run of five
- * displaces every card after it, so a near-perfect answer and a reversed one can both
- * report "four wrong".
+ * Five cards can be at most 12 places out in total (the exact reverse), and that is the
+ * whole scale -- see MAX_PLACES_OUT.
+ *
+ * ⚠️ NOT a count of misplaced CARDS. That measure is genuinely broken and the version of
+ * this file that scored on wrong pairs warned about it: moving one card in a run of five
+ * shifts every card after it, so a near-perfect board and a reversed one both report
+ * "four wrong", and a player who improves their answer can watch their score fall.
+ * Summing DISTANCES has neither problem. Verified exhaustively across all 120 orderings
+ * and all 240 improving single swaps -- there is no case where making the board better lowers the
+ * score.
+ *
+ * ## Why this replaced wrong pairs
+ *
+ * Pairs graded correctly and were just as monotone, but could not be EXPLAINED. Five
+ * posters produce ten pairs, so a good round read "7 of 10 pairs right" and players took
+ * the mismatched denominator for a scoring bug. Places out is a sum anyone can check:
+ * each card carries its own number and they add up to the total shown.
  */
-export function inversions(submitted: number[], correct: number[]): number {
+export function placesOut(submitted: number[], correct: number[]): number {
   const rank = new Map(correct.map((id, i) => [id, i]));
-  let count = 0;
+  let total = 0;
   for (let i = 0; i < submitted.length; i++) {
-    for (let j = i + 1; j < submitted.length; j++) {
-      const a = rank.get(submitted[i]);
-      const b = rank.get(submitted[j]);
-      if (a === undefined || b === undefined) continue;
-      if (a > b) count++;
-    }
+    const belongs = rank.get(submitted[i]);
+    if (belongs === undefined) continue;
+    total += Math.abs(belongs - i);
   }
-  return count;
+  return total;
 }
 
-/** Per inversion, off a hundred. Eight or more wrong pairs out of ten scores nothing. */
-const ORDER_PENALTY = 12;
+/**
+ * The worst a board of `n` cards can be, which is the reverse: floor(n squared / 2).
+ *
+ * Derived rather than typed as 12, because it is the denominator of the whole score and a
+ * game that ever changes its card count must not silently keep dividing by five cards'
+ * worth.
+ */
+export function maxPlacesOut(cards: number): number {
+  return Math.floor((cards * cards) / 2);
+}
 
-export function orderScore(inversionCount: number): number {
-  return Math.max(0, 100 - inversionCount * ORDER_PENALTY);
+/**
+ * The share of the board you did NOT get wrong, as a percentage.
+ *
+ * ⚠️ Places out is always EVEN for any ordering -- the distances a permutation moves
+ * cards must cancel out -- so a five-card board has exactly seven possible scores:
+ * 100, 83, 67, 50, 33, 17, 0.
+ */
+export function orderScore(places: number, cards: number): number {
+  const worst = maxPlacesOut(cards);
+  if (worst <= 0) return 100;
+  return Math.max(0, Math.round(100 * (1 - places / worst)));
 }
 
 /**
@@ -581,23 +608,23 @@ function verifyOrder(
   const got = [...guesses].sort().join(",");
   if (wanted !== got) return null;
 
-  const wrongPairs = inversions(guesses, correct);
+  const places = placesOut(guesses, correct);
   return {
     date: submitted.date,
     puzzleNumber: answer.puzzleNumber,
     /*
-     * Pairs out of place, NOT the number of cards placed.
+     * PLACES OUT, not the number of cards placed.
      *
      * The whole board is one move, so "guesses spent" was always five and carried no
      * information — which made the distribution degenerate, every result landing in
-     * bucket 5 or bucket 0. The column now holds the number this game is actually about,
-     * the same way FlickGrid's holds squares placed right, and bucketFor reads it
-     * directly. Lower is better here: zero pairs wrong is a perfect order.
+     * bucket 5 or bucket 0. The column holds the number this game is actually about, the
+     * same way FlickGrid's holds squares placed right, and bucketFor reads it directly.
+     * Lower is better: zero places out is a perfect order, twelve is the reverse.
      */
-    guessCount: wrongPairs,
+    guessCount: places,
     // Solved means perfectly ordered. Anything else still scores; see orderScore.
-    solved: wrongPairs === 0,
-    score: orderScore(wrongPairs),
+    solved: places === 0,
+    score: orderScore(places, correct.length),
     guesses,
     types: submitted.types,
   };
