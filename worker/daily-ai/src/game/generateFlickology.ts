@@ -251,6 +251,15 @@ export async function generateFlickologyForDate(date: Date, env: OrderEnv): Prom
     .sort(() => rand() - 0.5)
     .map((e) => ({
       tmdbId: e.tmdbId, type: e.type, title: e.title, year: e.year, posterUrl: e.posterUrl,
+      /*
+       * The measured value on the day's axis, so the board can SHOW the answer once the
+       * round is over rather than only colouring which cards happened to land right.
+       *
+       * This leaks nothing: `order` is already in the payload because the client grades
+       * offline, so the answer has always been client-side. A rating or a runtime is not
+       * derivable from the other fields, which is why the board could not show them.
+       */
+      value: valueOf(e, axis),
     }));
 
   const puzzle: OrderPuzzle = {
