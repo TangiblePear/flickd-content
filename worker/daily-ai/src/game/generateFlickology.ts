@@ -51,8 +51,23 @@ export type Axis = (typeof AXES)[number];
  * Tuned per axis because the units are not comparable: eight years is a era apart, eight
  * tenths of a rating point is the difference between "well liked" and "loved", and eight
  * minutes of runtime is nothing at all.
+ *
+ * ⚠️ Runtime came down from 22 when the axis became films-only, and the reason is worth
+ * keeping: 22 was only ever satisfiable BECAUSE shows were in the mix. A show's runtime is
+ * its episode length, so a 22-minute sitcom beside a 169-minute film cleared the gap
+ * trivially — the axis was propped up by exactly the comparison that made it unfair.
+ *
+ * Films alone cluster hard around 100-130 minutes. Measured over 300 simulated days
+ * against the real pool: at 22 the generator fails to find a set on 288 of them and at 18
+ * on 218, which is an axis that mostly does not publish. At 12 it fails on none, with a
+ * median of 45 attempts out of 400. Stratifying the sample across runtime quantiles was
+ * tried and is WORSE at every gap — it forces picks onto bucket boundaries, which are
+ * adjacent by construction.
  */
-const MIN_GAP: Record<Axis, number> = { year: 7, rating: 6, runtime: 22 };
+const MIN_GAP: Record<Axis, number> = { year: 7, rating: 6, runtime: 12 };
+
+/** PoolEntry.type. 0 = film, 1 = show. */
+const TYPE_MOVIE = 0;
 
 const valueOf = (entry: PoolEntry, axis: Axis): number =>
   axis === "year" ? entry.year : axis === "rating" ? entry.ratingTenths : entry.runtime;
@@ -187,7 +202,21 @@ export async function generateFlickologyForDate(date: Date, env: OrderEnv): Prom
    * unanswerable one. Recognisability is the floor this game needs, so it takes the
    * best-known half of the pool and gets its difficulty from how close the values are.
    */
-  const known = POOL.filter((p) => p.band <= 3 && !recent.has(p.tmdbId) && valueOf(p, axis) > 0);
+  /*
+   * ⚠️ The runtime axis is MOVIES ONLY.
+   *
+   * A show's runtime in the pool is its EPISODE length, so a 22-minute sitcom against a
+   * 169-minute film is not a long-versus-short question — it is a format question wearing
+   * the same units. "Shortest first" has no honest answer across the two, and a player who
+   * knows both perfectly still cannot order them.
+   *
+   * Year and rating are directly comparable between films and shows, so they keep both.
+   */
+  const known = POOL.filter((p) =>
+    p.band <= 3 &&
+    !recent.has(p.tmdbId) &&
+    valueOf(p, axis) > 0 &&
+    (axis !== "runtime" || p.type === TYPE_MOVIE));
   if (known.length < CARDS * 4) {
     console.error(`flickology: not enough usable titles for ${iso} on axis ${axis} (${known.length})`);
     return;
