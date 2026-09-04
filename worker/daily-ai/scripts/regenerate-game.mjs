@@ -11,11 +11,16 @@
 // submission the moment those two disagree. The R2 binding is faked with the filesystem;
 // everything above it is the shipped code.
 //
-// Writes files and uploads NOTHING. Review them, then run the printed commands.
+// ⚠️ It PUBLISHES. The files land in R2 and the day is live when it finishes.
+// Pass --dry-run to write them for review and print the upload commands instead.
 //
-//   node --import ./scripts/resolve-ts.mjs --experimental-strip-types \
-//     scripts/regenerate-game.mjs <flickreel|flickgrid|flickology|link> [YYYY-MM-DD]
+//   npm run regen -- <flickreel|flickgrid|flickology|link> [YYYY-MM-DD] [--dry-run]
 //
+// ⚠️ Through npm, not by hand. `--import ./scripts/resolve-ts.mjs` is an ARGUMENT to
+// node, and a shell that mistakes it for a command hands the .mjs to Windows, which
+// answers with "select an app to open this file". Writing it with a backslash
+// continuation guarantees that, because that is bash syntax and PowerShell runs the
+// second line as its own command.
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync }
   from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -57,12 +62,15 @@ const GAMES = {
   },
 };
 
-const game = process.argv[2];
-const iso = process.argv[3] ?? new Date().toISOString().slice(0, 10);
+// Publishing is the DEFAULT; --dry-run is the way to look first.
+const dryRun = process.argv.includes("--dry-run");
+const args = process.argv.slice(2).filter((a) => a !== "--dry-run");
+const game = args[0];
+const iso = args[1] ?? new Date().toISOString().slice(0, 10);
 const spec = GAMES[game];
 
 if (!spec || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-  console.error("usage: npm run regen -- <" + Object.keys(GAMES).join("|") + "> [YYYY-MM-DD]");
+  console.error("usage: npm run regen -- <" + Object.keys(GAMES).join("|") + "> [YYYY-MM-DD] [--dry-run]");
   process.exit(1);
 }
 
@@ -186,28 +194,58 @@ if (keys.length === 0) {
   process.exit(1);
 }
 
-// ── what to do with it ──────────────────────────────────────────────────────
+// ── publish ─────────────────────────────────────────────────────
 
 console.log(`\nwrote ${keys.length} file(s) under regen/${game}/${iso}/\n`);
 for (const key of keys) console.log(`  ${key}`);
 
-console.log("\nReview them, then upload:\n");
-for (const key of keys) {
-  const rel = join("regen", game, iso, ...key.split("/")).split(/[\\/]/).join("/");
-  console.log(`npx wrangler r2 object put ${BUCKET}/${key} --file ${rel} --content-type application/json`);
+/**
+ * The order these go up in, and it is not cosmetic.
+ *
+ * ⚠️ share-api grades a submission against game-state/answers/<game>/<date>.json.
+ * Putting latest.json up while that file is missing publishes a live puzzle whose CORRECT
+ * answers are all rejected -- the same reason every generator writes the answer before the
+ * payload. So the answer goes first, latest.json goes last, and if anything before it
+ * fails the publish STOPS rather than leaving a day nobody can win.
+ */
+const rank = (key) =>
+  key.startsWith("game-state/answers/") ? 0 : key.endsWith("/latest.json") ? 2 : 1;
+const ordered = [...keys].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+
+if (dryRun) {
+  console.log("\n--dry-run: nothing uploaded. To publish these by hand:\n");
+  for (const key of ordered) {
+    const rel = join("regen", game, iso, ...key.split("/")).split(/[\\/]/).join("/");
+    console.log(`npx wrangler r2 object put ${BUCKET}/${key} --file ${rel} --content-type application/json`);
+  }
+  console.log("\n⚠️  In that order. The answer file must land before latest.json.");
+  process.exit(0);
 }
 
-/*
- * ⚠️ The answer file goes up FIRST, and the order is not cosmetic.
- *
- * share-api grades a submission against game-state/answers/<game>/<date>.json. Publishing
- * latest.json while that file is missing hands players a puzzle whose correct answers are
- * all rejected -- the same reason every generator writes the answer before the payload.
- */
-const answer = keys.find((k) => k.startsWith("game-state/answers/"));
-const latest = keys.find((k) => k.endsWith("/latest.json"));
-if (answer && latest) {
-  console.log(`\n⚠️  Upload ${answer}`);
-  console.log(`    BEFORE ${latest} -- a live puzzle with no answer file rejects every`);
-  console.log("    correct submission.");
+console.log(`\npublishing to ${BUCKET}...\n`);
+const done = [];
+for (const key of ordered) {
+  try {
+    execFileSync(process.platform === "win32" ? "npx.cmd" : "npx",
+      ["wrangler", "r2", "object", "put", `${BUCKET}/${key}`,
+       "--file", pathFor(key), "--content-type", "application/json"],
+      { cwd: root, stdio: "pipe" });
+    done.push(key);
+    console.log(`  put     ${key}`);
+  } catch (err) {
+    console.error(`  FAILED  ${key}`);
+    console.error(String(err.stderr ?? err.message ?? err).trim());
+
+    // Everything ordered after this is the payload or waits behind it, so carrying on
+    // would publish a day the players cannot complete.
+    console.error(`\nStopped after ${done.length} of ${ordered.length} file(s).`);
+    if (!done.some((k) => k.endsWith("/latest.json"))) {
+      console.error("latest.json was NOT published, so the day is unchanged and still shows");
+      console.error("whatever was there before -- nothing is half-live.");
+    }
+    console.error("\nFix the cause and run the same command again; it starts from scratch.");
+    process.exit(1);
+  }
 }
+
+console.log(`\npublished ${game} for ${iso}. It is live.`);
