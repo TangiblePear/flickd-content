@@ -455,19 +455,34 @@ async function verifyGrid(
   if (!spec || spec.rows.length !== 3 || spec.cols.length !== 3) return null;
   if (guesses.length !== 9) return null;
 
-  const index = await titleIndex(env.CONTENT_BUCKET);
-  if (!index) return null;
-
   const types = submitted.types.length === guesses.length ? submitted.types : [];
   let correct = 0;
-  for (let cell = 0; cell < 9; cell++) {
-    const id = guesses[cell];
-    if (id === 0) continue;                       // deliberately left blank
-    const type = types[cell];
-    if (type !== 0 && type !== 1) return null;    // an id without its namespace is not a title
-    const title = index.get(titleKey(type, id));
-    if (!title) continue;                         // not a title we publish; scores nothing
-    if (fitsCell(title, spec, cell)) correct++;
+
+  if (spec.solution && spec.solution.length === 9) {
+    /*
+     * The board is a matching puzzle: the published tray holds exactly one poster that
+     * fits each cell, so a placement is either THE answer or it is not. Comparing ids is
+     * the whole check, and it needs no title index.
+     */
+    for (let cell = 0; cell < 9; cell++) {
+      if (guesses[cell] !== 0 && guesses[cell] === spec.solution[cell]) correct++;
+    }
+  } else {
+    /*
+     * A board archived before the tray existed. Any title satisfying both constraints was
+     * a valid answer then, so it is graded the way it was played.
+     */
+    const index = await titleIndex(env.CONTENT_BUCKET);
+    if (!index) return null;
+    for (let cell = 0; cell < 9; cell++) {
+      const id = guesses[cell];
+      if (id === 0) continue;                       // deliberately left blank
+      const type = types[cell];
+      if (type !== 0 && type !== 1) return null;    // an id without its namespace is not a title
+      const title = index.get(titleKey(type, id));
+      if (!title) continue;                         // not a title we publish; scores nothing
+      if (fitsCell(title, spec, cell)) correct++;
+    }
   }
 
   return {

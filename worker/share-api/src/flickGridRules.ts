@@ -72,7 +72,21 @@ export function satisfies(title: IndexedTitle, c: Constraint): boolean {
   }
 }
 
-export type GridSpec = { rows: Constraint[]; cols: Constraint[] };
+export type GridSpec = {
+  rows: Constraint[];
+  cols: Constraint[];
+  /**
+   * The right poster for each cell, in reading order.
+   *
+   * The board became a matching puzzle: a tray of posters, exactly one of which fits each
+   * cell. Scoring is therefore "is this the right poster", not "does this title satisfy
+   * the constraints" — those agreed while any valid title counted, and stopped agreeing
+   * the moment the pool guaranteed a single right answer per square.
+   *
+   * Optional so an archived board written before the change still verifies the old way.
+   */
+  solution?: number[];
+};
 
 /** Cell index 0..8 in reading order to its pair of constraints. */
 export function constraintsForCell(spec: GridSpec, cell: number): [Constraint, Constraint] | null {
