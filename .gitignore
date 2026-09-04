@@ -8,3 +8,8 @@ node_modules/
 .DS_Store
 dist/
 *.log
+
+# Output of worker/daily-ai/scripts/regenerate-game.mjs: a rebuilt day, staged for review
+# before it is pushed to R2 by hand. Never committed -- it is generated, dated, and the
+# answer half must not sit in a repo alongside the puzzle it answers.
+worker/daily-ai/regen/
