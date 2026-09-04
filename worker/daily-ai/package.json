@@ -8,7 +8,7 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "trigger:once": "wrangler dev --test-scheduled",
-    "test": "node --experimental-strip-types test/clues.test.mjs",
+    "test": "node --experimental-strip-types test/clues.test.mjs && node --experimental-strip-types test/stills.test.mjs",
     "_comment_game": "build-game-data regenerates the answer pool and the guess index from the local master_catalog.json. Run it deliberately, look at the printed band report, commit both outputs.",
     "game:data": "node --max-old-space-size=6144 scripts/build-game-data.mjs"
   },
