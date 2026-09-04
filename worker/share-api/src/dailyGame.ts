@@ -110,6 +110,14 @@ import { titleIndex, titleKey } from "./titleIndex";
  * worker keeps running unchanged against the migrated schema for as long as you like.
  */
 const GAMES = ["flickdl", "flickreel", "flickology", "flickgrid", "link"] as const;
+
+/**
+ * The highest histogram bucket any game produces.
+ *
+ * Flickology's is pairs out of place across five cards, which is 5*4/2 = 10 — the widest
+ * of the five. FlickGrid reaches 9, the guessing games 6.
+ */
+const MAX_BUCKET = 10;
 export type GameId = (typeof GAMES)[number];
 
 /**
@@ -177,8 +185,28 @@ function scoreFor(guessCount: number, solved: boolean): number {
   return i < LEGACY_SCORE_LADDER.length ? LEGACY_SCORE_LADDER[i] : UNSOLVED_SCORE;
 }
 
-/** Histogram bucket: 0 is "did not solve", 1..N is "solved on N". */
-function bucketFor(guessCount: number, solved: boolean): number {
+/**
+ * Which histogram bucket a result falls in.
+ *
+ * ⚠️ Game-aware, because "how everyone did" is a different number per game and one rule
+ * made two of them say nothing at all.
+ *
+ * For the guessing games the shape is Wordle's: 1..N is "solved on N", 0 is "did not
+ * solve". That is exactly right for Flickdl, FlickReel and Flicklink, where a round ends
+ * either in the answer or in running out.
+ *
+ * It was meaningless for the other two, which have no losing state. Every Flickology
+ * round places five cards, so `solved ? guessCount : 0` put every result in bucket 5 or
+ * bucket 0 and the chart said only "perfect / not perfect". FlickGrid was the same with
+ * nine. Both now bucket on their own headline number — pairs out of place, squares placed
+ * right — which is the spread the score is already computed from.
+ *
+ * Note the directions differ, and deliberately: FlickGrid's bucket 9 is a perfect board
+ * and Flickology's bucket 0 is. Each is the number that game says out loud, and the
+ * client labels its own chart.
+ */
+function bucketFor(game: GameId, guessCount: number, solved: boolean): number {
+  if (game === "flickgrid" || game === "flickology") return guessCount;
   return solved ? guessCount : 0;
 }
 
@@ -558,16 +586,15 @@ function verifyOrder(
     date: submitted.date,
     puzzleNumber: answer.puzzleNumber,
     /*
-     * The whole board is one move, so "guesses spent" is the number of cards placed.
+     * Pairs out of place, NOT the number of cards placed.
      *
-     * ⚠️ This makes Flickology's DISTRIBUTION degenerate: bucketFor stores
-     * `solved ? guessCount : 0`, so every result lands in bucket 5 or bucket 0 and the
-     * "how everyone did" chart says only "perfect / not perfect". The SCORE is the
-     * interesting spread and it is what the leaderboard ranks on, so nothing is
-     * mis-ranked -- but a per-game distribution shaped by score rather than guess count
-     * is owed before this game gets a chart of its own.
+     * The whole board is one move, so "guesses spent" was always five and carried no
+     * information — which made the distribution degenerate, every result landing in
+     * bucket 5 or bucket 0. The column now holds the number this game is actually about,
+     * the same way FlickGrid's holds squares placed right, and bucketFor reads it
+     * directly. Lower is better here: zero pairs wrong is a perfect order.
      */
-    guessCount: guesses.length,
+    guessCount: wrongPairs,
     // Solved means perfectly ordered. Anything else still scores; see orderScore.
     solved: wrongPairs === 0,
     score: orderScore(wrongPairs),
@@ -610,7 +637,7 @@ async function recomputeStats(env: DailyGameEnv, userId: string, game: GameId): 
     played++;
     if (r.solved) wins++;
     totalScore += r.score;
-    const bucket = String(bucketFor(r.guess_count, r.solved === 1));
+    const bucket = String(bucketFor(game, r.guess_count, r.solved === 1));
     histogram[bucket] = (histogram[bucket] ?? 0) + 1;
   }
 
@@ -901,7 +928,7 @@ async function bumpAnonDistribution(
   game: GameId,
   v: VerifiedResult,
 ): Promise<void> {
-  const bucket = bucketFor(v.guessCount, v.solved);
+  const bucket = bucketFor(game, v.guessCount, v.solved);
   await env.DB
     .prepare(
       `INSERT INTO daily_game_anon_distribution (game, date, guess_count, count)
@@ -1212,9 +1239,17 @@ export async function readDistribution(env: DailyGameEnv, game: GameId, date: st
 
   // Width follows the LEGACY cap while six-guess clients are still submitting: narrowing
   // it now would silently drop their solves from "how everyone did".
-  const buckets: number[] = new Array(LEGACY_MAX_GUESSES + 1).fill(0);
+  /*
+   * Wide enough for the widest game, not for Flickdl's ladder.
+   *
+   * Flickology buckets on pairs out of place, which for five cards runs 0..10, so an
+   * array sized to the guess ladder silently dropped most of its chart. The guessing
+   * games simply leave the tail as zeros, and OneTakeDistribution already caps its render
+   * at MAX_GUESSES rather than drawing whatever it is handed.
+   */
+  const buckets: number[] = new Array(MAX_BUCKET + 1).fill(0);
   for (const row of [...(signedIn.results ?? []), ...(anonymous.results ?? [])]) {
-    if (row.bucket >= 0 && row.bucket <= LEGACY_MAX_GUESSES) buckets[row.bucket] += row.n;
+    if (row.bucket >= 0 && row.bucket <= MAX_BUCKET) buckets[row.bucket] += row.n;
   }
   return { date, buckets, total: buckets.reduce((a, b) => a + b, 0) };
 }
