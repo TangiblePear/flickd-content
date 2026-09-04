@@ -62,8 +62,7 @@ const iso = process.argv[3] ?? new Date().toISOString().slice(0, 10);
 const spec = GAMES[game];
 
 if (!spec || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
-  console.error("usage: node --import ./scripts/resolve-ts.mjs --experimental-strip-types \\");
-  console.error("         scripts/regenerate-game.mjs <" + Object.keys(GAMES).join("|") + "> [YYYY-MM-DD]");
+  console.error("usage: npm run regen -- <" + Object.keys(GAMES).join("|") + "> [YYYY-MM-DD]");
   process.exit(1);
 }
 

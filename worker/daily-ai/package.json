@@ -10,7 +10,9 @@
     "trigger:once": "wrangler dev --test-scheduled",
     "test": "node --experimental-strip-types test/clues.test.mjs && node --experimental-strip-types test/stills.test.mjs && node --experimental-strip-types test/flickology.test.mjs",
     "_comment_game": "build-game-data regenerates the answer pool and the guess index from the local master_catalog.json. Run it deliberately, look at the printed band report, commit both outputs.",
-    "game:data": "node --max-old-space-size=6144 scripts/build-game-data.mjs"
+    "game:data": "node --max-old-space-size=6144 scripts/build-game-data.mjs",
+    "_comment_regen": "Rebuild ONE game's published day without running the cron: npm run regen -- flickgrid [YYYY-MM-DD]. Writes files for review under regen/ and prints the upload commands; uploads nothing. A script rather than a documented command line because the flags are shell-sensitive -- the resolver path is an ARGUMENT, and a shell that takes it for a command hands the .mjs to Windows to open with an app.",
+    "regen": "node --import ./scripts/resolve-ts.mjs --experimental-strip-types scripts/regenerate-game.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240925.0",
