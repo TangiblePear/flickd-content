@@ -26,8 +26,31 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, wri
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 
 const BUCKET = "flickto-content";
+
+/**
+ * Wrangler, run as JAVASCRIPT rather than through its shell shim.
+ *
+ * ⚠️ Not `npx`, and not `npx.cmd`. Since the CVE-2024-27980 hardening, Node on Windows
+ * REFUSES to spawn a .cmd or .bat without a shell and fails with EINVAL -- and turning the
+ * shell on is worse here, because the arguments are then concatenated unescaped and this
+ * repo lives under a path with a space in it ("Media Remote"), so --file would arrive
+ * split in half.
+ *
+ * Resolving the package and running its bin with the CURRENT node binary sidesteps both:
+ * no shell, no shim, and execFile keeps every argument intact however it is spelled.
+ */
+const wranglerJs = join(
+  dirname(createRequire(import.meta.url).resolve("wrangler/package.json")),
+  "bin", "wrangler.js",
+);
+
+/** Runs wrangler and returns nothing; throws with `status` set when wrangler itself failed. */
+function wrangler(args, cwd) {
+  return execFileSync(process.execPath, [wranglerJs, ...args], { cwd, stdio: "pipe" });
+}
 
 const GAMES = {
   flickreel: {
@@ -161,17 +184,25 @@ for (const key of spec.pull) {
   const path = pathFor(key);
   mkdirSync(dirname(path), { recursive: true });
   try {
-    // npx.cmd rather than shell:true -- Node deprecated passing args through a shell
-    // because they are concatenated unescaped, and a bucket key is not something to
-    // hand to a shell unquoted.
-    execFileSync(process.platform === "win32" ? "npx.cmd" : "npx",
-      ["wrangler", "r2", "object", "get", `${BUCKET}/${key}`, "--file", path],
-      { cwd: root, stdio: "pipe" });
+    wrangler(["r2", "object", "get", `${BUCKET}/${key}`, "--file", path], root);
     console.log(`  pulled  ${key}`);
-  } catch {
+  } catch (err) {
+    if (existsSync(path)) rmSync(path);
+    /*
+     * ⚠️ A missing OBJECT and a wrangler that never ran are not the same thing, and this
+     * catch used to report both as "absent". When the spawn itself was failing, every pull
+     * silently reported absent and the generator ran with no no-repeat memory at all --
+     * which looks exactly like a normal first run.
+     *
+     * `status` is set only when wrangler ran and exited non-zero. Anything else never
+     * started, and guessing past that would publish a day built on state we could not read.
+     */
+    if (err.status === undefined) {
+      console.error(`  ERROR   could not run wrangler: ${err.code ?? err.message}`);
+      process.exit(1);
+    }
     // Absent is normal: latest.json is what you just deleted, and a recent list may never
     // have been written. The generator treats both as "nothing published yet".
-    if (existsSync(path)) rmSync(path);
     console.log(`  absent  ${key}`);
   }
 }
@@ -226,10 +257,8 @@ console.log(`\npublishing to ${BUCKET}...\n`);
 const done = [];
 for (const key of ordered) {
   try {
-    execFileSync(process.platform === "win32" ? "npx.cmd" : "npx",
-      ["wrangler", "r2", "object", "put", `${BUCKET}/${key}`,
-       "--file", pathFor(key), "--content-type", "application/json"],
-      { cwd: root, stdio: "pipe" });
+    wrangler(["r2", "object", "put", `${BUCKET}/${key}`,
+              "--file", pathFor(key), "--content-type", "application/json"], root);
     done.push(key);
     console.log(`  put     ${key}`);
   } catch (err) {
