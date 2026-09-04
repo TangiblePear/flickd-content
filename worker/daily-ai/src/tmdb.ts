@@ -42,3 +42,35 @@ export async function resolveTmdb(
     posterUrl: hit.poster_path ? `${POSTER_BASE}${hit.poster_path}` : null,
   };
 }
+
+/**
+ * One number about one title, fetched only for the titles a puzzle has already shortlisted.
+ *
+ * Flickology's episode-count and box-office axes need a figure that is not in the pool,
+ * and the pool is 1,600 titles. Enriching all of them would be 1,600 calls a day forever
+ * to feed two axes that come round once every five days and use five titles each. So the
+ * generator picks its candidates first and asks about those — a few dozen calls, on the
+ * days it actually needs them.
+ *
+ * ⚠️ Returns null on anything but a clean answer, INCLUDING a zero. TMDB stores 0 for
+ * revenue it has no figure for, which is most older, foreign and streaming-first films —
+ * not a small box office, an absent one. Ordering those would be a coin toss dressed as a
+ * fact, so a title without a real number is dropped from the candidate set rather than
+ * ranked at the bottom.
+ */
+export async function fetchTitleFigure(
+  apiKey: string,
+  tmdbId: number,
+  field: "episodes" | "revenue",
+): Promise<number | null> {
+  const path = field === "episodes" ? `tv/${tmdbId}` : `movie/${tmdbId}`;
+  try {
+    const r = await fetch(`${TMDB_BASE}/${path}?api_key=${apiKey}`);
+    if (!r.ok) return null;
+    const json = (await r.json()) as { number_of_episodes?: number; revenue?: number };
+    const value = field === "episodes" ? json.number_of_episodes : json.revenue;
+    return typeof value === "number" && value > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
