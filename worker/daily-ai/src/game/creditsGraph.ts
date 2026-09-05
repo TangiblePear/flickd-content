@@ -17,18 +17,24 @@
  *
  * ## What a "link" is
  *
- * Two titles link if they share ANY credited person -- cast or crew. A shared director is
- * as good a connection as a shared lead, and refusing crew would throw away most of what
- * makes these puzzles satisfying to solve.
+ * Two titles link if they share a CAST member. Crew used to count too, and the argument was
+ * that a shared director is as good a connection as a shared lead -- but a player looking
+ * at two films thinks about who was IN them, and a route that turned on a shared second-unit
+ * gaffer could not be reasoned about, only stumbled into.
+ *
+ * ⚠️ This MUST match peopleFor in flickto-web/lib/games/link.ts, which is what validates a
+ * move. `par` is published as a distance this graph has FOUND, so a graph that counts more
+ * kinds of link than the client accepts ships a par that no legal route can reach -- the
+ * day would ask for three and refuse every three-link answer. Nothing would error; the
+ * puzzle would just be quietly impossible.
  */
 
 const DETAIL_BASE = "https://data.flickto.app";
 
 type TraktPerson = { ids?: { trakt?: number } };
 type CastMember = { person?: TraktPerson };
-type CrewMember = { person?: TraktPerson };
 type DetailPayload = {
-  trakt_people?: { cast?: CastMember[]; crew?: Record<string, CrewMember[]> };
+  trakt_people?: { cast?: CastMember[] };
 };
 
 export type GraphNode = { tmdbId: number; type: number; title: string };
@@ -40,9 +46,9 @@ export const SAMPLE_SIZE = 120;
  * Credits are capped per title.
  *
  * A long-running show can credit hundreds of people, and a single such title would
- * otherwise link to almost everything through some third assistant editor -- which makes
- * for a graph where every distance is two and no puzzle is interesting. Principal cast and
- * main crew is what people actually reason about.
+ * otherwise link to almost everything through some bit-part player -- which makes for a
+ * graph where every distance is two and no puzzle is interesting. Principal cast is what
+ * people actually reason about, and Trakt returns cast in billing order.
  */
 const MAX_PEOPLE = 40;
 
@@ -52,10 +58,7 @@ async function peopleFor(tmdbId: number, type: number): Promise<number[] | null>
     const res = await fetch(url, { cf: { cacheTtl: 86_400, cacheEverything: true } });
     if (!res.ok) return null;
     const payload = (await res.json()) as DetailPayload;
-    const members: Array<{ person?: TraktPerson }> = [
-      ...(payload.trakt_people?.cast ?? []),
-      ...Object.values(payload.trakt_people?.crew ?? {}).flat(),
-    ];
+    const members: Array<{ person?: TraktPerson }> = payload.trakt_people?.cast ?? [];
     const ids = new Set<number>();
     for (const m of members) {
       const id = m.person?.ids?.trakt;
