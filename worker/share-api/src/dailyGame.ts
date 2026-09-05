@@ -142,9 +142,13 @@ const DEFAULT_GAME: GameId = "flickdl";
  */
 const MAX_PICKS: Record<GameId, number> = {
   flickdl: LEGACY_MAX_GUESSES,
-  reel: 6,
-  order: 5,
-  grid: 9,
+  // ⚠️ Keyed by the GameId, which is `flickreel` and not `reel`. Three of these were
+  // spelled short, so `MAX_PICKS[game]` was `undefined` for them and `length > undefined`
+  // is false -- the bound existed and bounded nothing. `Record<GameId, number>` should
+  // have caught it and did not, because tsc does not run clean on this worker.
+  flickreel: 6,
+  flickology: 5,
+  flickgrid: 9,
   // The whole CHAIN, endpoints included: Flicklink's move limit is 8 and both the start
   // and the finish travel in the same list. A cap of 8 would reject a full-length route
   // for being exactly as long as it was allowed to be -- and parseBody rejects the whole
@@ -576,16 +580,30 @@ export function maxPlacesOut(cards: number): number {
 }
 
 /**
- * The share of the board you did NOT get wrong, as a percentage.
+ * How many STARS the board earned, out of six.
  *
  * ⚠️ Places out is always EVEN for any ordering -- the distances a permutation moves
- * cards must cancel out -- so a five-card board has exactly seven possible scores:
- * 100, 83, 67, 50, 33, 17, 0.
+ * cards must cancel out -- so a five-card board has exactly SEVEN reachable results, and
+ * this maps them one-to-one onto 6..0 stars: 0 out is six, 2 out is five, and so on down
+ * to the exact reverse at nothing.
+ *
+ * It used to answer a PERCENTAGE off the same line, which produced 100/83/67/50/33/17/0.
+ * Those were correct and read as arbitrary -- a player who saw 67 had no way to tell it
+ * was the third of seven rungs rather than a fraction of something. Six stars says the
+ * same thing in the unit the board is actually drawn in.
+ *
+ * ⚠️ This is the STORED score, so it is also what the friends list and the per-game
+ * leaderboard rank on. That is safe because every board comparison is per-game -- see
+ * boardQuery, which filters on `game` in both shapes -- but rows written before this
+ * carry the old 0..100 values and would tower over new ones on the all-time board.
+ * Migration 0055 rescales them.
  */
+export const ORDER_STARS = 6;
+
 export function orderScore(places: number, cards: number): number {
   const worst = maxPlacesOut(cards);
-  if (worst <= 0) return 100;
-  return Math.max(0, Math.round(100 * (1 - places / worst)));
+  if (worst <= 0) return ORDER_STARS;
+  return Math.max(0, Math.round(ORDER_STARS * (1 - places / worst)));
 }
 
 /**
@@ -1254,11 +1272,25 @@ export async function readFriendsDay(
 
 /** How everyone did, signed-in and anonymous halves summed. */
 export async function readDistribution(env: DailyGameEnv, game: GameId, date: string) {
+  /*
+   * ⚠️ The signed-in half groups by the RAW columns and buckets in JS, through bucketFor.
+   *
+   * It used to bucket in SQL, as `CASE WHEN solved = 1 THEN guess_count ELSE 0 END` --
+   * which is the guessing games' rule written out by hand, applied to all five. FlickGrid
+   * and Flickology do not use that rule: they bucket on their headline number regardless
+   * of `solved`, so every one of their signed-in rows collapsed into bucket 0. The chart
+   * highlighted the right bar and drew it EMPTY, because the player's own result had been
+   * counted somewhere else. The anonymous half never had the bug -- it calls bucketFor.
+   *
+   * Grouping on (guess_count, solved) is at most a couple of dozen rows for a day, so
+   * bucketing them here costs nothing and cannot drift from bucketFor again.
+   */
   const [signedIn, anonymous] = await Promise.all([
     env.DB.prepare(
-      `SELECT (CASE WHEN solved = 1 THEN guess_count ELSE 0 END) AS bucket, COUNT(*) AS n
-         FROM daily_game_results WHERE game = ?2 AND date = ?1 GROUP BY bucket`,
-    ).bind(date, game).all<{ bucket: number; n: number }>(),
+      `SELECT guess_count, solved, COUNT(*) AS n
+         FROM daily_game_results WHERE game = ?2 AND date = ?1
+        GROUP BY guess_count, solved`,
+    ).bind(date, game).all<{ guess_count: number; solved: number; n: number }>(),
     env.DB.prepare(
       "SELECT guess_count AS bucket, count AS n FROM daily_game_anon_distribution WHERE game = ?2 AND date = ?1",
     ).bind(date, game).all<{ bucket: number; n: number }>(),
@@ -1275,7 +1307,14 @@ export async function readDistribution(env: DailyGameEnv, game: GameId, date: st
    * at MAX_GUESSES rather than drawing whatever it is handed.
    */
   const buckets: number[] = new Array(MAX_BUCKET + 1).fill(0);
-  for (const row of [...(signedIn.results ?? []), ...(anonymous.results ?? [])]) {
+  const counted: Array<{ bucket: number; n: number }> = [
+    ...(signedIn.results ?? []).map((r) => ({
+      bucket: bucketFor(game, r.guess_count, r.solved === 1),
+      n: r.n,
+    })),
+    ...(anonymous.results ?? []),
+  ];
+  for (const row of counted) {
     if (row.bucket >= 0 && row.bucket <= MAX_BUCKET) buckets[row.bucket] += row.n;
   }
   return { date, buckets, total: buckets.reduce((a, b) => a + b, 0) };

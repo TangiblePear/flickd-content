@@ -101,11 +101,24 @@ describe("places out measures distance, not misplacement", () => {
 
 describe("the score falls off gently, and there is no losing", () => {
   it("pays full marks for a perfect order", () => {
-    expect(orderScore(0, 5)).toBe(100);
+    expect(orderScore(0, 5)).toBe(6);
   });
 
   it("still pays well for the cheapest mistake", () => {
-    expect(orderScore(2, 5)).toBe(83);
+    expect(orderScore(2, 5)).toBe(5);
+  });
+
+  /*
+   * ⚠️ The seven rungs, one at a time.
+   *
+   * The scale is six stars precisely BECAUSE there are seven reachable boards, so this is
+   * the assertion that the fit is exact rather than approximately right: every even
+   * places-out value takes its own star, and no two share one. A curve that rounded two
+   * rungs onto the same star would still satisfy every other test in this file.
+   */
+  it("gives each of the seven reachable boards its own star", () => {
+    expect([0, 2, 4, 6, 8, 10, 12].map((places) => orderScore(places, 5)))
+      .toEqual([6, 5, 4, 3, 2, 1, 0]);
   });
 
   it("never goes below nothing", () => {
@@ -159,10 +172,11 @@ describe("the score falls off gently, and there is no losing", () => {
     expect(checked).toBe(240);
   });
 
-  it("scores the board that prompted this change at fifty", () => {
+  it("scores the board that prompted this change at three of six", () => {
     // Shrinking, Luca, John Wick 2, Gone Girl, The Last Kingdom -- where The Last Kingdom
     // belongs second. One card three places from home, dragging three others one place.
+    // Six of the twelve places available, so the middle rung: three stars.
     expect(placesOut([10, 30, 40, 50, 20], CORRECT)).toBe(6);
-    expect(orderScore(6, 5)).toBe(50);
+    expect(orderScore(6, 5)).toBe(3);
   });
 });
